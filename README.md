@@ -1,3 +1,26 @@
+# 使用方法
+```sh
+git fetch origin
+git switch --track origin/BRANCH_NAME
+git pull origin main
+git checkout BRANCH_NAME
+git pull origin BRANCH_NAME
+python test.py
+```
+
+# 开发方法
+1.
+```sh
+git fetch origin
+git pull origin main
+git checkout BRANCH_NAME
+git pull origin BRANCH_NAME
+python test.py
+```
+
+# 分支
+main 
+
 # pgvector
 
 Open-source vector similarity search for Postgres
