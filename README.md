@@ -1,8 +1,6 @@
 # 使用方法
 ```sh
 git fetch origin
-git switch --track origin/BRANCH_NAME
-git pull origin main
 git checkout BRANCH_NAME
 git pull origin BRANCH_NAME
 python test.py
@@ -12,12 +10,17 @@ python test.py
 1.
 ```sh
 git fetch origin
-git pull origin main
-git checkout BRANCH_NAME
-git pull origin BRANCH_NAME
-python test.py
+git checkout -b NEW_BRANCH_NAME
 ```
+2.开发并保存
 
+3.
+```sh
+git add .
+git commit -m msg
+git push --set-upstream origin NEW_BRANCH_NAME
+```
+4.切换回main分支更新readme.md
 # 分支
 main 
 
