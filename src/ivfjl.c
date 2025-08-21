@@ -11,6 +11,10 @@
 #include "utils/guc.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
+#include "ivfjl.h"
+#include <math.h>
+#include <string.h>
+#include <stdio.h>
 
 #if PG_VERSION_NUM < 150000
 #define MarkGUCPrefixReserved(x) EmitWarningsOnPlaceholders(x)
@@ -28,45 +32,29 @@ static const struct config_enum_entry ivfflat_iterative_scan_options[] = {
 };
 
 /*
- * Initialize index options and variables
+ * Initialize IVFJL
  */
 void
-IvfflatInit(void)
+IvfjlInit(void)
 {
-	ivfflat_relopt_kind = add_reloption_kind();
-	add_int_reloption(ivfflat_relopt_kind, "lists", "Number of inverted lists",
-					  IVFFLAT_DEFAULT_LISTS, IVFFLAT_MIN_LISTS, IVFFLAT_MAX_LISTS, AccessExclusiveLock);
-
-	DefineCustomIntVariable("ivfflat.probes", "Sets the number of probes",
-							"Valid range is 1..lists.", &ivfflat_probes,
-							IVFFLAT_DEFAULT_PROBES, IVFFLAT_MIN_LISTS, IVFFLAT_MAX_LISTS, PGC_USERSET, 0, NULL, NULL, NULL);
-
-	DefineCustomEnumVariable("ivfflat.iterative_scan", "Sets the mode for iterative scans",
-							 NULL, &ivfflat_iterative_scan,
-							 IVFFLAT_ITERATIVE_SCAN_OFF, ivfflat_iterative_scan_options, PGC_USERSET, 0, NULL, NULL, NULL);
-
-	/* If this is less than probes, probes is used */
-	DefineCustomIntVariable("ivfflat.max_probes", "Sets the max number of probes for iterative scans",
-							NULL, &ivfflat_max_probes,
-							IVFFLAT_MAX_LISTS, IVFFLAT_MIN_LISTS, IVFFLAT_MAX_LISTS, PGC_USERSET, 0, NULL, NULL, NULL);
-
-	MarkGUCPrefixReserved("ivfflat");
+	/* Similar to IvfflatInit but for IVFJL - can be extended later */
+	/* Currently reuses ivfflat configurations */
 }
 
 /*
- * Get the name of index build phase
+ * Get build phase name for IVFJL
  */
 static char *
-ivfflatbuildphasename(int64 phasenum)
+ivfjlbuildphasename(int64 phasenum)
 {
 	switch (phasenum)
 	{
 		case PROGRESS_CREATEIDX_SUBPHASE_INITIALIZE:
 			return "initializing";
 		case PROGRESS_IVFFLAT_PHASE_KMEANS:
-			return "performing k-means";
+			return "performing k-means clustering";
 		case PROGRESS_IVFFLAT_PHASE_ASSIGN:
-			return "assigning tuples";
+			return "assigning tuples to lists";
 		case PROGRESS_IVFFLAT_PHASE_LOAD:
 			return "loading tuples";
 		default:
@@ -75,118 +63,73 @@ ivfflatbuildphasename(int64 phasenum)
 }
 
 /*
- * Estimate the cost of an index scan
+ * Estimate IVFJL scan cost
  */
 static void
-ivfflatcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
-					Cost *indexStartupCost, Cost *indexTotalCost,
-					Selectivity *indexSelectivity, double *indexCorrelation,
-					double *indexPages)
+ivfjlcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
+				  Cost *indexStartupCost, Cost *indexTotalCost,
+				  Selectivity *indexSelectivity, double *indexCorrelation
+#if PG_VERSION_NUM >= 100000
+				  , double *indexPages
+#endif
+)
 {
+	/* Reuse ivfflat cost estimation for now */
+	/* TODO: Implement IVFJL-specific cost estimation considering JL projection overhead */
+	
 	GenericCosts costs;
 	int			lists;
 	double		ratio;
-	double		sequentialRatio = 0.5;
-	double		startupPages;
-	double		spc_seq_page_cost;
-	Relation	index;
+	Relation	indexRel;
 
 	/* Never use index without order */
-	if (path->indexorderbys == NULL)
+	if (path->pathkeys == NIL)
 	{
 		*indexStartupCost = get_float8_infinity();
 		*indexTotalCost = get_float8_infinity();
 		*indexSelectivity = 0;
 		*indexCorrelation = 0;
+#if PG_VERSION_NUM >= 100000
 		*indexPages = 0;
-#if PG_VERSION_NUM >= 180000
-		/* See "On disable_cost" thread on pgsql-hackers */
-		path->path.disabled_nodes = 2;
 #endif
 		return;
 	}
 
 	MemSet(&costs, 0, sizeof(costs));
-
 	genericcostestimate(root, path, loop_count, &costs);
 
-	index = index_open(path->indexinfo->indexoid, NoLock);
-	IvfflatGetMetaPageInfo(index, &lists, NULL);
-	index_close(index, NoLock);
+	indexRel = index_open(path->indexinfo->indexoid, NoLock);
+	lists = IvfflatGetLists(indexRel);
+	index_close(indexRel, NoLock);
 
-	/* Get the ratio of lists that we need to visit */
-	ratio = ((double) ivfflat_probes) / lists;
+	/* Adjust for IVFJL specifics */
+	ratio = (double) ivfflat_probes / lists;
 	if (ratio > 1.0)
 		ratio = 1.0;
 
-	get_tablespace_page_costs(path->indexinfo->reltablespace, NULL, &spc_seq_page_cost);
-
-	/* Change some page cost from random to sequential */
-	costs.indexTotalCost -= sequentialRatio * costs.numIndexPages * (costs.spc_random_page_cost - spc_seq_page_cost);
-
-	/* Startup cost is cost before returning the first row */
-	costs.indexStartupCost = costs.indexTotalCost * ratio;
-
-	/* Adjust cost if needed since TOAST not included in seq scan cost */
-	startupPages = costs.numIndexPages * ratio;
-	if (startupPages > path->indexinfo->rel->pages && ratio < 0.5)
-	{
-		/* Change rest of page cost from random to sequential */
-		costs.indexStartupCost -= (1 - sequentialRatio) * startupPages * (costs.spc_random_page_cost - spc_seq_page_cost);
-
-		/* Remove cost of extra pages */
-		costs.indexStartupCost -= (startupPages - path->indexinfo->rel->pages) * spc_seq_page_cost;
-	}
-
 	*indexStartupCost = costs.indexStartupCost;
-	*indexTotalCost = costs.indexTotalCost;
+	*indexTotalCost = costs.indexStartupCost + ratio * costs.indexTotalCost;
 	*indexSelectivity = costs.indexSelectivity;
 	*indexCorrelation = costs.indexCorrelation;
+#if PG_VERSION_NUM >= 100000
 	*indexPages = costs.numIndexPages;
+#endif
 }
 
 /*
- * Parse and validate the reloptions
+ * IVFJL handler function
  */
-static bytea *
-ivfflatoptions(Datum reloptions, bool validate)
-{
-	static const relopt_parse_elt tab[] = {
-		{"lists", RELOPT_TYPE_INT, offsetof(IvfflatOptions, lists)},
-	};
-
-	return (bytea *) build_reloptions(reloptions, validate,
-									  ivfflat_relopt_kind,
-									  sizeof(IvfflatOptions),
-									  tab, lengthof(tab));
-}
-
-/*
- * Validate catalog entries for the specified operator class
- */
-static bool
-ivfflatvalidate(Oid opclassoid)
-{
-	return true;
-}
-
-/*
- * Define index handler
- *
- * See https://www.postgresql.org/docs/current/index-api.html
- */
-FUNCTION_PREFIX PG_FUNCTION_INFO_V1(ivfflathandler);
+PG_FUNCTION_INFO_V1(ivfjlhandler);
 Datum
-ivfflathandler(PG_FUNCTION_ARGS)
+ivfjlhandler(PG_FUNCTION_ARGS)
 {
 	IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
 	amroutine->amstrategies = 0;
-	amroutine->amsupport = 5;
-	amroutine->amoptsprocnum = 0;
+	amroutine->amsupport = 5;  /* Same as ivfflat */
 	amroutine->amcanorder = false;
 	amroutine->amcanorderbyop = true;
-	amroutine->amcanbackward = false;	/* can change direction mid-scan */
+	amroutine->amcanbackward = false;
 	amroutine->amcanunique = false;
 	amroutine->amcanmulticol = false;
 	amroutine->amoptionalkey = true;
@@ -196,47 +139,151 @@ ivfflathandler(PG_FUNCTION_ARGS)
 	amroutine->amclusterable = false;
 	amroutine->ampredlocks = false;
 	amroutine->amcanparallel = false;
-#if PG_VERSION_NUM >= 170000
-	amroutine->amcanbuildparallel = true;
-#endif
 	amroutine->amcaninclude = false;
-	amroutine->amusemaintenanceworkmem = false; /* not used during VACUUM */
-#if PG_VERSION_NUM >= 160000
-	amroutine->amsummarizing = false;
+#if PG_VERSION_NUM >= 130000
+	amroutine->amusemaintenanceworkmem = false;
 #endif
 	amroutine->amparallelvacuumoptions = VACUUM_OPTION_PARALLEL_BULKDEL;
 	amroutine->amkeytype = InvalidOid;
 
 	/* Interface functions */
-	amroutine->ambuild = ivfflatbuild;
-	amroutine->ambuildempty = ivfflatbuildempty;
-	amroutine->aminsert = ivfflatinsert;
-#if PG_VERSION_NUM >= 170000
-	amroutine->aminsertcleanup = NULL;
-#endif
-	amroutine->ambulkdelete = ivfflatbulkdelete;
-	amroutine->amvacuumcleanup = ivfflatvacuumcleanup;
-	amroutine->amcanreturn = NULL;	/* tuple not included in heapsort */
-	amroutine->amcostestimate = ivfflatcostestimate;
-	amroutine->amoptions = ivfflatoptions;
-	amroutine->amproperty = NULL;	/* TODO AMPROP_DISTANCE_ORDERABLE */
-	amroutine->ambuildphasename = ivfflatbuildphasename;
-	amroutine->amvalidate = ivfflatvalidate;
+	amroutine->ambuild = ivfjlbuild;
+	amroutine->ambuildempty = ivfjlbuildempty;
+	amroutine->aminsert = ivfjlinsert;
+	amroutine->ambulkdelete = ivfbulkdelete;
+	amroutine->amvacuumcleanup = ivfvacuumcleanup;
+	amroutine->amcanreturn = NULL;
+	amroutine->amcostestimate = ivfjlcostestimate;
+	amroutine->amoptions = ivfflat_options;  /* Reuse ivfflat options */
+	amroutine->amproperty = NULL;
+	amroutine->ambuildphasename = ivfjlbuildphasename;
+	amroutine->amvalidate = ivfflat_validate;  /* Reuse ivfflat validation */
 #if PG_VERSION_NUM >= 140000
 	amroutine->amadjustmembers = NULL;
 #endif
-	amroutine->ambeginscan = ivfflatbeginscan;
-	amroutine->amrescan = ivfflatrescan;
-	amroutine->amgettuple = ivfflatgettuple;
+	amroutine->ambeginscan = ivfjlbeginscan;
+	amroutine->amrescan = ivfrescan;
+	amroutine->amgettuple = NULL;
 	amroutine->amgetbitmap = NULL;
-	amroutine->amendscan = ivfflatendscan;
+	amroutine->amendscan = ivfendscan;
 	amroutine->ammarkpos = NULL;
 	amroutine->amrestrpos = NULL;
-
-	/* Interface functions to support parallel index scans */
 	amroutine->amestimateparallelscan = NULL;
 	amroutine->aminitparallelscan = NULL;
 	amroutine->amparallelrescan = NULL;
 
 	PG_RETURN_POINTER(amroutine);
 }
+
+// 生成 JL 投影矩阵
+void GenerateJLProjection(JLProjection *proj, int original_dim, int reduced_dim, MemoryContext ctx) {
+    proj->original_dim = original_dim;
+    proj->reduced_dim = reduced_dim;
+    proj->matrix = (float *) MemoryContextAlloc(ctx, sizeof(float) * reduced_dim * original_dim);
+    for (int i = 0; i < reduced_dim * original_dim; i++) {
+        // ±1/sqrt(reduced_dim) 随机投影
+        proj->matrix[i] = ((RandomDouble() > 0.5) ? 1.0f : -1.0f) / sqrtf((float)reduced_dim);
+    }
+}
+
+// JL 投影
+void JLProjectVector(const JLProjection *proj, const float *src, float *dst) {
+    for (int i = 0; i < proj->reduced_dim; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < proj->original_dim; j++) {
+            sum += proj->matrix[i * proj->original_dim + j] * src[j];
+        }
+        dst[i] = sum;
+    }
+}
+
+// 释放 JL 投影矩阵
+void FreeJLProjection(JLProjection *proj) {
+    if (proj->matrix) {
+        pfree(proj->matrix);
+        proj->matrix = NULL;
+    }
+}
+
+// JL 投影矩阵序列化到元数据页
+void WriteJLToMetaPage(Page page, JLProjection *proj) {
+    char *ptr = (char *)PageGetContents(page) + sizeof(IvfflatMetaPageData);
+    memcpy(ptr, &proj->original_dim, sizeof(int));
+    memcpy(ptr + sizeof(int), &proj->reduced_dim, sizeof(int));
+    memcpy(ptr + 2 * sizeof(int), proj->matrix, sizeof(float) * proj->reduced_dim * proj->original_dim);
+}
+
+// JL 投影矩阵反序列化
+void ReadJLFromMetaPage(Page page, JLProjection *proj, MemoryContext ctx) {
+    char *ptr = (char *)PageGetContents(page) + sizeof(IvfflatMetaPageData);
+    memcpy(&proj->original_dim, ptr, sizeof(int));
+    memcpy(&proj->reduced_dim, ptr + sizeof(int), sizeof(int));
+    proj->matrix = (float *)MemoryContextAlloc(ctx, sizeof(float) * proj->reduced_dim * proj->original_dim);
+    memcpy(proj->matrix, ptr + 2 * sizeof(int), sizeof(float) * proj->reduced_dim * proj->original_dim);
+}
+
+/*
+ * C++接口函数：直接创建IVFJL索引
+ * 这个函数可以从C++代码中直接调用来创建IVFJL索引
+ */
+bool CreateIvfjlIndex(const char* table_name, const char* index_name, const char* column_name, int lists)
+{
+    StringInfoData str;
+    const char *sql;
+    int ret;
+    
+    if (!table_name || !index_name || !column_name)
+        return false;
+        
+    if (lists < IVFFLAT_MIN_LISTS || lists > IVFFLAT_MAX_LISTS)
+        lists = IVFFLAT_DEFAULT_LISTS;
+    
+    /* 构建CREATE INDEX SQL语句 */
+    initStringInfo(&str);
+    appendStringInfo(&str,
+        "CREATE INDEX %s ON %s USING ivfjl (%s vector_l2_ops) WITH (lists = %d)",
+        index_name, table_name, column_name, lists);
+    
+    sql = str.data;
+    
+    /* 执行SQL语句 */
+    PG_TRY();
+    {
+        /* 开始事务 */
+        if (!IsTransactionState())
+            StartTransactionCommand();
+            
+        /* 执行SQL */
+        ret = SPI_connect();
+        if (ret != SPI_OK_CONNECT)
+        {
+            pfree(str.data);
+            return false;
+        }
+        
+        ret = SPI_execute(sql, false, 0);
+        if (ret != SPI_OK_UTILITY)
+        {
+            SPI_finish();
+            pfree(str.data);
+            return false;
+        }
+        
+        SPI_finish();
+        
+        /* 提交事务 */
+        CommitTransactionCommand();
+        
+        pfree(str.data);
+        return true;
+    }
+    PG_CATCH();
+    {
+        /* 回滚事务 */
+        AbortCurrentTransaction();
+        pfree(str.data);
+        return false;
+    }
+    PG_END_TRY();
+}
+

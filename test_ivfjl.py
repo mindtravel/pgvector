@@ -3,11 +3,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 import io
+import json
+import argparse
 from sklearn.random_projection import johnson_lindenstrauss_min_dim
 from sklearn.random_projection import GaussianRandomProjection
 from sklearn.preprocessing import StandardScaler
 
-# 数据库连接信息
 DB_PARAMS = {
     'host': 'localhost',
     'port': '5432',
@@ -16,10 +17,10 @@ DB_PARAMS = {
     'password': '1'
 }
 
-def load_data(file_path):
+def load_data(file_path, dim):
     with open(file_path, 'rb') as f:
         data = np.fromfile(f, dtype=np.int32)
-        data = data.reshape(-1, 129)
+        data = data.reshape(-1, dim)
         data = data[:, 1:].astype(float)
     return data
 
@@ -76,6 +77,12 @@ def create_ivfjl_index(conn, n_lists):
         if not table_exists:
             raise Exception("Table sift_data does not exist. Please load data first.")
         
+        # 增加维护工作内存
+        cur.execute("SET maintenance_work_mem = '1GB';")
+        
+        # 增加并行工作进程数
+        cur.execute("SET max_parallel_workers_per_gather = 20;")
+        
         # 创建索引
         cur.execute(f"""
             CREATE INDEX ON sift_data 
@@ -92,12 +99,13 @@ def create_ivfjl_index(conn, n_lists):
     finally:
         cur.close()
 
-def test_knn_search(conn, query_vectors, k, nprob):
+def test_knn_search(conn, query_vectors, groundtruth, k, nprob):
     cur = conn.cursor()
-    recall_sum = 0
-    total_time = 0
+    recall_sum = 0.0
+    total_time = 0.0
     try:
-        for query in query_vectors:
+        sum_recall = 0
+        for i, query in enumerate(query_vectors):
             vector_str = '[' + ','.join(f"{x:.6f}" for x in query) + ']'
             
             start_time = time.time()
@@ -106,11 +114,13 @@ def test_knn_search(conn, query_vectors, k, nprob):
                 f"SELECT id FROM sift_data ORDER BY vector <-> %s::vector LIMIT {k};",
                 (vector_str,)
             )
-            results = cur.fetchall()
+            results = [row[0]-1 for row in cur.fetchall()]
             end_time = time.time()
             total_time += end_time - start_time
-            recall_sum += 1
-        avg_recall = recall_sum / len(query_vectors)
+            intersection = len(set(results) & set(groundtruth[i]))
+            sum_recall += intersection / k
+
+        avg_recall = sum_recall / len(query_vectors)
         throughput = len(query_vectors) / total_time
         return avg_recall, throughput
     except psycopg2.Error as e:
@@ -120,20 +130,26 @@ def test_knn_search(conn, query_vectors, k, nprob):
         cur.close()
 
 def main():
+    # 添加命令行参数解析
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--max_parallel_workers_per_gather', type=int, default=20,
+                      help='Maximum number of parallel workers per gather')
+    args = parser.parse_args()
+
     try:
         # 加载数据集
         print("Loading datasets...")
-        database = load_data('./sift/sift_base.fvecs')
-        queries = load_data('./sift/sift_query.fvecs')
+        database = load_data('../sift/sift_base.fvecs',129)
+        queries = load_data('../sift/sift_query.fvecs',129)
+        groundtruth = load_data("../sift/sift_groundtruth.ivecs",101)
         print("Datasets loaded successfully")
         
         # 计算JL降维后的维度
         n_samples = len(database)
         eps = 0.1  # 误差容忍度
-        # 确保降维后的维度小于原始维度
         reduced_dim = min(
             johnson_lindenstrauss_min_dim(n_samples, eps=eps),
-            database.shape[1] // 2  # 降维到原始维度的一半
+            database.shape[1] // 2
         )
         print(f"Original dimension: {database.shape[1]}")
         print(f"Reduced dimension: {reduced_dim}")
@@ -169,29 +185,30 @@ def main():
         n_lists = 100
         create_ivfjl_index(conn, n_lists)
         
+        # 设置并行工作进程数
+        cur = conn.cursor()
+        cur.execute(f"SET max_parallel_workers_per_gather = {args.max_parallel_workers_per_gather};")
+        conn.commit()
+        cur.close()
+        
         # 测试不同nprob参数
         print("Testing performance...")
-        nprob_values = [1, 5, 10, 20, 50]
-        recalls = []
-        throughputs = []
+        nprob_values = [1, 5]
+        # nprob_values = [1, 5, 10, 20, 50]
+        results = []
         
         for nprob in nprob_values:
             print(f"Testing with nprob = {nprob}")
-            recall, throughput = test_knn_search(conn, queries_reduced, k=10, nprob=nprob)
-            recalls.append(recall)
-            throughputs.append(throughput)
+            recall, throughput = test_knn_search(conn, queries_reduced, groundtruth, k=10, nprob=nprob)
+            results.append({
+                'nprob': nprob,
+                'recall': recall,
+                'throughput': throughput
+            })
             print(f"Recall: {recall:.4f}, Throughput: {throughput:.2f} queries/second")
         
-        # 绘制性能对比图
-        plt.figure(figsize=(10, 6))
-        plt.plot(recalls, throughputs, marker='o', label='IVF+JL')
-        plt.xlabel('Recall')
-        plt.ylabel('Throughput (queries/second)')
-        plt.title('Recall vs Throughput with Different nprob Values')
-        plt.grid(True)
-        plt.legend()
-        plt.savefig('ivfjl_performance.png')
-        plt.show()
+        # 输出JSON格式的结果
+        print(json.dumps(results))
         
     except Exception as e:
         print(f"Error in main: {e}")

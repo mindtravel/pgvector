@@ -88,51 +88,51 @@ def main():
     # 1. 启用pgvector扩展
     cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
     
-    # # 2. 删除所有现有表
-    # cur.execute("""
-    #     DROP TABLE IF EXISTS sift_base, sift_learn, sift_query, sift_train
-    # """)
+    # 2. 删除所有现有表
+    cur.execute("""
+        DROP TABLE IF EXISTS sift_base, sift_learn, sift_query, sift_train
+    """)
     
-    # # 3. 创建三个表
-    # cur.execute("""
-    #     CREATE TABLE sift_base (
-    #         id SERIAL PRIMARY KEY,
-    #         vector vector(128)
-    #     )
-    # """)
+    # 3. 创建三个表
+    cur.execute("""
+        CREATE TABLE sift_base (
+            id SERIAL PRIMARY KEY,
+            vector vector(128)
+        )
+    """)
     
-    # cur.execute("""
-    #     CREATE TABLE sift_learn (
-    #         id SERIAL PRIMARY KEY,
-    #         vector vector(128)
-    #     )
-    # """)
+    cur.execute("""
+        CREATE TABLE sift_learn (
+            id SERIAL PRIMARY KEY,
+            vector vector(128)
+        )
+    """)
     
-    # cur.execute("""
-    #     CREATE TABLE sift_query (
-    #         id SERIAL PRIMARY KEY,
-    #         vector vector(128)
-    #     )
-    # """)
+    cur.execute("""
+        CREATE TABLE sift_query (
+            id SERIAL PRIMARY KEY,
+            vector vector(128)
+        )
+    """)
     
     # 4. 读取并插入数据
     print("Loading data...")
-    base_vectors = read_fvecs("sift/sift_base.fvecs")
-    query_vectors = read_fvecs("sift/sift_query.fvecs")
-    learn_vectors = read_fvecs("sift/sift_learn.fvecs")
-    ground_truth = read_ivecs("sift/sift_groundtruth.ivecs")
+    base_vectors = read_fvecs("../sift/sift_base.fvecs")
+    query_vectors = read_fvecs("../sift/sift_query.fvecs")
+    learn_vectors = read_fvecs("../sift/sift_learn.fvecs")
+    ground_truth = read_ivecs("../sift/sift_groundtruth.ivecs")
     
-    # print("Inserting base vectors...")
-    # for vec in tqdm(base_vectors):
-    #     cur.execute("INSERT INTO sift_base (vector) VALUES (%s)", (vec.tolist(),))
+    print("Inserting base vectors...")
+    for vec in tqdm(base_vectors):
+        cur.execute("INSERT INTO sift_base (vector) VALUES (%s)", (vec.tolist(),))
     
-    # print("Inserting query vectors...")
-    # for vec in tqdm(query_vectors):
-    #     cur.execute("INSERT INTO sift_query (vector) VALUES (%s)", (vec.tolist(),))
+    print("Inserting query vectors...")
+    for vec in tqdm(query_vectors):
+        cur.execute("INSERT INTO sift_query (vector) VALUES (%s)", (vec.tolist(),))
         
-    # print("Inserting learn vectors...")
-    # for vec in tqdm(learn_vectors):
-    #     cur.execute("INSERT INTO sift_learn (vector) VALUES (%s)", (vec.tolist(),))
+    print("Inserting learn vectors...")
+    for vec in tqdm(learn_vectors):
+        cur.execute("INSERT INTO sift_learn (vector) VALUES (%s)", (vec.tolist(),))
     
     get_table_counts(DB_CONFIG)
     # 5. 创建IVFFlat索引
@@ -143,7 +143,7 @@ def main():
     """)
     
     # 6. 测试不同nprobe的性能和召回率
-    nprobes = [1, 2,3,4,5,10]
+    nprobes = [1, 2,3,4,5,10,20]
     throughputs = []
     recalls = []
     k = 10  # 查询的最近邻数量
@@ -222,6 +222,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-()
-
-    mai

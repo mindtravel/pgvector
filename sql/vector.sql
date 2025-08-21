@@ -254,6 +254,15 @@ CREATE ACCESS METHOD ivfflat TYPE INDEX HANDLER ivfflathandler;
 
 COMMENT ON ACCESS METHOD ivfflat IS 'ivfflat index access method';
 
+-- -- ivfjl处理函数
+-- CREATE FUNCTION ivfjlhandler(internal) RETURNS index_am_handler
+--     AS 'MODULE_PATHNAME' LANGUAGE C;
+
+-- -- ivfjl访问方法
+-- CREATE ACCESS METHOD ivfjl TYPE INDEX HANDLER ivfjlhandler;
+
+-- COMMENT ON ACCESS METHOD ivfjl IS 'ivfjl index access method';
+
 CREATE FUNCTION hnswhandler(internal) RETURNS index_am_handler
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 

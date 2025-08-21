@@ -1,6 +1,7 @@
 # 使用方法
 ```sh
 git fetch origin
+git checkout main
 git checkout BRANCH_NAME
 git pull origin BRANCH_NAME
 python test.py
@@ -22,7 +23,9 @@ git push --set-upstream origin NEW_BRANCH_NAME
 ```
 4.切换回main分支更新readme.md
 # 分支
-main 
+main:几乎保持pgvector的src不变
+ivf_flat:
+ivf_jl:暂时和
 
 # pgvector
 

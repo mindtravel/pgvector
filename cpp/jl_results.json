@@ -1,0 +1,1 @@
+[{"nprob":1,"recall":0.63531,"throughput":2103.4},{"nprob":5,"recall":0.73108,"throughput":658.185},{"nprob":10,"recall":0.73917,"throughput":347.287},{"nprob":20,"recall":0.74094,"throughput":196.327}]

@@ -7,6 +7,7 @@
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "utils/memutils.h"
+#include "ivfjl.h"
 
 /*
  * Find the list that minimizes the distance function

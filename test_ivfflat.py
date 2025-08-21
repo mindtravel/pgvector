@@ -2,9 +2,12 @@ import psycopg2
 import numpy as np
 import matplotlib.pyplot as plt
 import time
-import io
+import json
+import argparse
+from sklearn.random_projection import johnson_lindenstrauss_min_dim
+from sklearn.random_projection import GaussianRandomProjection
+from sklearn.preprocessing import StandardScaler
 
-# 数据库连接信息
 DB_PARAMS = {
     'host': 'localhost',
     'port': '5432',
@@ -13,16 +16,13 @@ DB_PARAMS = {
     'password': '1'
 }
 
-# 加载 SIFT 数据集
-def load_data(file_path):
+def load_data(file_path, dim):
     with open(file_path, 'rb') as f:
         data = np.fromfile(f, dtype=np.int32)
-        data = data.reshape(-1, 129)
-        print("asas",data.size)
+        data = data.reshape(-1, dim)
         data = data[:, 1:].astype(float)
     return data
 
-# 连接到数据库
 def connect_to_db():
     try:
         conn = psycopg2.connect(**DB_PARAMS)
@@ -31,106 +31,165 @@ def connect_to_db():
         print(f"Error connecting to database: {e}")
         return None
 
-# 创建表并加载数据
-def create_table_and_load_data(conn, data):
+def create_table_and_load_data(conn, data, reduced_dim):
     cur = conn.cursor()
-    # 创建表
-    cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-    print("exe1")
-    cur.execute("DROP TABLE IF EXISTS sift_data;")
-    print("exe2")
-    cur.execute("CREATE TABLE sift_data (id serial, vector vector(128));")
-    print("exe3")
-    # 分批次插入数据
-    batch_size = 1000000
-    for i in range(0, len(data), batch_size):
-        batch = data[i:i + batch_size]
-        output = io.StringIO()
-        for row in batch:
-            # 将向量转换为 PostgreSQL 数组格式
-            vector_str = '(' + '1.0,2.0' + ')'
-            output.write(vector_str + ',')
-        output.seek(0)
-        # 使用 COPY 命令导入数据
-        try:
-            cur.copy_expert("COPY sift_data (vector) FROM STDIN WITH CSV", output)
-        except psycopg2.Error as e:
-            print(f"Error loading batch {i // batch_size}: {e}")
-            conn.rollback()
-            return
-    conn.commit()
-    print("exe 4")
-    print("exe 5")
-    cur.close()
+    try:
+        # 启用vector扩展
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        
+        # 删除已存在的表
+        cur.execute("DROP TABLE IF EXISTS sift_data;")
+        
+        # 创建新表
+        cur.execute(f"CREATE TABLE sift_data (id serial, vector vector({reduced_dim}));")
+        
+        # 分批次插入数据
+        batch_size = 5000
+        for i in range(0, len(data), batch_size):
+            batch = data[i:i + batch_size]
+            for row in batch:
+                # 将向量转换为字符串格式，确保数值格式正确
+                vector_str = '[' + ','.join(f"{x:.6f}" for x in row) + ']'
+                cur.execute(
+                    "INSERT INTO sift_data (vector) VALUES (%s::vector);",
+                    (vector_str,)
+                )
+            conn.commit()
+            print(f"Inserted batch {i//batch_size + 1}/{(len(data)-1)//batch_size + 1}")
+        
+        print("Data loading completed successfully")
+        
+    except psycopg2.Error as e:
+        print(f"Error in create_table_and_load_data: {e}")
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
 
-# 创建 ivfflat 索引
-def create_ivfflat_index(conn):
+def create_ivfflat_index(conn, n_lists):
     cur = conn.cursor()
-    cur.execute("CREATE INDEX ON sift_data USING ivfflat (vector vector_l2_ops) WITH (lists = 100);")
-    conn.commit()
-    cur.close()
+    try:
+        # 检查表是否存在
+        cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'sift_data');")
+        table_exists = cur.fetchone()[0]
+        
+        if not table_exists:
+            raise Exception("Table sift_data does not exist. Please load data first.")
+        
+        # 增加维护工作内存
+        cur.execute("SET maintenance_work_mem = '1GB';")
+        
+        # 创建索引
+        cur.execute(f"""
+            CREATE INDEX ON sift_data 
+            USING ivfflat (vector vector_l2_ops) 
+            WITH (lists = {n_lists});
+        """)
+        conn.commit()
+        print("Index created successfully")
+        
+    except psycopg2.Error as e:
+        print(f"Error in create_ivfflat_index: {e}")
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
 
-# 测试 k 近邻搜索
-def test_knn_search(conn, query_vectors, k, nprob):
+def test_knn_search(conn, query_vectors, groundtruth, k, nprob):
     cur = conn.cursor()
-    recall_sum = 0
-    total_time = 0
-    for query in query_vectors:
-        start_time = time.time()
-        cur.execute(f"SET ivfflat.probes = {nprob};")
-        cur.execute(f"SELECT id FROM sift_data ORDER BY vector <-> %s LIMIT {k};", (query.tolist(),))
-        results = cur.fetchall()
-        end_time = time.time()
-        total_time += end_time - start_time
-        # 这里简单假设真实的 k 近邻可以通过暴力搜索得到，实际中需要根据具体情况计算
-        # 为了简化，这里不进行真实召回率的计算，仅作示例
-        recall_sum += 1
-    avg_recall = recall_sum / len(query_vectors)
-    throughput = len(query_vectors) / total_time
-    cur.close()
-    return avg_recall, throughput
+    recall_sum = 0.0
+    total_time = 0.0
+    try:
+        sum_recall = 0
+        for i, query in enumerate(query_vectors):
+            vector_str = '[' + ','.join(f"{x:.6f}" for x in query) + ']'
+            
+            start_time = time.time()
+            cur.execute(f"SET ivfflat.probes = {nprob};")
+            cur.execute(
+                f"SELECT id FROM sift_data ORDER BY vector <-> %s::vector LIMIT {k};",
+                (vector_str,)
+            )
+            results = [row[0]-1 for row in cur.fetchall()]
+            end_time = time.time()
+            total_time += end_time - start_time
+            intersection = len(set(results) & set(groundtruth[i]))
+            sum_recall += intersection / k
 
-# 主函数
+        avg_recall = sum_recall / len(query_vectors)
+        throughput = len(query_vectors) / total_time
+        return avg_recall, throughput
+    except psycopg2.Error as e:
+        print(f"Error in test_knn_search: {e}")
+        raise
+    finally:
+        cur.close()
+
 def main():
-    # 加载 SIFT 数据集
-    database = load_data('./sift/sift_base.fvecs')
-    querys = load_data('./sift/sift_query.fvecs')
+    # 添加命令行参数解析
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--max_parallel_workers_per_gather', type=int, default=20,
+                      help='Maximum number of parallel workers per gather')
+    args = parser.parse_args()
 
-    # 连接到数据库
-    conn = connect_to_db()
-    if conn is None:
-        return
-    print("connect successfully")
-
-    # 创建表并加载数据
-    create_table_and_load_data(conn, database)
-    print("create table and load successfully")
-
-    # 创建 ivfflat 索引
-    create_ivfflat_index(conn)
-    print("create index successfully")
-
-    # 不同的 nprob 参数
-    nprob_values = [1, 5, 10, 20, 50]
-    recalls = []
-    throughputs = []
-
-    for nprob in nprob_values:
-        recall, throughput = test_knn_search(conn, querys, k=10, nprob=nprob)
-        recalls.append(recall)
-        throughputs.append(throughput)
-
-    # 绘制召回率 - 吞吐量折线图
-    plt.plot(recalls, throughputs, marker='o')
-    plt.xlabel('Recall')
-    plt.ylabel('Throughput')
-    plt.title('Recall vs Throughput with Different nprob Values')
-    plt.grid(True)
-    plt.show()
-
-    # 关闭数据库连接
-    conn.close()
+    try:
+        # 加载数据集
+        print("Loading datasets...")
+        database = load_data('../sift/sift_base.fvecs',129)
+        queries = load_data('../sift/sift_query.fvecs',129)
+        groundtruth = load_data("../sift/sift_groundtruth.ivecs",101)
+        print("Datasets loaded successfully")
+        
+        # 标准化数据
+        scaler = StandardScaler()
+        database_scaled = scaler.fit_transform(database)
+        queries_scaled = scaler.transform(queries)
+        
+        # 连接到数据库
+        print("Connecting to database...")
+        conn = connect_to_db()
+        if conn is None:
+            return
+        
+        # 创建表并加载数据
+        print("Creating table and loading data...")
+        create_table_and_load_data(conn, database_scaled, 128)
+        
+        # 创建IVFFlat索引
+        print("Creating index...")
+        n_lists = 100
+        create_ivfflat_index(conn, n_lists)
+        
+        # 设置并行工作进程数
+        cur = conn.cursor()
+        cur.execute(f"SET max_parallel_workers_per_gather = {args.max_parallel_workers_per_gather};")
+        conn.commit()
+        cur.close()
+        
+        # 测试不同nprob参数
+        print("Testing performance...")
+        nprob_values = [1, 5]   # 1, 5, 10, 20, 50  
+        results = []
+        
+        for nprob in nprob_values:
+            print(f"Testing with nprob = {nprob}")
+            recall, throughput = test_knn_search(conn, queries_scaled, groundtruth, k=10, nprob=nprob)
+            results.append({
+                'nprob': nprob,
+                'recall': recall,
+                'throughput': throughput
+            })
+            print(f"Recall: {recall:.4f}, Throughput: {throughput:.2f} queries/second")
+        
+        # 输出JSON格式的结果
+        print(json.dumps(results))
+        
+    except Exception as e:
+        print(f"Error in main: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+            print("Database connection closed")
 
 if __name__ == "__main__":
     main()
-    
