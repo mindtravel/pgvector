@@ -254,14 +254,14 @@ CREATE ACCESS METHOD ivfflat TYPE INDEX HANDLER ivfflathandler;
 
 COMMENT ON ACCESS METHOD ivfflat IS 'ivfflat index access method';
 
--- -- ivfjl处理函数
--- CREATE FUNCTION ivfjlhandler(internal) RETURNS index_am_handler
---     AS 'MODULE_PATHNAME' LANGUAGE C;
+-- ivfjl处理函数
+CREATE FUNCTION ivfjlhandler(internal) RETURNS index_am_handler
+    AS 'MODULE_PATHNAME' LANGUAGE C;
 
--- -- ivfjl访问方法
--- CREATE ACCESS METHOD ivfjl TYPE INDEX HANDLER ivfjlhandler;
+-- ivfjl访问方法
+CREATE ACCESS METHOD ivfjl TYPE INDEX HANDLER ivfjlhandler;
 
--- COMMENT ON ACCESS METHOD ivfjl IS 'ivfjl index access method';
+COMMENT ON ACCESS METHOD ivfjl IS 'ivfjl index access method';
 
 CREATE FUNCTION hnswhandler(internal) RETURNS index_am_handler
 	AS 'MODULE_PATHNAME' LANGUAGE C;
@@ -271,7 +271,7 @@ CREATE ACCESS METHOD hnsw TYPE INDEX HANDLER hnswhandler;
 COMMENT ON ACCESS METHOD hnsw IS 'hnsw index access method';
 
 -- access method private functions
-
+-- 不另外为ivfjl注册halfvec_support和bit_support
 CREATE FUNCTION ivfflat_halfvec_support(internal) RETURNS internal
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 
@@ -631,6 +631,31 @@ CREATE OPERATOR CLASS halfvec_cosine_ops
 	FUNCTION 4 l2_norm(halfvec),
 	FUNCTION 5 ivfflat_halfvec_support(internal);
 
+-- ivfjl使用ivfflat的halfvec_support
+CREATE OPERATOR CLASS halfvec_l2_ops
+	FOR TYPE halfvec USING ivfjl AS
+	OPERATOR 1 <-> (halfvec, halfvec) FOR ORDER BY float_ops,
+	FUNCTION 1 halfvec_l2_squared_distance(halfvec, halfvec),
+	FUNCTION 3 l2_distance(halfvec, halfvec),
+	FUNCTION 5 ivfflat_halfvec_support(internal);
+
+CREATE OPERATOR CLASS halfvec_ip_ops
+	FOR TYPE halfvec USING ivfjl AS
+	OPERATOR 1 <#> (halfvec, halfvec) FOR ORDER BY float_ops,
+	FUNCTION 1 halfvec_negative_inner_product(halfvec, halfvec),
+	FUNCTION 3 halfvec_spherical_distance(halfvec, halfvec),
+	FUNCTION 4 l2_norm(halfvec),
+	FUNCTION 5 ivfflat_halfvec_support(internal);
+
+CREATE OPERATOR CLASS halfvec_cosine_ops
+	FOR TYPE halfvec USING ivfjl AS
+	OPERATOR 1 <=> (halfvec, halfvec) FOR ORDER BY float_ops,
+	FUNCTION 1 halfvec_negative_inner_product(halfvec, halfvec),
+	FUNCTION 2 l2_norm(halfvec),
+	FUNCTION 3 halfvec_spherical_distance(halfvec, halfvec),
+	FUNCTION 4 l2_norm(halfvec),
+	FUNCTION 5 ivfflat_halfvec_support(internal);
+
 CREATE OPERATOR CLASS halfvec_l2_ops
 	FOR TYPE halfvec USING hnsw AS
 	OPERATOR 1 <-> (halfvec, halfvec) FOR ORDER BY float_ops,
@@ -680,6 +705,14 @@ CREATE OPERATOR <%> (
 
 CREATE OPERATOR CLASS bit_hamming_ops
 	FOR TYPE bit USING ivfflat AS
+	OPERATOR 1 <~> (bit, bit) FOR ORDER BY float_ops,
+	FUNCTION 1 hamming_distance(bit, bit),
+	FUNCTION 3 hamming_distance(bit, bit),
+	FUNCTION 5 ivfflat_bit_support(internal);
+
+-- ivf_jl使用ivfflat的bit_support
+CREATE OPERATOR CLASS bit_hamming_ops
+	FOR TYPE bit USING ivfjl AS
 	OPERATOR 1 <~> (bit, bit) FOR ORDER BY float_ops,
 	FUNCTION 1 hamming_distance(bit, bit),
 	FUNCTION 3 hamming_distance(bit, bit),
