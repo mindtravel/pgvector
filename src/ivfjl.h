@@ -56,10 +56,6 @@ IndexScanDesc ivfjlbeginscan(Relation index, int nkeys, int norderbys);
 extern "C" {
 #endif
 
-// C++接口函数：直接创建IVFJL索引
-// 参数：table_name - 表名，index_name - 索引名，column_name - 列名，lists - 聚类数量
-bool CreateIvfjlIndex(const char* table_name, const char* index_name, const char* column_name, int lists);
-
 #ifdef __cplusplus
 }
 #endif

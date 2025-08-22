@@ -1184,44 +1184,44 @@ IvfjlComputeCenters(IvfjlBuildState * buildstate)
     buildstate->base.samples = NULL;
 }
 
-/*
- * Create meta page for IVFJL with JL projection data
- */
-static void
-IvfjlCreateMetaPage(Relation index, int dimensions, int lists, ForkNumber forkNum, JLProjection *jlproj)
-{
-    Buffer buf;
-    Page page;
-    GenericXLogState *state;
-    IvfflatMetaPage metap;
+// /*
+//  * Create meta page for IVFJL with JL projection data
+//  */
+// static void
+// IvfjlCreateMetaPage(Relation index, int dimensions, int lists, ForkNumber forkNum, JLProjection *jlproj)
+// {
+//     Buffer buf;
+//     Page page;
+//     GenericXLogState *state;
+//     IvfflatMetaPage metap;
 
-    buf = IvfflatNewBuffer(index, forkNum);
-    IvfflatInitRegisterPage(index, &buf, &page, &state);
+//     buf = IvfflatNewBuffer(index, forkNum);
+//     IvfflatInitRegisterPage(index, &buf, &page, &state);
 
-    /* Initialize meta page */
-    metap = IvfflatPageGetMeta(page);
-    metap->magicNumber = IVFFLAT_MAGIC_NUMBER;
-    metap->version = IVFFLAT_VERSION;
-    metap->dimensions = dimensions;
-    metap->lists = lists;
-    metap->lastUsedOffset = 
-        ((char *) metap + sizeof(IvfflatMetaPageData)) - (char *) page;
+//     /* Initialize meta page */
+//     metap = IvfflatPageGetMeta(page);
+//     metap->magicNumber = IVFFLAT_MAGIC_NUMBER;
+//     metap->version = IVFFLAT_VERSION;
+//     metap->dimensions = dimensions;
+//     metap->lists = lists;
+//     metap->lastUsedOffset = 
+//         ((char *) metap + sizeof(IvfflatMetaPageData)) - (char *) page;
 
-    /* Write JL projection data to meta page */
-    WriteJLToMetaPage(page, jlproj);
+//     /* Write JL projection data to meta page */
+//     WriteJLToMetaPage(page, jlproj);
 
-    IvfflatCommitBuffer(buf, state);
-}
+//     IvfflatCommitBuffer(buf, state);
+// }
 
-/*
- * Free resources for IVFJL build state
- */
-static void
-IvfjlFreeBuildState(IvfjlBuildState * buildstate)
-{
-    /* Free JL projection */
-    FreeJLProjection(&buildstate->jlproj);
+// /*
+//  * Free resources for IVFJL build state
+//  */
+// static void
+// IvfjlFreeBuildState(IvfjlBuildState * buildstate)
+// {
+//     /* Free JL projection */
+//     FreeJLProjection(&buildstate->jlproj);
     
-    /* Free base build state */
-    FreeBuildState(&buildstate->base);
-}
+//     /* Free base build state */
+//     FreeBuildState(&buildstate->base);
+// }
