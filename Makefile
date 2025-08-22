@@ -16,15 +16,15 @@ OBJS = src/bitutils.o \
 	src/hnswvacuum.o \
 	src/ivfbuild.o \
 	src/ivfflat.o \
-	src/ivfjl.o \
 	src/ivfinsert.o \
 	src/ivfkmeans.o \
 	src/ivfscan.o \
 	src/ivfutils.o \
 	src/ivfvacuum.o \
 	src/sparsevec.o \
-	src/vector.o
-
+	src/vector.o \
+	src/ivfjl.o
+	
 HEADERS = src/halfvec.h src/sparsevec.h src/vector.h
 
 TESTS = $(wildcard test/sql/*.sql)
