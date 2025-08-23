@@ -11,6 +11,7 @@
 #include "halfvec.h"
 #include "hnsw.h"
 #include "ivfflat.h"
+#include "ivfjl.h"
 #include "lib/stringinfo.h"
 #include "libpq/pqformat.h"
 #include "port.h"				/* for strtof() */

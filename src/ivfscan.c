@@ -7,11 +7,11 @@
 #include "catalog/pg_type_d.h"
 #include "lib/pairingheap.h"
 #include "ivfflat.h"
+#include "ivfjl.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "utils/memutils.h"
-#include "ivfjl.h"
 
 #define GetScanList(ptr) pairingheap_container(IvfflatScanList, ph_node, ptr)
 #define GetScanListConst(ptr) pairingheap_const_container(IvfflatScanList, ph_node, ptr)
@@ -406,20 +406,15 @@ ivfflatendscan(IndexScanDesc scan)
 	scan->opaque = NULL;
 }
 
-typedef struct IvfjlScanOpaqueData {
-    JLProjection jlproj;
-    // ... 其它 ivfflat scan opaque 字段 ...
-} IvfjlScanOpaqueData;
-typedef IvfjlScanOpaqueData *IvfjlScanOpaque;
-
 IndexScanDesc ivfjlbeginscan(Relation index, int nkeys, int norderbys) {
-    IndexScanDesc scan = RelationGetIndexScan(index, nkeys, norderbys);
+	Page metaPage;
+	IndexScanDesc scan = RelationGetIndexScan(index, nkeys, norderbys);
     IvfjlScanOpaque so = (IvfjlScanOpaque) palloc0(sizeof(IvfjlScanOpaqueData));
     // 读取 JL 投影矩阵
     Buffer metaBuf = ReadBuffer(index, IVFFLAT_METAPAGE_BLKNO);
     LockBuffer(metaBuf, BUFFER_LOCK_SHARE);
-    Page metaPage = BufferGetPage(metaBuf);
-    ReadJLFromMetaPage(metaPage, &so->jlproj, CurrentMemoryContext);
+    metaPage = BufferGetPage(metaBuf);
+    ReadJLFromMetaPage(metaPage, &so->jlProj, CurrentMemoryContext);
     UnlockReleaseBuffer(metaBuf);
     scan->opaque = so;
     return scan;

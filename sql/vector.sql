@@ -320,6 +320,28 @@ CREATE OPERATOR CLASS vector_cosine_ops
 	FUNCTION 4 vector_norm(vector);
 
 CREATE OPERATOR CLASS vector_l2_ops
+	DEFAULT FOR TYPE vector USING ivfjl AS
+	OPERATOR 1 <-> (vector, vector) FOR ORDER BY float_ops,
+	FUNCTION 1 vector_l2_squared_distance(vector, vector),
+	FUNCTION 3 l2_distance(vector, vector);
+
+CREATE OPERATOR CLASS vector_ip_ops
+	FOR TYPE vector USING ivfjl AS
+	OPERATOR 1 <#> (vector, vector) FOR ORDER BY float_ops,
+	FUNCTION 1 vector_negative_inner_product(vector, vector),
+	FUNCTION 3 vector_spherical_distance(vector, vector),
+	FUNCTION 4 vector_norm(vector);
+
+-- ivfjl operator classes
+CREATE OPERATOR CLASS vector_cosine_ops
+	FOR TYPE vector USING ivfjl AS
+	OPERATOR 1 <=> (vector, vector) FOR ORDER BY float_ops,
+	FUNCTION 1 vector_negative_inner_product(vector, vector),
+	FUNCTION 2 vector_norm(vector),
+	FUNCTION 3 vector_spherical_distance(vector, vector),
+	FUNCTION 4 vector_norm(vector);
+
+CREATE OPERATOR CLASS vector_l2_ops
 	FOR TYPE vector USING hnsw AS
 	OPERATOR 1 <-> (vector, vector) FOR ORDER BY float_ops,
 	FUNCTION 1 vector_l2_squared_distance(vector, vector);
@@ -631,7 +653,7 @@ CREATE OPERATOR CLASS halfvec_cosine_ops
 	FUNCTION 4 l2_norm(halfvec),
 	FUNCTION 5 ivfflat_halfvec_support(internal);
 
--- ivfjl使用ivfflat的halfvec_support
+-- 复用ivfflat的halfvec_support
 CREATE OPERATOR CLASS halfvec_l2_ops
 	FOR TYPE halfvec USING ivfjl AS
 	OPERATOR 1 <-> (halfvec, halfvec) FOR ORDER BY float_ops,
@@ -710,7 +732,7 @@ CREATE OPERATOR CLASS bit_hamming_ops
 	FUNCTION 3 hamming_distance(bit, bit),
 	FUNCTION 5 ivfflat_bit_support(internal);
 
--- ivf_jl使用ivfflat的bit_support
+-- 复用ivfflat的bit_support
 CREATE OPERATOR CLASS bit_hamming_ops
 	FOR TYPE bit USING ivfjl AS
 	OPERATOR 1 <~> (bit, bit) FOR ORDER BY float_ops,

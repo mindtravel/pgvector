@@ -1,3 +1,5 @@
 vector_search
 *.o
+*.bc
 *.so
+.vscode
