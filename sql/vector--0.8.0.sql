@@ -271,7 +271,7 @@ CREATE ACCESS METHOD hnsw TYPE INDEX HANDLER hnswhandler;
 COMMENT ON ACCESS METHOD hnsw IS 'hnsw index access method';
 
 -- access method private functions
-
+-- 不另外为ivfjl注册halfvec_support和bit_support
 CREATE FUNCTION ivfflat_halfvec_support(internal) RETURNS internal
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 

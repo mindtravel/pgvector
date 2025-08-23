@@ -9,18 +9,6 @@
 #include "ivfjlbuild.h"
 
 /*
- * Build the index for an unlogged table
- */
-// void
-// ivfjlbuildempty(Relation index)
-// {
-// 	IndexInfo  *indexInfo = BuildIndexInfo(index);
-// 	IvfjlBuildState buildstate;
-
-// 	BuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
-// }
-
-/*
  * Similar with ivfflatbuild
  */
 IndexBuildResult *ivfjlbuild(Relation heap, Relation index, IndexInfo *indexInfo) {

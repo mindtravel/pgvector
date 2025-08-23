@@ -1022,3 +1022,34 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
 
 	FreeBuildState(buildstate);
 }
+
+
+/*
+ * Build the index for a logged table
+ */
+IndexBuildResult *
+ivfflatbuild(Relation heap, Relation index, IndexInfo *indexInfo)
+{
+	IndexBuildResult *result;
+	IvfflatBuildState buildstate;
+
+	BuildIndex(heap, index, indexInfo, &buildstate, MAIN_FORKNUM);
+
+	result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
+	result->heap_tuples = buildstate.reltuples;
+	result->index_tuples = buildstate.indtuples;
+
+	return result;
+}
+
+/*
+ * Build the index for an unlogged table
+ */
+void
+ivfflatbuildempty(Relation index)
+{
+	IndexInfo  *indexInfo = BuildIndexInfo(index);
+	IvfflatBuildState buildstate;
+
+	BuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
+}
