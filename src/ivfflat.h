@@ -177,6 +177,7 @@ typedef struct IvfflatBuildState
 
 	/* Settings */
 	int			dimensions;
+	int			jlDimensions; // jl优化
 	int			lists;
 
 	/* Statistics */
@@ -192,6 +193,7 @@ typedef struct IvfflatBuildState
 	/* Variables */
 	VectorArray samples;
 	VectorArray centers;
+	VectorArray jlCenters; // jl优化
 	ListInfo   *listInfo;
 
 #ifdef IVFFLAT_KMEANS_DEBUG
@@ -222,6 +224,7 @@ typedef struct IvfflatMetaPageData
 	uint32		magicNumber;
 	uint32		version;
 	uint16		dimensions;
+	uint16		jlDimensions; // jl投影后的维度
 	uint16		lists;
 }			IvfflatMetaPageData;
 

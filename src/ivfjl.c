@@ -20,9 +20,12 @@
 #define MarkGUCPrefixReserved(x) EmitWarningsOnPlaceholders(x)
 #endif
 
+/*复用ivfflat的变量，不需要再Init函数中再次注册*/
 extern int			ivfflat_probes;
 extern int			ivfflat_iterative_scan;
 extern int			ivfflat_max_probes;
+bool				ivfjl_enable_reorder;
+int					ivfjl_reorder_candidates;
 static relopt_kind ivfjl_relopt_kind;
 
 /*
@@ -33,7 +36,14 @@ IvfjlInit(void)
 {
 	ivfjl_relopt_kind = add_reloption_kind();
 	add_int_reloption(ivfjl_relopt_kind, "lists", "Number of inverted lists",
-					  IVFFLAT_DEFAULT_LISTS, IVFFLAT_MIN_LISTS, IVFFLAT_MAX_LISTS, AccessExclusiveLock);
+		IVFFLAT_DEFAULT_LISTS, IVFFLAT_MIN_LISTS, IVFFLAT_MAX_LISTS, AccessExclusiveLock);
+	DefineCustomBoolVariable("ivfjl.enable_reorder", "Enable original vector reordering",
+		NULL, &ivfjl_enable_reorder,
+		true, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("ivfjl.reorder_candidates", "Default number of candidates for reordering",
+		NULL, &ivfjl_reorder_candidates,
+		IVFJL_DEFAULT_CANDIDATE_MULTIPLES, IVFJL_MIN_CANDIDATE_MULTIPLES, IVFJL_MAX_CANDIDATE_MULTIPLES,
+		PGC_USERSET, 0, NULL, NULL, NULL);
 }
 
 /*
@@ -134,16 +144,15 @@ ivfjlcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 static bytea*
 ivfjloptions(Datum reloptions, bool validate)
 {
-    /*
-    * 复用IvfflatOptions
-    */    
     static const relopt_parse_elt tab[] = {
-		{"lists", RELOPT_TYPE_INT, offsetof(IvfflatOptions, lists)},
+		{"lists", RELOPT_TYPE_INT, offsetof(IvfjlOptions, base.lists)},
+		{"reorder", RELOPT_TYPE_BOOL, offsetof(IvfjlOptions, reorder)},
+		{"reorder_candidates", RELOPT_TYPE_INT, offsetof(IvfjlOptions, reorderCandidates)},
 	};
 
 	return (bytea *) build_reloptions(reloptions, validate,
 									  ivfjl_relopt_kind,
-									  sizeof(IvfflatOptions),
+									  sizeof(IvfjlOptions),
 									  tab, lengthof(tab));
 }
 

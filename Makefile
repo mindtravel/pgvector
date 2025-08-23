@@ -23,7 +23,8 @@ OBJS = src/bitutils.o \
 	src/ivfvacuum.o \
 	src/sparsevec.o \
 	src/vector.o \
-	src/ivfjl.o
+	src/ivfjl.o \
+	src/ivfjlbuild.o  
 	
 HEADERS = src/halfvec.h src/sparsevec.h src/vector.h
 
