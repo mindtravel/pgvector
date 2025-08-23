@@ -7,6 +7,7 @@
 #include "halfutils.h"
 #include "halfvec.h"
 #include "ivfflat.h"
+#include "ivfjl.h"
 #include "storage/bufmgr.h"
 
 /*
@@ -171,7 +172,7 @@ IvfflatGetMetaPageInfo(Relation index, int *lists, int *dimensions)
 	metap = IvfflatPageGetMeta(page);
 
 	if (unlikely(metap->magicNumber != IVFFLAT_MAGIC_NUMBER))
-		elog(ERROR, "ivfflat index is not valid");
+		elog(ERROR, "ivfflat index is not valid!");
 
 	if (lists != NULL)
 		*lists = metap->lists;

@@ -15,7 +15,8 @@
 
 #define IVFJL_LIST_SIZE(size)	(offsetof(IvfjlListData, jlCenter) + size)
 
-#define IvfjlPageGetMeta(page)	((IvfjlMetaPageData *) PageGetContents(page))
+// #define IvfjlPageGetMeta(page)	((IvfjlMetaPage) PageGetContents(page))
+// #define IvfjlPageGetOpaque(page)	((IvfjlPageOpaque) PageGetSpecialPointer(page))
 
 
 /* JL 投影结构体 */
@@ -40,13 +41,13 @@ typedef struct IvfjlBuildState {
 	VectorArray jlCenters; // jl优化
 }   IvfjlBuildState;
 
-typedef struct IvfjlMetaPageData
-{
-    IvfflatMetaPageData     base;       /* 复用 ivfflat 的 build state */
-	uint16		            jlDimensions; // jl投影后的维度
-}	IvfjlMetaPageData;
+// typedef struct IvfjlMetaPageData
+// {
+//     IvfflatMetaPageData     base;       /* 复用 ivfflat 的 build state */
+	// uint16		            jlDimensions; // jl投影后的维度
+// }	IvfjlMetaPageData;
 
-typedef IvfjlMetaPageData * IvfjlMetaPage;
+// typedef IvfjlMetaPageData * IvfjlMetaPage;
 
 /* IVFJL扫描状态结构体 */
 typedef struct IvfjlScanOpaqueData {
@@ -90,7 +91,7 @@ void IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation i
 void IvfjlFreeBuildState(IvfjlBuildState * buildstate);
 void IvfjlCreateMetaPage(Relation index, int dimensions, int jlDimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
 void IvfjlCreateListPages(Relation index, VectorArray centers, VectorArray jlCenters, int original_dim, int jl_dim, int lists, ForkNumber forkNum, ListInfo** listInfo, JLProjection* jlproj);
-                 
+void IvfjlGetMetaPageInfo(Relation index, int *lists, int *dimensions); 
 
 bool ivfjlinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
 #if PG_VERSION_NUM >= 140000

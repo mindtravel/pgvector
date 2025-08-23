@@ -321,7 +321,7 @@ InsertTuples(Relation index, IvfflatBuildState * buildstate, ForkNumber forkNum)
 /*
  * Initialize the build state
  */
-static void
+void
 InitBuildState(IvfflatBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo)
 {
 	buildstate->heap = heap;
@@ -392,7 +392,7 @@ InitBuildState(IvfflatBuildState * buildstate, Relation heap, Relation index, In
 /*
  * Free resources
  */
-static void
+void
 FreeBuildState(IvfflatBuildState * buildstate)
 {
 	VectorArrayFree(buildstate->centers);
@@ -409,7 +409,7 @@ FreeBuildState(IvfflatBuildState * buildstate)
 /*
  * Compute centers
  */
-static void
+void
 ComputeCenters(IvfflatBuildState * buildstate)
 {
 	int			numSamples;
@@ -452,7 +452,7 @@ ComputeCenters(IvfflatBuildState * buildstate)
 /*
  * Create the metapage
  */
-static void
+void
 CreateMetaPage(Relation index, int dimensions, int lists, ForkNumber forkNum)
 {
 	Buffer		buf;
@@ -478,7 +478,7 @@ CreateMetaPage(Relation index, int dimensions, int lists, ForkNumber forkNum)
 /*
  * Create list pages
  */
-static void
+void
 CreateListPages(Relation index, VectorArray centers, int dimensions,
 				int lists, ForkNumber forkNum, ListInfo * *listInfo)
 {
@@ -980,7 +980,7 @@ AssignTuples(IvfflatBuildState * buildstate)
 /*
  * Create entry pages
  */
-static void
+void
 CreateEntryPages(IvfflatBuildState * buildstate, ForkNumber forkNum)
 {
 	/* Assign */

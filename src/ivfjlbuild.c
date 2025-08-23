@@ -98,75 +98,6 @@ IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index,
 	}
 }
 
-// /*
-//  * Compute centers for IVFJL with JL projection
-//  */
-// void
-// IvfjlComputeCenters(IvfjlBuildState * buildstate)
-// {
-//     int numSamples;
-
-//     pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_IVFFLAT_PHASE_KMEANS);
-
-//     /* Target 50 samples per list, with at least 10000 samples */
-//     numSamples = buildstate->base.lists * 50;
-//     if (numSamples < 10000)
-//         numSamples = 10000;
-
-//     /* Skip samples for unlogged table */
-//     if (buildstate->base.heap == NULL)
-//         numSamples = 1;
-
-//     /* Sample rows with original dimensions first */
-//     buildstate->base.samples = VectorArrayInit(numSamples, buildstate->base.dimensions, buildstate->base.centers->itemsize);
-//     if (buildstate->base.heap != NULL)
-//     {
-//         SampleRows(&buildstate->base);
-
-//         if (buildstate->base.samples->length < buildstate->base.lists)
-//         {
-//             ereport(NOTICE,
-//                     (errmsg("ivfjl index created with little data"),
-//                      errdetail("This will result in poor performance."),
-//                      errhint("Consider increasing the number of sample rows.")));
-//         }
-//     }
-
-//     /* Generate JL projection matrix with original dimensions */
-//     GenerateJLProjection(&buildstate->jlProj, buildstate->base.dimensions, IVFJL_DEFAULT_REDUCED_DIM, CurrentMemoryContext);
-
-//     /* Apply JL projection to samples */
-//     for (int i = 0; i < buildstate->base.samples->length; i++)
-//     {
-//         Vector *vec = (Vector *)VectorArrayGet(buildstate->base.samples, i);
-//         float *dst = (float *)palloc(sizeof(float) * IVFJL_DEFAULT_REDUCED_DIM);
-        
-//         /* Project the vector */
-//         JLProjectVector(&buildstate->jlProj, vec->x, dst);
-        
-//         /* Replace original vector data with projected data */
-//         memcpy(vec->x, dst, sizeof(float) * IVFJL_DEFAULT_REDUCED_DIM);
-//         vec->dim = IVFJL_DEFAULT_REDUCED_DIM;
-        
-//         pfree(dst);
-//     }
-
-//     /* Update dimensions to reduced dimensions */
-//     buildstate->base.dimensions = IVFJL_DEFAULT_REDUCED_DIM;
-    
-//     /* Reinitialize centers array with reduced dimensions */
-//     VectorArrayFree(buildstate->base.centers);
-//     buildstate->base.centers = VectorArrayInit(buildstate->base.lists, IVFJL_DEFAULT_REDUCED_DIM, 
-//                                               buildstate->base.typeInfo->itemSize(IVFJL_DEFAULT_REDUCED_DIM));
-
-//     /* Perform k-means clustering on projected samples */
-//     IvfflatBench("k-means", IvfflatKmeans(buildstate->base.index, buildstate->base.samples, buildstate->base.centers, buildstate->base.typeInfo));
-
-//     /* Free samples */
-//     VectorArrayFree(buildstate->base.samples);
-//     buildstate->base.samples = NULL;
-// }
-
 /*
  * Create meta page for IVFJL with JL projection data
  */
@@ -182,24 +113,21 @@ IvfjlCreateMetaPage(
     Buffer 			buf;
     Page 			page;
     GenericXLogState *state;
-    IvfjlMetaPage metap;
+    IvfflatMetaPage metap;
 
     buf = IvfflatNewBuffer(index, forkNum);
     IvfflatInitRegisterPage(index, &buf, &page, &state);
 
     /* Initialize meta page */
-    metap = IvfjlPageGetMeta(page);
-    metap->base.magicNumber = IVFFLAT_MAGIC_NUMBER;
-    metap->base.version = IVFFLAT_VERSION;
-    metap->base.dimensions = dimensions;
-	metap->base.lists = lists;
-	metap->base.jlDimensions = jlDimensions;
-	
-	// metap->lastUsedOffset = 
-    //     ((char *) metap + sizeof(IvfjlMetaPageData)) - (char *) page;
+    metap = IvfflatPageGetMeta(page);
+    metap->magicNumber = IVFFLAT_MAGIC_NUMBER;
+    metap->version = IVFFLAT_VERSION;
+    metap->dimensions = dimensions;
+	metap->lists = lists;
+	metap->jlDimensions = jlDimensions;
 
     /* Write JL projection data to meta page */
-    WriteJLToMetaPage(page, jlproj);
+    // WriteJLToMetaPage(page, jlproj);
 
     IvfflatCommitBuffer(buf, state);
 }

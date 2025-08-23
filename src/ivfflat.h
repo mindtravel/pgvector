@@ -223,8 +223,8 @@ typedef struct IvfflatMetaPageData
 	uint32		magicNumber;
 	uint32		version;
 	uint16		dimensions;
-	uint16		jlDimensions; // jl投影后的维度
 	uint16		lists;
+	uint16		jlDimensions; // jl投影后的维度
 }			IvfflatMetaPageData;
 
 typedef IvfflatMetaPageData * IvfflatMetaPage;
