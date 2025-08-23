@@ -201,8 +201,8 @@ ivfjlhandler(PG_FUNCTION_ARGS)
 	amroutine->amkeytype = InvalidOid;
 
 	/* Interface functions */
-	amroutine->ambuild = ivfflatbuild;
-	amroutine->ambuildempty = ivfflatbuildempty;
+	amroutine->ambuild = ivfjlbuild;
+	amroutine->ambuildempty = ivfjlbuildempty;
 	amroutine->aminsert = ivfflatinsert;
 #if PG_VERSION_NUM >= 170000
 	amroutine->aminsertcleanup = NULL;
@@ -247,7 +247,11 @@ void GenerateJLProjection(JLProjection *proj, int original_dim, int reduced_dim,
 }
 
 // JL 投影
-void JLProjectVector(const JLProjection *proj, const float *src, float *dst) {
+void JLProjectVector(const JLProjection *proj, Vector* srcVector, Vector* dstVector) {
+	float* src;
+	float* dst;
+	src = srcVector->x;
+	dst = dstVector->x;
     for (int i = 0; i < proj->reduced_dim; i++) {
         float sum = 0.0f;
         for (int j = 0; j < proj->original_dim; j++) {
@@ -255,6 +259,7 @@ void JLProjectVector(const JLProjection *proj, const float *src, float *dst) {
         }
         dst[i] = sum;
     }
+	// 可替换并行矩阵乘法
 }
 
 // 释放 JL 投影矩阵

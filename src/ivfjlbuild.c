@@ -8,27 +8,17 @@
 #include "ivfflat.h"
 #include "ivfjlbuild.h"
 
-/* Forward declarations for IVFJL functions */
-static void IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
-    IvfjlBuildState * buildstate, ForkNumber forkNum);
-static void IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo);
-// static void IvfjlComputeCenters(IvfjlBuildState * buildstate);
-static void IvfjlCreateMetaPage(Relation index, int dimensions, int JLDimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
-static void IvfjlFreeBuildState(IvfjlBuildState* buildstate);
-static void IvfjlCreateListPages(Relation index, VectorArray centers, VectorArray jlCenters,
-                                    int original_dim, int jl_dim, int lists, ForkNumber forkNum, ListInfo** listInfo);
-
 /*
  * Build the index for an unlogged table
  */
-void
-ivfflatbuildempty(Relation index)
-{
-	IndexInfo  *indexInfo = BuildIndexInfo(index);
-	IvfflatBuildState buildstate;
+// void
+// ivfjlbuildempty(Relation index)
+// {
+// 	IndexInfo  *indexInfo = BuildIndexInfo(index);
+// 	IvfjlBuildState buildstate;
 
-	BuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
-}
+// 	BuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
+// }
 
 /*
  * Similar with ivfflatbuild
@@ -61,42 +51,53 @@ ivfjlbuildempty(Relation index)
 /*
  * Build the IVFJL index
  */
-static void
+void
 IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
-               IvfjlBuildState * buildstate, ForkNumber forkNum)
+               IvfjlBuildState * buildState, ForkNumber forkNum)
 {
-    IvfjlInitBuildState(buildstate, heap, index, indexInfo);
+	IvfflatBuildState* baseBuildState;
+	baseBuildState = &(buildState->base);
 
-    ComputeCenters(&(buildstate->base));
+    InitBuildState(&buildState->base, heap, index, indexInfo);
+    IvfjlInitBuildState(buildState, heap, index, indexInfo, &buildState->jlProj);
+
+    ComputeCenters(&(buildState->base));
+
+    /* Generate JL projection matrix */
+    GenerateJLProjection(&buildState->jlProj, baseBuildState->dimensions, 
+		IVFJL_DEFAULT_REDUCED_DIM, CurrentMemoryContext);
 
     /* Create pages */
-    CreateListPages(index, buildstate->base.centers, buildstate->base.dimensions, buildstate->base.lists, forkNum, &buildstate->base.listInfo);
-    IvfjlCreateListPages(index, buildstate->base.centers, buildstate->base.dimensions, IVFJL_DEFAULT_REDUCED_DIM,
-        buildstate->base.lists, forkNum, &buildstate->base.listInfo, &buildstate->jlProj);
+    CreateListPages(index, baseBuildState->centers, baseBuildState->dimensions, baseBuildState->lists, forkNum, &baseBuildState->listInfo);
+    IvfjlCreateListPages(index, baseBuildState->centers, buildState->jlCenters, baseBuildState->dimensions, IVFJL_DEFAULT_REDUCED_DIM,
+        baseBuildState->lists, forkNum, &baseBuildState->listInfo, &buildState->jlProj);
 
-    IvfjlCreateMetaPage(index, buildstate->base.dimensions, IVFJL_DEFAULT_REDUCED_DIM, buildstate->base.lists, forkNum, &buildstate->jlProj);
+    IvfjlCreateMetaPage(index, baseBuildState->dimensions, IVFJL_DEFAULT_REDUCED_DIM, baseBuildState->lists, forkNum, &buildState->jlProj);
 
-    CreateEntryPages(&buildstate->base, forkNum);
+    CreateEntryPages(baseBuildState, forkNum);
 
     /* Write WAL for initialization fork since GenericXLog functions do not */
     if (forkNum == INIT_FORKNUM)
         log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocksInFork(index, forkNum), true);
 
-    IvfjlFreeBuildState(buildstate);
+    IvfjlFreeBuildState(buildState);
 }
 
 /*
  * Initialize the IVFJL build state
  */
-static void
+void
 IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo, JLProjection* jlproj)
 {
 	IvfjlOptions* opts;
 	/* Initialize the base ivfflat build state */
-    InitBuildState(&buildstate->base, heap, index, indexInfo);
     
     /* Initialize JL projection - set to zero initially */
 	memset(&buildstate->jlProj, 0, sizeof(JLProjection));
+
+	/* Initialize JL centers array */
+	buildstate->jlCenters = VectorArrayInit(buildstate->base.lists, IVFJL_DEFAULT_REDUCED_DIM, 
+		buildstate->base.typeInfo->itemSize(IVFJL_DEFAULT_REDUCED_DIM));
 
 	/* Initialize reorder parameters from index options */
 	opts = (IvfjlOptions *) index->rd_options;
@@ -112,7 +113,7 @@ IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index,
 // /*
 //  * Compute centers for IVFJL with JL projection
 //  */
-// static void
+// void
 // IvfjlComputeCenters(IvfjlBuildState * buildstate)
 // {
 //     int numSamples;
@@ -181,7 +182,7 @@ IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index,
 /*
  * Create meta page for IVFJL with JL projection data
  */
-static void
+void
 IvfjlCreateMetaPage(
 	Relation index,
 	int dimensions,
@@ -218,59 +219,137 @@ IvfjlCreateMetaPage(
 /*
  * Free resources for IVFJL build state
  */
-static void
+void
 IvfjlFreeBuildState(IvfjlBuildState * buildstate)
 {
     /* Free JL projection */
     FreeJLProjection(&buildstate->jlProj);
-    
+
+    /* Free JL centers array */
+    if (buildstate->jlCenters) {
+        VectorArrayFree(buildstate->jlCenters);
+        buildstate->jlCenters = NULL;
+    }
+
     /* Free base build state */
     FreeBuildState(&buildstate->base);
 }
 
-static void
-IvfjlCreateListPages(Relation index, VectorArray centers,
+// void
+// IvfjlCreateListPages(Relation index, VectorArray centers,
+//                      int original_dim, int jl_dim, int lists, ForkNumber forkNum, 
+//                      ListInfo** listInfo, JLProjection* jlproj)
+// {
+// 	Buffer		buf;
+// 	Page		page;
+// 	GenericXLogState *state;
+// 	Size		listSize;
+//     IvfjlList list;
+// 	Size		jlCenterSize;
+
+// 	/* Calculate jlCenter size based on jl_dim instead of original_dim */
+	// jlCenterSize = VECTOR_SIZE(jl_dim);
+	// listSize = MAXALIGN(IVFJL_LIST_SIZE(jlCenterSize));
+	// list = palloc0(listSize);
+
+// 	buf = IvfflatNewBuffer(index, forkNum);
+// 	IvfflatInitRegisterPage(index, &buf, &page, &state);
+
+// 	for (int i = 0; i < lists; i++)
+// 	{
+// 		OffsetNumber offno;
+
+// 		/* Zero memory for each list */
+// 		MemSet(list, 0, listSize);
+
+// 		/* Load list */
+// 		list->startPage = InvalidBlockNumber;
+// 		list->insertPage = InvalidBlockNumber;
+		
+// 		/* Initialize jlCenter with proper size and dimension */
+// 		SET_VARSIZE(&list->jlCenter, VECTOR_SIZE(jl_dim));
+// 		list->jlCenter.dim = jl_dim;
+// 		list->jlCenter.unused = 0;
+		
+// 		/* Apply JL projection */
+// 		JLProjectVector(jlproj, (Vector*)VectorArrayGet(centers, i), &(list->jlCenter));
+
+// 		/* Ensure free space */
+// 		if (PageGetFreeSpace(page) < listSize)
+// 			IvfflatAppendPage(index, &buf, &page, &state, forkNum);
+
+// 		/* Add the item */
+// 		offno = PageAddItem(page, (Item) list, listSize, InvalidOffsetNumber, false, false);
+// 		if (offno == InvalidOffsetNumber)
+// 			elog(ERROR, "failed to add index item to \"%s\"", RelationGetRelationName(index));
+
+// 		/* Save location info */
+// 		(*listInfo)[i].blkno = BufferGetBlockNumber(buf);
+// 		(*listInfo)[i].offno = offno;
+// 	}
+
+// 	IvfflatCommitBuffer(buf, state);/*提交缓冲区到磁盘*/
+// 	pfree(list);/*刷盘*/
+// }
+
+/*
+ * Create list pages for IVFJL with both original and projected centers
+ */
+void
+IvfjlCreateListPages(Relation index, VectorArray centers, VectorArray jlCenters,
                      int original_dim, int jl_dim, int lists, ForkNumber forkNum, 
                      ListInfo** listInfo, JLProjection* jlproj)
 {
-	Buffer		buf;
-	Page		page;
-	GenericXLogState *state;
-	Size		listSize;
+    Buffer 		buf;
+    Page 		page;
+    GenericXLogState *state;
+    Size 		listSize;
     IvfjlList list;
 
-	listSize = MAXALIGN(IVFJL_LIST_SIZE(jlCenter->itemsize));
+    /* Calculate size needed for list with both centers */
+	listSize = MAXALIGN(IVFJL_LIST_SIZE(VECTOR_SIZE(jl_dim)));
 	list = palloc0(listSize);
 
-	buf = IvfflatNewBuffer(index, forkNum);
-	IvfflatInitRegisterPage(index, &buf, &page, &state);
+    buf = IvfflatNewBuffer(index, forkNum);
+    IvfflatInitRegisterPage(index, &buf, &page, &state);
 
-	for (int i = 0; i < lists; i++)
-	{
-		OffsetNumber offno;
+    /* Apply JL projection to centers first */
+    for (int i = 0; i < lists; i++) {
+        Vector *origin_center = (Vector *)VectorArrayGet(centers, i);
+        Vector *jl_center = (Vector *)VectorArrayGet(jlCenters, i);
+        
+        /* Project the center vector */
+        JLProjectVector(jlproj, origin_center, jl_center);
+        jl_center->dim = jl_dim;
+    }
 
-		/* Zero memory for each list */
-		MemSet(list, 0, listSize);
+    for (int i = 0; i < lists; i++) {
+        OffsetNumber offno;
 
-		/* Load list */
-		list->startPage = InvalidBlockNumber;
-		list->insertPage = InvalidBlockNumber;
-		memcpy(&list->jlCenter, VectorArrayGet(centers, i), VARSIZE_ANY(VectorArrayGet(centers, i)));
+        /* Zero memory for each list */
+        MemSet(list, 0, listSize);
 
-		/* Ensure free space */
-		if (PageGetFreeSpace(page) < listSize)
-			IvfflatAppendPage(index, &buf, &page, &state, forkNum);
+        /* Load list */
+        list->startPage = InvalidBlockNumber;
+        list->insertPage = InvalidBlockNumber;
+        
+        /* Store projected center */
+        memcpy(&list->jlCenter, VectorArrayGet(jlCenters, i), VARSIZE_ANY(VectorArrayGet(jlCenters, i)));
 
-		/* Add the item */
-		offno = PageAddItem(page, (Item) list, listSize, InvalidOffsetNumber, false, false);
-		if (offno == InvalidOffsetNumber)
-			elog(ERROR, "failed to add index item to \"%s\"", RelationGetRelationName(index));
+        /* Ensure free space - reuse existing logic */
+        if (PageGetFreeSpace(page) < listSize)
+            IvfflatAppendPage(index, &buf, &page, &state, forkNum);
 
-		/* Save location info */
-		(*listInfo)[i].blkno = BufferGetBlockNumber(buf);
-		(*listInfo)[i].offno = offno;
-	}
+        /* Add the item */
+        offno = PageAddItem(page, (Item) list, listSize, InvalidOffsetNumber, false, false);
+        if (offno == InvalidOffsetNumber)
+            elog(ERROR, "failed to add index item to \"%s\"", RelationGetRelationName(index));
 
-	IvfflatCommitBuffer(buf, state);/*提交缓冲区到磁盘*/
-	pfree(list);/*刷盘*/
+        /* Save location info */
+        (*listInfo)[i].blkno = BufferGetBlockNumber(buf);
+        (*listInfo)[i].offno = offno;
+    }
+
+    IvfflatCommitBuffer(buf, state);
+    pfree(list);
 }

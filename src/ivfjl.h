@@ -37,6 +37,7 @@ typedef struct IvfjlBuildState {
     JLProjection            jlProj;     /* JL 投影信息 */
     bool                    reorder;    /* 是否使用原始向量进行重排序 */ 
     int                     reorderCandidates; /* 重排序候选集倍数 */
+	VectorArray jlCenters; // jl优化
 }   IvfjlBuildState;
 
 typedef struct IvfjlMetaPageData
@@ -71,7 +72,7 @@ typedef IvfjlScanOpaqueData* IvfjlScanOpaque;
 void IvfflatInit(void);
 
 void GenerateJLProjection(JLProjection *proj, int original_dim, int reduced_dim, MemoryContext ctx);/*生成 JL 投影矩阵*/
-void JLProjectVector(const JLProjection *proj, const float *src, float *dst);/*对向量做 JL 投影*/
+void JLProjectVector(const JLProjection *proj, Vector *srcVector, Vector *dstVector);/*对向量做 JL 投影*/
 void FreeJLProjection(JLProjection *proj);/*释放 JL 投影矩阵*/
 
 void WriteJLToMetaPage(Page page, JLProjection *proj);/*JL 投影矩阵序列化到元数据页*/
@@ -84,8 +85,14 @@ Datum ivfjlhandler(PG_FUNCTION_ARGS);/*IVFJL处理器函数*/
 
 IndexBuildResult *ivfjlbuild(Relation heap, Relation index, IndexInfo *indexInfo);/*JL 版本批量建索引主流程*/
 void ivfjlbuildempty(Relation index);/*JL 版本空表建索引*/
-bool ivfjlinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid,
-                 Relation heap, IndexUniqueCheck checkUnique
+void IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo, IvfjlBuildState * buildstate, ForkNumber forkNum);
+void IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo, JLProjection *);
+void IvfjlFreeBuildState(IvfjlBuildState * buildstate);
+void IvfjlCreateMetaPage(Relation index, int dimensions, int jlDimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
+void IvfjlCreateListPages(Relation index, VectorArray centers, VectorArray jlCenters, int original_dim, int jl_dim, int lists, ForkNumber forkNum, ListInfo** listInfo, JLProjection* jlproj);
+                 
+
+bool ivfjlinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
 #if PG_VERSION_NUM >= 140000
                  ,bool indexUnchanged
 #endif

@@ -37,13 +37,13 @@
 #define PARALLEL_KEY_IVFFLAT_CENTERS	UINT64CONST(0xA000000000000003)
 #define PARALLEL_KEY_QUERY_TEXT			UINT64CONST(0xA000000000000004)
 
-/* Forward declarations for IVFJL functions */
-static void IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
-                           IvfjlBuildState * buildstate, ForkNumber forkNum);
-static void IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo);
-// static void IvfjlComputeCenters(IvfjlBuildState * buildstate);
-static void IvfjlCreateMetaPage(Relation index, int dimensions, int JLDimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
-static void IvfjlFreeBuildState(IvfjlBuildState * buildstate);
+// /* Forward declarations for IVFJL functions */
+// static void IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
+//                            IvfjlBuildState * buildstate, ForkNumber forkNum);
+// static void IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo);
+// // static void IvfjlComputeCenters(IvfjlBuildState * buildstate);
+// static void IvfjlCreateMetaPage(Relation index, int dimensions, int JLDimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
+// static void IvfjlFreeBuildState(IvfjlBuildState * buildstate);
 
 /*
  * Add sample
@@ -480,7 +480,7 @@ CreateMetaPage(Relation index, int dimensions, int lists, ForkNumber forkNum)
  */
 static void
 CreateListPages(Relation index, VectorArray centers, int dimensions,
-				int lists, ForkNumber forkNum, ListInfo **listInfo)
+				int lists, ForkNumber forkNum, ListInfo * *listInfo)
 {
 	Buffer		buf;
 	Page		page;
@@ -520,8 +520,9 @@ CreateListPages(Relation index, VectorArray centers, int dimensions,
 		(*listInfo)[i].offno = offno;
 	}
 
-	IvfflatCommitBuffer(buf, state);/*提交缓冲区到磁盘*/
-	pfree(list);/*刷盘*/
+	IvfflatCommitBuffer(buf, state);
+
+	pfree(list);
 }
 
 #ifdef IVFFLAT_KMEANS_DEBUG
@@ -1002,7 +1003,7 @@ CreateEntryPages(IvfflatBuildState * buildstate, ForkNumber forkNum)
 /*
  * Build the index
  */
-static void
+void
 BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
 		   IvfflatBuildState * buildstate, ForkNumber forkNum)
 {
@@ -1020,22 +1021,4 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
 		log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocksInFork(index, forkNum), true);
 
 	FreeBuildState(buildstate);
-}
-
-/*
- * Build the index for a logged table
- */
-IndexBuildResult *
-ivfflatbuild(Relation heap, Relation index, IndexInfo *indexInfo)
-{
-	IndexBuildResult *result;
-	IvfflatBuildState buildstate;
-
-	BuildIndex(heap, index, indexInfo, &buildstate, MAIN_FORKNUM);
-
-	result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
-	result->heap_tuples = buildstate.reltuples;
-	result->index_tuples = buildstate.indtuples;
-
-	return result;
 }

@@ -193,7 +193,6 @@ typedef struct IvfflatBuildState
 	/* Variables */
 	VectorArray samples;
 	VectorArray centers;
-	VectorArray jlCenters; // jl优化
 	ListInfo   *listInfo;
 
 #ifdef IVFFLAT_KMEANS_DEBUG
