@@ -407,28 +407,88 @@ ivfflatendscan(IndexScanDesc scan)
 }
 
 IndexScanDesc ivfjlbeginscan(Relation index, int nkeys, int norderbys) {
-	Page metaPage;
-	IndexScanDesc scan = RelationGetIndexScan(index, nkeys, norderbys);
+    IndexScanDesc scan;
+    IvfjlScanOpaque so;
+    int lists, dimensions;
+    int probes = ivfflat_probes;
+    int maxProbes;
+    MemoryContext oldCtx;
 
-	/*ivfflat和ivfjl的scan opaque*/
-	IvfflatScanOpaque flat_so = (IvfflatScanOpaque) scan->opaque;
-    IvfjlScanOpaque so = (IvfjlScanOpaque) palloc0(sizeof(IvfjlScanOpaqueData));
-
-	memcpy(&so->base, flat_so, sizeof(IvfflatScanOpaqueData));
-
-    /* 读取 JL 投影矩阵 */
+    scan = RelationGetIndexScan(index, nkeys, norderbys);
+    
+    /*获取元数据信息*/ 
+    IvfflatGetMetaPageInfo(index, &lists, &dimensions);
+    
+    /*计算扫描参数*/ 
+    if (ivfflat_iterative_scan != IVFFLAT_ITERATIVE_SCAN_OFF)
+        maxProbes = Max(ivfflat_max_probes, probes);
+    else
+        maxProbes = probes;
+    
+    if (probes > lists) probes = lists;
+    if (maxProbes > lists) maxProbes = lists;
+    
+    /*分配ivfjl scan opaque*/ 
+    so = (IvfjlScanOpaque) palloc0(sizeof(IvfjlScanOpaqueData));
+    
+    /*初始化基础字段*/ 
+    so->base.typeInfo = IvfflatGetTypeInfo(index);
+    so->base.first = true;
+    so->base.probes = probes;
+    so->base.maxProbes = maxProbes;
+    so->base.dimensions = dimensions;
+    
+    /*设置支持函数*/ 
+    so->base.procinfo = index_getprocinfo(index, 1, IVFFLAT_DISTANCE_PROC);
+    so->base.normprocinfo = IvfflatOptionalProcInfo(index, IVFFLAT_NORM_PROC);
+    so->base.collation = index->rd_indcollation[0];
+    
+    /*创建临时内存上下文*/ 
+    so->base.tmpCtx = AllocSetContextCreate(CurrentMemoryContext,
+                                           "Ivfjl scan temporary context",
+                                           ALLOCSET_DEFAULT_SIZES);
+    
+    oldCtx = MemoryContextSwitchTo(so->base.tmpCtx);
+    
+    /*创建元组描述符*/ 
+    so->base.tupdesc = CreateTemplateTupleDesc(2);
+    TupleDescInitEntry(so->base.tupdesc, (AttrNumber) 1, "distance", FLOAT8OID, -1, 0);
+    TupleDescInitEntry(so->base.tupdesc, (AttrNumber) 2, "heaptid", TIDOID, -1, 0);
+    
+    /* 初始化排序状态 */
+    so->base.sortstate = InitScanSortState(so->base.tupdesc);
+    
+    /* 创建元组槽 */
+    so->base.vslot = MakeSingleTupleTableSlot(so->base.tupdesc, &TTSOpsVirtual);
+    so->base.mslot = MakeSingleTupleTableSlot(so->base.tupdesc, &TTSOpsMinimalTuple);
+    
+    /* 设置缓冲区访问策略 */
+    so->base.bas = GetAccessStrategy(BAS_BULKREAD);
+    
+    /* 初始化列表管理 */
+    so->base.listQueue = pairingheap_allocate(CompareLists, scan);
+    so->base.listPages = palloc(maxProbes * sizeof(BlockNumber));
+    so->base.listIndex = 0;
+    so->base.lists = palloc(maxProbes * sizeof(IvfflatScanList));
+    
+    MemoryContextSwitchTo(oldCtx);
+    
+    /* 读取JL投影矩阵 */
     Buffer metaBuf = ReadBuffer(index, IVFFLAT_METAPAGE_BLKNO);
+    if (!BufferIsValid(metaBuf)) {
+        elog(ERROR, "failed to read metapage");
+    }
+    
     LockBuffer(metaBuf, BUFFER_LOCK_SHARE);
-    metaPage = BufferGetPage(metaBuf);
+    Page metaPage = BufferGetPage(metaBuf);
     ReadJLFromMetaPage(metaPage, &so->jlProj, CurrentMemoryContext);
     UnlockReleaseBuffer(metaBuf);
-
-	so->jlDimensions = so->jlProj.reduced_dim;
-	so->reorder = ivfjl_enable_reorder;
-	so->reorderCandidates = ivfjl_reorder_candidates;
-
-    pfree(flat_so);
-	scan->opaque = so;/*设置新的scan opaque*/
-
+    
+    /* 设置JL相关参数 */
+    so->jlDimensions = so->jlProj.reduced_dim;
+    so->reorder = ivfjl_enable_reorder;
+    so->reorderCandidates = ivfjl_reorder_candidates;
+    
+    scan->opaque = so;
     return scan;
 }
