@@ -22,11 +22,11 @@ Buffer IvfflatNewBuffer(Relation index, ForkNumber forkNum);
 void IvfflatInitRegisterPage(Relation index, Buffer *buf, Page *page, GenericXLogState **state);
 void IvfflatCommitBuffer(Buffer buf, GenericXLogState *state);
 void IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
-    IvfjlBuildState * buildstate, ForkNumber forkNum);
-void IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo, JLProjection* jlproj);
-// void IvfjlComputeCenters(IvfjlBuildState * buildstate);
+    IvfflatBuildState * buildstate, ForkNumber forkNum);
+void IvfjlInitBuildState(IvfflatBuildState * buildstate, Relation index, JLProjection* jlproj);
+// void IvfjlComputeCenters(IvfflatBuildState * buildstate);
 void IvfjlCreateMetaPage(Relation index, int dimensions, int JLDimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
-void IvfjlFreeBuildState(IvfjlBuildState* buildstate);
+void IvfjlFreeBuildState(IvfflatBuildState* buildstate);
 void IvfjlCreateListPages(Relation index, VectorArray centers, VectorArray jlCenters, int original_dim, int jl_dim, int lists, ForkNumber forkNum, ListInfo** listInfo, JLProjection *jlproj);
 
 #endif

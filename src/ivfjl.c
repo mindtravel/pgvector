@@ -145,14 +145,14 @@ static bytea*
 ivfjloptions(Datum reloptions, bool validate)
 {
     static const relopt_parse_elt tab[] = {
-		{"lists", RELOPT_TYPE_INT, offsetof(IvfjlOptions, base.lists)},
-		{"reorder", RELOPT_TYPE_BOOL, offsetof(IvfjlOptions, reorder)},
-		{"reorder_candidates", RELOPT_TYPE_INT, offsetof(IvfjlOptions, reorderCandidates)},
+		{"lists", RELOPT_TYPE_INT, offsetof(IvfflatOptions, lists)},
+		{"reorder", RELOPT_TYPE_BOOL, offsetof(IvfflatOptions, reorder)},
+		{"reorder_candidates", RELOPT_TYPE_INT, offsetof(IvfflatOptions, reorderCandidates)},
 	};
 
 	return (bytea *) build_reloptions(reloptions, validate,
 									  ivfjl_relopt_kind,
-									  sizeof(IvfjlOptions),
+									  sizeof(IvfflatOptions),
 									  tab, lengthof(tab));
 }
 
@@ -201,8 +201,8 @@ ivfjlhandler(PG_FUNCTION_ARGS)
 	amroutine->amkeytype = InvalidOid;
 
 	/* Interface functions */
-	amroutine->ambuild = ivfjlbuild;
-	amroutine->ambuildempty = ivfjlbuildempty;
+	amroutine->ambuild = ivfflatbuild;
+	amroutine->ambuildempty = ivfjlbuildempty; /*暂时测着没问题*/
 	amroutine->aminsert = ivfflatinsert;
 #if PG_VERSION_NUM >= 170000
 	amroutine->aminsertcleanup = NULL;

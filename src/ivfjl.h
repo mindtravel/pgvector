@@ -19,27 +19,27 @@
 // #define IvfjlPageGetOpaque(page)	((IvfjlPageOpaque) PageGetSpecialPointer(page))
 
 
-/* JL 投影结构体 */
-typedef struct JLProjection {
-    int original_dim;
-    int reduced_dim;
-    float *matrix; // 行优先，大小 reduced_dim * original_dim
-} JLProjection;
+// /* JL 投影结构体 */
+// typedef struct JLProjection {
+//     int original_dim;
+//     int reduced_dim;
+//     float *matrix; // 行优先，大小 reduced_dim * original_dim
+// } JLProjection;
 
-typedef struct IvfjlOptions
-{
-    IvfflatOptions          base;        /* 复用 ivfflat 的 Options */
-	bool		            reorder;		/* 是否使用原始向量进行重排序 */
-	int			            reorderCandidates; /* 重排序候选集大小 */
-}	IvfjlOptions;
+// typedef struct IvfjlOptions
+// {
+//     IvfflatOptions          base;        /* 复用 ivfflat 的 Options */
+// 	bool		            reorder;		/* 是否使用原始向量进行重排序 */
+// 	int			            reorderCandidates; /* 重排序候选集大小 */
+// }	IvfjlOptions;
 
-typedef struct IvfjlBuildState {
-    IvfflatBuildState       base;       /* 复用 ivfflat 的 build state */
-    JLProjection            jlProj;     /* JL 投影信息 */
-    bool                    reorder;    /* 是否使用原始向量进行重排序 */ 
-    int                     reorderCandidates; /* 重排序候选集倍数 */
-	VectorArray jlCenters; // jl优化
-}   IvfjlBuildState;
+// typedef struct IvfjlBuildState {
+//     IvfflatBuildState       base;       /* 复用 ivfflat 的 build state */
+    // JLProjection            jlProj;     /* JL 投影信息 */
+//     bool                    reorder;    /* 是否使用原始向量进行重排序 */ 
+//     int                     reorderCandidates; /* 重排序候选集倍数 */
+// 	VectorArray jlCenters; // jl优化
+// }   IvfjlBuildState;
 
 // typedef struct IvfjlMetaPageData
 // {
@@ -86,9 +86,9 @@ Datum ivfjlhandler(PG_FUNCTION_ARGS);/*IVFJL处理器函数*/
 
 IndexBuildResult *ivfjlbuild(Relation heap, Relation index, IndexInfo *indexInfo);/*JL 版本批量建索引主流程*/
 void ivfjlbuildempty(Relation index);/*JL 版本空表建索引*/
-void IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo, IvfjlBuildState * buildstate, ForkNumber forkNum);
-void IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo, JLProjection *);
-void IvfjlFreeBuildState(IvfjlBuildState * buildstate);
+void IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo, IvfflatBuildState * buildstate, ForkNumber forkNum);
+void IvfjlInitBuildState(IvfflatBuildState * buildstate, Relation index, JLProjection *);
+void IvfjlFreeBuildState(IvfflatBuildState * buildstate);
 void IvfjlCreateMetaPage(Relation index, int dimensions, int jlDimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
 void IvfjlCreateListPages(Relation index, VectorArray centers, VectorArray jlCenters, int original_dim, int jl_dim, int lists, ForkNumber forkNum, ListInfo** listInfo, JLProjection* jlproj);
 void IvfjlGetMetaPageInfo(Relation index, int *lists, int *dimensions); 

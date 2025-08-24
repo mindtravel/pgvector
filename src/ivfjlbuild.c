@@ -13,13 +13,13 @@
  */
 IndexBuildResult *ivfjlbuild(Relation heap, Relation index, IndexInfo *indexInfo) {
     IndexBuildResult *result;
-    IvfjlBuildState buildstate;
+    IvfflatBuildState buildstate;
 
     IvfjlBuildIndex(heap, index, indexInfo, &buildstate, MAIN_FORKNUM);
 
     result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
-    result->heap_tuples = buildstate.base.reltuples;
-    result->index_tuples = buildstate.base.indtuples;
+    result->heap_tuples = buildstate.reltuples;
+    result->index_tuples = buildstate.indtuples;
 
     return result;
 }
@@ -31,7 +31,7 @@ void
 ivfjlbuildempty(Relation index)
 {
     IndexInfo  *indexInfo = BuildIndexInfo(index);
-    IvfjlBuildState buildstate;
+    IvfflatBuildState buildstate;
 
     IvfjlBuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
 }
@@ -41,28 +41,25 @@ ivfjlbuildempty(Relation index)
  */
 void
 IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
-               IvfjlBuildState * buildState, ForkNumber forkNum)
+               IvfflatBuildState * buildState, ForkNumber forkNum)
 {
-	IvfflatBuildState* baseBuildState;
-	baseBuildState = &(buildState->base);
+    /*设置BuildState*/
+    InitBuildState(buildState, heap, index, indexInfo); /*设置ivfflat相关字段*/
+    IvfjlInitBuildState(buildState, index, buildState->jlProj); /*设置ivfjl相关字段*/
 
-    InitBuildState(&buildState->base, heap, index, indexInfo);
-    IvfjlInitBuildState(buildState, heap, index, indexInfo, &buildState->jlProj);
-
-    ComputeCenters(&(buildState->base));
+    ComputeCenters(buildState);
 
     /* Generate JL projection matrix */
-    GenerateJLProjection(&buildState->jlProj, baseBuildState->dimensions, 
+    GenerateJLProjection(buildState->jlProj, buildState->dimensions, 
 		IVFJL_DEFAULT_REDUCED_DIM, CurrentMemoryContext);
 
     /* Create pages */
-    CreateListPages(index, baseBuildState->centers, baseBuildState->dimensions, baseBuildState->lists, forkNum, &baseBuildState->listInfo);
-    IvfjlCreateListPages(index, baseBuildState->centers, buildState->jlCenters, baseBuildState->dimensions, IVFJL_DEFAULT_REDUCED_DIM,
-        baseBuildState->lists, forkNum, &baseBuildState->listInfo, &buildState->jlProj);
+    CreateListPages(index, buildState->centers, buildState->dimensions, buildState->lists, forkNum, &(buildState->listInfo));
+    IvfjlCreateListPages(index, buildState->centers, buildState->jlCenters, buildState->dimensions, IVFJL_DEFAULT_REDUCED_DIM,
+        buildState->lists, forkNum, &(buildState->listInfo), buildState->jlProj);
 
-    IvfjlCreateMetaPage(index, baseBuildState->dimensions, IVFJL_DEFAULT_REDUCED_DIM, baseBuildState->lists, forkNum, &buildState->jlProj);
-
-    CreateEntryPages(baseBuildState, forkNum);
+    CreateEntryPages(buildState, forkNum);
+    IvfjlCreateMetaPage(index, buildState->dimensions, IVFJL_DEFAULT_REDUCED_DIM, buildState->lists, forkNum, buildState->jlProj);
 
     /* Write WAL for initialization fork since GenericXLog functions do not */
     if (forkNum == INIT_FORKNUM)
@@ -75,20 +72,20 @@ IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
  * Initialize the IVFJL build state
  */
 void
-IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo, JLProjection* jlproj)
+IvfjlInitBuildState(IvfflatBuildState * buildstate, Relation index, JLProjection* jlproj)
 {
-	IvfjlOptions* opts;
+	IvfflatOptions* opts;
 	/* Initialize the base ivfflat build state */
     
     /* Initialize JL projection - set to zero initially */
-	memset(&buildstate->jlProj, 0, sizeof(JLProjection));
+	memset(buildstate->jlProj, 0, sizeof(JLProjection));
 
 	/* Initialize JL centers array */
-	buildstate->jlCenters = VectorArrayInit(buildstate->base.lists, IVFJL_DEFAULT_REDUCED_DIM, 
-		buildstate->base.typeInfo->itemSize(IVFJL_DEFAULT_REDUCED_DIM));
+	buildstate->jlCenters = VectorArrayInit(buildstate->lists, IVFJL_DEFAULT_REDUCED_DIM, 
+		buildstate->typeInfo->itemSize(IVFJL_DEFAULT_REDUCED_DIM));
 
 	/* Initialize reorder parameters from index options */
-	opts = (IvfjlOptions *) index->rd_options;
+	opts = (IvfflatOptions *) index->rd_options;
 	if (opts) {
 		buildstate->reorder = opts->reorder;
 		buildstate->reorderCandidates = opts->reorderCandidates;
@@ -136,10 +133,10 @@ IvfjlCreateMetaPage(
  * Free resources for IVFJL build state
  */
 void
-IvfjlFreeBuildState(IvfjlBuildState * buildstate)
+IvfjlFreeBuildState(IvfflatBuildState * buildstate)
 {
     /* Free JL projection */
-    FreeJLProjection(&buildstate->jlProj);
+    FreeJLProjection(buildstate->jlProj);
 
     /* Free JL centers array */
     if (buildstate->jlCenters) {
@@ -148,7 +145,7 @@ IvfjlFreeBuildState(IvfjlBuildState * buildstate)
     }
 
     /* Free base build state */
-    FreeBuildState(&buildstate->base);
+    FreeBuildState(buildstate);
 }
 
 // void

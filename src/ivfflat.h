@@ -83,6 +83,13 @@ extern int	ivfflat_probes;
 extern int	ivfflat_iterative_scan;
 extern int	ivfflat_max_probes;
 
+/* JL 投影结构体 */
+typedef struct JLProjection {
+    int original_dim;
+    int reduced_dim;
+    float *matrix; // 行优先，大小 reduced_dim * original_dim
+} JLProjection;
+
 typedef enum IvfflatIterativeScanMode
 {
 	IVFFLAT_ITERATIVE_SCAN_OFF,
@@ -111,6 +118,9 @@ typedef struct IvfflatOptions
 {
 	int32		vl_len_;		/* varlena header (do not touch directly!) */
 	int			lists;			/* number of lists */
+	/*jl优化*/
+	bool		reorder;		/* 是否使用原始向量进行重排序 */
+	int			reorderCandidates; /* 重排序候选集大小 */
 }			IvfflatOptions;
 
 typedef struct IvfflatSpool
@@ -177,8 +187,12 @@ typedef struct IvfflatBuildState
 
 	/* Settings */
 	int			dimensions;
-	int			jlDimensions; // jl优化
 	int			lists;
+	/* JL优化 */
+	int			jlDimensions; // jl优化
+    JLProjection	*jlProj;     /* JL 投影矩阵：存指针 */
+	bool        reorder;            /* 是否使用原始向量进行重排序 */
+    int         reorderCandidates;  /* 重排序候选集大小 */
 
 	/* Statistics */
 	double		indtuples;
@@ -193,6 +207,7 @@ typedef struct IvfflatBuildState
 	/* Variables */
 	VectorArray samples;
 	VectorArray centers;
+	VectorArray jlCenters; // jl优化
 	ListInfo   *listInfo;
 
 #ifdef IVFFLAT_KMEANS_DEBUG
