@@ -409,13 +409,26 @@ ivfflatendscan(IndexScanDesc scan)
 IndexScanDesc ivfjlbeginscan(Relation index, int nkeys, int norderbys) {
 	Page metaPage;
 	IndexScanDesc scan = RelationGetIndexScan(index, nkeys, norderbys);
+
+	/*ivfflat和ivfjl的scan opaque*/
+	IvfflatScanOpaque flat_so = (IvfflatScanOpaque) scan->opaque;
     IvfjlScanOpaque so = (IvfjlScanOpaque) palloc0(sizeof(IvfjlScanOpaqueData));
-    // 读取 JL 投影矩阵
+
+	memcpy(&so->base, flat_so, sizeof(IvfflatScanOpaqueData));
+
+    /* 读取 JL 投影矩阵 */
     Buffer metaBuf = ReadBuffer(index, IVFFLAT_METAPAGE_BLKNO);
     LockBuffer(metaBuf, BUFFER_LOCK_SHARE);
     metaPage = BufferGetPage(metaBuf);
     ReadJLFromMetaPage(metaPage, &so->jlProj, CurrentMemoryContext);
     UnlockReleaseBuffer(metaBuf);
-    scan->opaque = so;
+
+	so->jlDimensions = so->jlProj.reduced_dim;
+	so->reorder = ivfjl_enable_reorder;
+	so->reorderCandidates = ivfjl_reorder_candidates;
+
+    pfree(flat_so);
+	scan->opaque = so;/*设置新的scan opaque*/
+
     return scan;
 }

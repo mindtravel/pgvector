@@ -219,7 +219,7 @@ ivfjlhandler(PG_FUNCTION_ARGS)
 #if PG_VERSION_NUM >= 140000
 	amroutine->amadjustmembers = NULL;
 #endif
-	amroutine->ambeginscan = ivfflatbeginscan;
+	amroutine->ambeginscan = ivfjlbeginscan;
 	amroutine->amrescan = ivfflatrescan;
 	amroutine->amgettuple = ivfflatgettuple;
 	amroutine->amgetbitmap = NULL;

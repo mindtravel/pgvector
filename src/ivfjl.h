@@ -15,6 +15,9 @@
 
 #define IVFJL_LIST_SIZE(size)	(offsetof(IvfjlListData, jlCenter) + size)
 
+extern bool ivfjl_enable_reorder;
+extern int ivfjl_reorder_candidates;
+
 // #define IvfjlPageGetMeta(page)	((IvfjlMetaPage) PageGetContents(page))
 // #define IvfjlPageGetOpaque(page)	((IvfjlPageOpaque) PageGetSpecialPointer(page))
 
@@ -92,6 +95,11 @@ void IvfjlFreeBuildState(IvfflatBuildState * buildstate);
 void IvfjlCreateMetaPage(Relation index, int dimensions, int jlDimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
 void IvfjlCreateListPages(Relation index, VectorArray centers, VectorArray jlCenters, int original_dim, int jl_dim, int lists, ForkNumber forkNum, ListInfo** listInfo, JLProjection* jlproj);
 void IvfjlGetMetaPageInfo(Relation index, int *lists, int *dimensions); 
+/*jl扫描相关的函数*/
+IndexScanDesc ivfjlbeginscan(Relation index, int nkeys, int norderbys);
+void ivfjlrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
+bool ivfjlgettuple(IndexScanDesc scan, ScanDirection dir);
+void ivfjlendscan(IndexScanDesc scan);
 
 bool ivfjlinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
 #if PG_VERSION_NUM >= 140000
