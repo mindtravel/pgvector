@@ -1,4 +1,4 @@
-#include "total.h"
+#include "distances.h"
 #include <cuda_runtime.h>
 #include <math.h>
 #include <assert.h>
