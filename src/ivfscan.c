@@ -7,19 +7,16 @@
 #include "catalog/pg_type_d.h"
 #include "lib/pairingheap.h"
 #include "ivfflat.h"
-#include "ivfjl.h"
+#include "ivfscan.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "utils/memutils.h"
 
-#define GetScanList(ptr) pairingheap_container(IvfflatScanList, ph_node, ptr)
-#define GetScanListConst(ptr) pairingheap_const_container(IvfflatScanList, ph_node, ptr)
-
 /*
  * Compare list distances
  */
-static int
+int
 CompareLists(const pairingheap_node *a, const pairingheap_node *b, void *arg)
 {
 	if (GetScanListConst(a)->distance > GetScanListConst(b)->distance)
@@ -34,7 +31,7 @@ CompareLists(const pairingheap_node *a, const pairingheap_node *b, void *arg)
 /*
  * Get lists and sort by distance
  */
-static void
+void
 GetScanLists(IndexScanDesc scan, Datum value)
 {
 	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
@@ -110,7 +107,7 @@ GetScanLists(IndexScanDesc scan, Datum value)
 /*
  * Get items
  */
-static void
+void
 GetScanItems(IndexScanDesc scan, Datum value)
 {
 	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
@@ -188,7 +185,7 @@ ZeroDistance(FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2)
 /*
  * Get scan value
  */
-static Datum
+Datum
 GetScanValue(IndexScanDesc scan)
 {
 	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
@@ -225,7 +222,7 @@ GetScanValue(IndexScanDesc scan)
 /*
  * Initialize scan sort state
  */
-static Tuplesortstate *
+Tuplesortstate *
 InitScanSortState(TupleDesc tupdesc)
 {
 	AttrNumber	attNums[] = {1};
@@ -236,259 +233,3 @@ InitScanSortState(TupleDesc tupdesc)
 	return tuplesort_begin_heap(tupdesc, 1, attNums, sortOperators, sortCollations, nullsFirstFlags, work_mem, NULL, false);
 }
 
-/*
- * Prepare for an index scan
- */
-IndexScanDesc
-ivfflatbeginscan(Relation index, int nkeys, int norderbys)
-{
-	IndexScanDesc scan;
-	IvfflatScanOpaque so;
-	int			lists;
-	int			dimensions;
-	int			probes = ivfflat_probes;
-	int			maxProbes;
-	MemoryContext oldCtx;
-
-	scan = RelationGetIndexScan(index, nkeys, norderbys);
-
-	/* Get lists and dimensions from metapage */
-	IvfflatGetMetaPageInfo(index, &lists, &dimensions);
-
-	if (ivfflat_iterative_scan != IVFFLAT_ITERATIVE_SCAN_OFF)
-		maxProbes = Max(ivfflat_max_probes, probes);
-	else
-		maxProbes = probes;
-
-	if (probes > lists)
-		probes = lists;
-
-	if (maxProbes > lists)
-		maxProbes = lists;
-
-	so = (IvfflatScanOpaque) palloc(sizeof(IvfflatScanOpaqueData));
-	so->typeInfo = IvfflatGetTypeInfo(index);
-	so->first = true;
-	so->probes = probes;
-	so->maxProbes = maxProbes;
-	so->dimensions = dimensions;
-
-	/* Set support functions */
-	so->procinfo = index_getprocinfo(index, 1, IVFFLAT_DISTANCE_PROC);
-	so->normprocinfo = IvfflatOptionalProcInfo(index, IVFFLAT_NORM_PROC);
-	so->collation = index->rd_indcollation[0];
-
-	so->tmpCtx = AllocSetContextCreate(CurrentMemoryContext,
-									   "Ivfflat scan temporary context",
-									   ALLOCSET_DEFAULT_SIZES);
-
-	oldCtx = MemoryContextSwitchTo(so->tmpCtx);
-
-	/* Create tuple description for sorting */
-	so->tupdesc = CreateTemplateTupleDesc(2);
-	TupleDescInitEntry(so->tupdesc, (AttrNumber) 1, "distance", FLOAT8OID, -1, 0);
-	TupleDescInitEntry(so->tupdesc, (AttrNumber) 2, "heaptid", TIDOID, -1, 0);
-
-	/* Prep sort */
-	so->sortstate = InitScanSortState(so->tupdesc);
-
-	/* Need separate slots for puttuple and gettuple */
-	so->vslot = MakeSingleTupleTableSlot(so->tupdesc, &TTSOpsVirtual);
-	so->mslot = MakeSingleTupleTableSlot(so->tupdesc, &TTSOpsMinimalTuple);
-
-	/*
-	 * Reuse same set of shared buffers for scan
-	 *
-	 * See postgres/src/backend/storage/buffer/README for description
-	 */
-	so->bas = GetAccessStrategy(BAS_BULKREAD);
-
-	so->listQueue = pairingheap_allocate(CompareLists, scan);
-	so->listPages = palloc(maxProbes * sizeof(BlockNumber));
-	so->listIndex = 0;
-	so->lists = palloc(maxProbes * sizeof(IvfflatScanList));
-
-	MemoryContextSwitchTo(oldCtx);
-
-	scan->opaque = so;
-
-	return scan;
-}
-
-/*
- * Start or restart an index scan
- */
-void
-ivfflatrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys)
-{
-	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
-
-	so->first = true;
-	pairingheap_reset(so->listQueue);
-	so->listIndex = 0;
-
-	if (keys && scan->numberOfKeys > 0)
-		memmove(scan->keyData, keys, scan->numberOfKeys * sizeof(ScanKeyData));
-
-	if (orderbys && scan->numberOfOrderBys > 0)
-		memmove(scan->orderByData, orderbys, scan->numberOfOrderBys * sizeof(ScanKeyData));
-}
-
-/*
- * Fetch the next tuple in the given scan
- */
-bool
-ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
-{
-	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
-	ItemPointer heaptid;
-	bool		isnull;
-
-	/*
-	 * Index can be used to scan backward, but Postgres doesn't support
-	 * backward scan on operators
-	 */
-	Assert(ScanDirectionIsForward(dir));
-
-	if (so->first)
-	{
-		Datum		value;
-
-		/* Count index scan for stats */
-		pgstat_count_index_scan(scan->indexRelation);
-
-		/* Safety check */
-		if (scan->orderByData == NULL)
-			elog(ERROR, "cannot scan ivfflat index without order");
-
-		/* Requires MVCC-compliant snapshot as not able to pin during sorting */
-		/* https://www.postgresql.org/docs/current/index-locking.html */
-		if (!IsMVCCSnapshot(scan->xs_snapshot))
-			elog(ERROR, "non-MVCC snapshots are not supported with ivfflat");
-
-		value = GetScanValue(scan);
-		IvfflatBench("GetScanLists", GetScanLists(scan, value));
-		IvfflatBench("GetScanItems", GetScanItems(scan, value));
-		so->first = false;
-		so->value = value;
-	}
-
-	while (!tuplesort_gettupleslot(so->sortstate, true, false, so->mslot, NULL))
-	{
-		if (so->listIndex == so->maxProbes)
-			return false;
-
-		IvfflatBench("GetScanItems", GetScanItems(scan, so->value));
-	}
-
-	heaptid = (ItemPointer) DatumGetPointer(slot_getattr(so->mslot, 2, &isnull));
-
-	scan->xs_heaptid = *heaptid;
-	scan->xs_recheck = false;
-	scan->xs_recheckorderby = false;
-	return true;
-}
-
-/*
- * End a scan and release resources
- */
-void
-ivfflatendscan(IndexScanDesc scan)
-{
-	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
-
-	/* Free any temporary files */
-	tuplesort_end(so->sortstate);
-
-	MemoryContextDelete(so->tmpCtx);
-
-	pfree(so);
-	scan->opaque = NULL;
-}
-
-IndexScanDesc ivfjlbeginscan(Relation index, int nkeys, int norderbys) {
-    IndexScanDesc scan;
-    IvfjlScanOpaque so;
-    int lists, dimensions;
-    int probes = ivfflat_probes;
-    int maxProbes;
-    MemoryContext oldCtx;
-
-    scan = RelationGetIndexScan(index, nkeys, norderbys);
-    
-    /*获取元数据信息*/ 
-    IvfflatGetMetaPageInfo(index, &lists, &dimensions);
-    
-    /*计算扫描参数*/ 
-    if (ivfflat_iterative_scan != IVFFLAT_ITERATIVE_SCAN_OFF)
-        maxProbes = Max(ivfflat_max_probes, probes);
-    else
-        maxProbes = probes;
-    
-    if (probes > lists) probes = lists;
-    if (maxProbes > lists) maxProbes = lists;
-    
-    /*分配ivfjl scan opaque*/ 
-    so = (IvfjlScanOpaque) palloc0(sizeof(IvfjlScanOpaqueData));
-    
-    /*初始化基础字段*/ 
-    so->base.typeInfo = IvfflatGetTypeInfo(index);
-    so->base.first = true;
-    so->base.probes = probes;
-    so->base.maxProbes = maxProbes;
-    so->base.dimensions = dimensions;
-    
-    /*设置支持函数*/ 
-    so->base.procinfo = index_getprocinfo(index, 1, IVFFLAT_DISTANCE_PROC);
-    so->base.normprocinfo = IvfflatOptionalProcInfo(index, IVFFLAT_NORM_PROC);
-    so->base.collation = index->rd_indcollation[0];
-    
-    /*创建临时内存上下文*/ 
-    so->base.tmpCtx = AllocSetContextCreate(CurrentMemoryContext,
-                                           "Ivfjl scan temporary context",
-                                           ALLOCSET_DEFAULT_SIZES);
-    
-    oldCtx = MemoryContextSwitchTo(so->base.tmpCtx);
-    
-    /*创建元组描述符*/ 
-    so->base.tupdesc = CreateTemplateTupleDesc(2);
-    TupleDescInitEntry(so->base.tupdesc, (AttrNumber) 1, "distance", FLOAT8OID, -1, 0);
-    TupleDescInitEntry(so->base.tupdesc, (AttrNumber) 2, "heaptid", TIDOID, -1, 0);
-    
-    /* 初始化排序状态 */
-    so->base.sortstate = InitScanSortState(so->base.tupdesc);
-    
-    /* 创建元组槽 */
-    so->base.vslot = MakeSingleTupleTableSlot(so->base.tupdesc, &TTSOpsVirtual);
-    so->base.mslot = MakeSingleTupleTableSlot(so->base.tupdesc, &TTSOpsMinimalTuple);
-    
-    /* 设置缓冲区访问策略 */
-    so->base.bas = GetAccessStrategy(BAS_BULKREAD);
-    
-    /* 初始化列表管理 */
-    so->base.listQueue = pairingheap_allocate(CompareLists, scan);
-    so->base.listPages = palloc(maxProbes * sizeof(BlockNumber));
-    so->base.listIndex = 0;
-    so->base.lists = palloc(maxProbes * sizeof(IvfflatScanList));
-    
-    MemoryContextSwitchTo(oldCtx);
-    
-    /* 读取JL投影矩阵 */
-    Buffer metaBuf = ReadBuffer(index, IVFFLAT_METAPAGE_BLKNO);
-    if (!BufferIsValid(metaBuf)) {
-        elog(ERROR, "failed to read metapage");
-    }
-    
-    LockBuffer(metaBuf, BUFFER_LOCK_SHARE);
-    Page metaPage = BufferGetPage(metaBuf);
-    ReadJLFromMetaPage(metaPage, &so->jlProj, CurrentMemoryContext);
-    UnlockReleaseBuffer(metaBuf);
-    
-    /* 设置JL相关参数 */
-    so->jlDimensions = so->jlProj.reduced_dim;
-    so->reorder = ivfjl_enable_reorder;
-    so->reorderCandidates = ivfjl_reorder_candidates;
-    
-    scan->opaque = so;
-    return scan;
-}

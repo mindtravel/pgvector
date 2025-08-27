@@ -7,11 +7,11 @@
 #include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "ivfflat.h"
+#include "ivfjl.h"
 #include "utils/float.h"
 #include "utils/guc.h"
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
-#include "ivfjl.h"
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
@@ -203,7 +203,8 @@ ivfjlhandler(PG_FUNCTION_ARGS)
 	/* Interface functions */
 	amroutine->ambuild = ivfflatbuild;
 	amroutine->ambuildempty = ivfjlbuildempty; /*暂时测着没问题*/
-	amroutine->aminsert = ivfflatinsert;
+	// amroutine->aminsert = ivfjlinsertboth; /*插入时插入origin和jl两个向量*/
+	amroutine->aminsert = ivfflatinsert; 
 #if PG_VERSION_NUM >= 170000
 	amroutine->aminsertcleanup = NULL;
 #endif
@@ -220,10 +221,10 @@ ivfjlhandler(PG_FUNCTION_ARGS)
 	amroutine->amadjustmembers = NULL;
 #endif
 	amroutine->ambeginscan = ivfjlbeginscan;
-	amroutine->amrescan = ivfflatrescan;
+	amroutine->amrescan = ivfjlrescan;
 	amroutine->amgettuple = ivfflatgettuple;
 	amroutine->amgetbitmap = NULL;
-	amroutine->amendscan = ivfflatendscan;
+	amroutine->amendscan = ivfjlendscan;
 	amroutine->ammarkpos = NULL;
 	amroutine->amrestrpos = NULL;
 
@@ -247,11 +248,7 @@ void GenerateJLProjection(JLProjection *proj, int original_dim, int reduced_dim,
 }
 
 // JL 投影
-void JLProjectVector(const JLProjection *proj, Vector* srcVector, Vector* dstVector) {
-	float* src;
-	float* dst;
-	src = srcVector->x;
-	dst = dstVector->x;
+void JLProjectVector(const JLProjection *proj, float * src, float * dst) {
     for (int i = 0; i < proj->reduced_dim; i++) {
         float sum = 0.0f;
         for (int j = 0; j < proj->original_dim; j++) {

@@ -6,7 +6,7 @@
 #include "utils/guc.h"
 #include "ivfjl.h"
 #include "ivfflat.h"
-#include "ivfjlbuild.h"
+#include "ivfbuild.h"
 
 /*
  * Similar with ivfflatbuild
@@ -232,7 +232,7 @@ IvfjlCreateListPages(Relation index, VectorArray centers, VectorArray jlCenters,
         Vector *jl_center = (Vector *)VectorArrayGet(jlCenters, i);
         
         /* Project the center vector */
-        JLProjectVector(jlproj, origin_center, jl_center);
+        JLProjectVector(jlproj, origin_center->x, jl_center->x);
         jl_center->dim = jl_dim;
     }
 

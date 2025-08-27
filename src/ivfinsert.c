@@ -4,10 +4,10 @@
 
 #include "access/generic_xlog.h"
 #include "ivfflat.h"
+#include "ivfinsert.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "utils/memutils.h"
-#include "ivfjl.h"
 
 /*
  * Find the list that minimizes the distance function
@@ -65,7 +65,7 @@ FindInsertPage(Relation index, Datum *values, BlockNumber *insertPage, ListInfo 
 /*
  * Insert a tuple into the index
  */
-static void
+void
 InsertTuple(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heapRel)
 {
 	const		IvfflatTypeInfo *typeInfo = IvfflatGetTypeInfo(index);

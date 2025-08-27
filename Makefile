@@ -24,8 +24,11 @@ OBJS = src/bitutils.o \
 	src/sparsevec.o \
 	src/vector.o \
 	src/ivfjl.o \
-	src/ivfjlbuild.o  
-	
+	src/ivfjlbuild.o \
+	src/ivfjlinsert.o \
+	src/ivfjlscan.o \
+
+
 HEADERS = src/halfvec.h src/sparsevec.h src/vector.h
 
 TESTS = $(wildcard test/sql/*.sql)

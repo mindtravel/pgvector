@@ -10,14 +10,13 @@
 #include "ivfjl.h"
 #include "ivfflat.h"
 
-
-void BuildIndex(Relation heap, Relation index, IndexInfo* indexInfo,
-    IvfflatBuildState* buildstate, ForkNumber forkNum);
-void InitBuildState(IvfflatBuildState* buildstate, Relation heap, Relation index, IndexInfo* indexInfo);
-void FreeBuildState(IvfflatBuildState *buildstate);
-void ComputeCenters(IvfflatBuildState *buildstate);
-void CreateListPages(Relation index, VectorArray centers, int dimensions, int lists, ForkNumber forkNum, ListInfo **listInfo);
-void CreateEntryPages(IvfflatBuildState *buildstate, ForkNumber forkNum);
+// void BuildIndex(Relation heap, Relation index, IndexInfo* indexInfo,
+//     IvfflatBuildState* buildstate, ForkNumber forkNum);
+// void InitBuildState(IvfflatBuildState* buildstate, Relation heap, Relation index, IndexInfo* indexInfo);
+// void FreeBuildState(IvfflatBuildState *buildstate);
+// void ComputeCenters(IvfflatBuildState *buildstate);
+// void CreateListPages(Relation index, VectorArray centers, int dimensions, int lists, ForkNumber forkNum, ListInfo **listInfo);
+// void CreateEntryPages(IvfflatBuildState *buildstate, ForkNumber forkNum);
 Buffer IvfflatNewBuffer(Relation index, ForkNumber forkNum);
 void IvfflatInitRegisterPage(Relation index, Buffer *buf, Page *page, GenericXLogState **state);
 void IvfflatCommitBuffer(Buffer buf, GenericXLogState *state);

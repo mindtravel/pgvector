@@ -13,13 +13,13 @@
 #include "commands/progress.h"
 #include "halfvec.h"
 #include "ivfflat.h"
+#include "ivfbuild.h"
 #include "miscadmin.h"
 #include "optimizer/optimizer.h"
 #include "storage/bufmgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "vector.h"
-#include "ivfjl.h"	
 
 #if PG_VERSION_NUM >= 140000
 #include "utils/backend_progress.h"
@@ -36,14 +36,6 @@
 #define PARALLEL_KEY_TUPLESORT			UINT64CONST(0xA000000000000002)
 #define PARALLEL_KEY_IVFFLAT_CENTERS	UINT64CONST(0xA000000000000003)
 #define PARALLEL_KEY_QUERY_TEXT			UINT64CONST(0xA000000000000004)
-
-// /* Forward declarations for IVFJL functions */
-// static void IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
-//                            IvfjlBuildState * buildstate, ForkNumber forkNum);
-// static void IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo);
-// // static void IvfjlComputeCenters(IvfjlBuildState * buildstate);
-// static void IvfjlCreateMetaPage(Relation index, int dimensions, int JLDimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
-// static void IvfjlFreeBuildState(IvfjlBuildState * buildstate);
 
 /*
  * Add sample
