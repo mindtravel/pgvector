@@ -27,11 +27,12 @@ private:
     float *d_a_, *d_b_, *d_dot_, *d_sq_a_, *d_sq_b_;
     float *d_dot_sum_, *d_sq_a_sum_, *d_sq_b_sum_;
     float *h_dot_sum_, *h_sq_a_sum_, *h_sq_b_sum_;
-
-    static __global__ void dotProductKernel(const float* a, const float* b, float* result, int n);
-    static __global__ void squareKernel(const float* vec, float* result, int n);
-    static __global__ void reduceSumKernel(const float* input, float* output, int n);
 };
+
+// 全局CUDA核函数声明
+__global__ void dotProductKernel(const float* a, const float* b, float* result, int n);
+__global__ void squareKernel(const float* vec, float* result, int n);
+__global__ void reduceSumKernel(const float* input, float* output, int n);
 
 class L2DistanceOp {
 public:
@@ -39,6 +40,8 @@ public:
     float operator()(const float* d_A, const float* d_B, int n);
 
 private:
-    // CUDA Kernel 计算平方差
-    static __global__ void l2_distance_kernel(const float* A, const float* B, float* result, int n);
+    // 不需要在这里声明，因为已经在全局声明了
 };
+
+// 全局CUDA核函数声明
+__global__ void l2_distance_kernel(const float* A, const float* B, float* result, int n);
