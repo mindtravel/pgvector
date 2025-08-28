@@ -1,0 +1,106 @@
+# CUDA支持的Makefile
+# 使用方法: make -f Makefile.cuda
+
+# 扩展信息
+EXTENSION = vector
+EXTVERSION = 0.8.0
+
+# 模块名称
+MODULE_big = vector
+
+# 数据文件
+DATA = $(wildcard sql/*--*--*.sql)
+DATA_built = sql/$(EXTENSION)--$(EXTVERSION).sql
+
+# 目标文件 - 包含CUDA对象文件
+OBJS = cuda/cuda_wrapper.o \
+	src/bitutils.o \
+	src/bitvec.o \
+	src/halfutils.o \
+	src/halfvec.o \
+	src/hnsw.o \
+	src/hnswbuild.o \
+	src/hnswinsert.o \
+	src/hnswscan.o \
+	src/hnswutils.o \
+	src/hnswvacuum.o \
+	src/ivfbuild.o \
+	src/ivfflat.o \
+	src/ivfinsert.o \
+	src/ivfkmeans.o \
+	src/ivfscan.o \
+	src/ivfutils.o \
+	src/ivfvacuum.o \
+	src/sparsevec.o \
+	src/vector.o \
+	src/ivfjl.o
+
+# 头文件
+HEADERS = src/halfvec.h src/sparsevec.h src/vector.h
+
+# 测试
+TESTS = $(wildcard test/sql/*.sql)
+REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
+REGRESS_OPTS = --inputdir=test --load-extension=$(EXTENSION)
+
+# CUDA配置
+CUDA_PATH ?= /usr/local/cuda
+NVCC = $(CUDA_PATH)/bin/nvcc
+CUDA_INC = -I$(CUDA_PATH)/include
+CUDA_LIB = -L$(CUDA_PATH)/lib64 -lcudart
+
+# 编译优化标志
+OPTFLAGS = -march=native
+
+# Mac ARM doesn't always support -march=native
+ifeq ($(shell uname -s), Darwin)
+	ifeq ($(shell uname -p), arm)
+		OPTFLAGS =
+	endif
+endif
+
+# PowerPC doesn't support -march=native
+ifneq ($(filter ppc64%, $(shell uname -m)), )
+	OPTFLAGS =
+endif
+
+# 添加CUDA支持和优化标志
+PG_CFLAGS += $(OPTFLAGS) -ftree-vectorize -fassociative-math -fno-signed-zeros -fno-trapping-math -DUSE_CUDA
+PG_CPPFLAGS += $(CUDA_INC) -DUSE_CUDA
+SHLIB_LINK += $(CUDA_LIB)
+
+# 默认目标
+all: sql/$(EXTENSION)--$(EXTVERSION).sql
+
+sql/$(EXTENSION)--$(EXTVERSION).sql: sql/$(EXTENSION).sql
+	cp $< $@
+
+# 包含PostgreSQL构建系统
+PG_CONFIG ?= pg_config
+PGXS := $(shell $(PG_CONFIG) --pgxs)
+include $(PGXS)
+
+# CUDA编译规则 - 必须在include $(PGXS)之后
+%.o: %.cu
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA
+
+# 检查CUDA
+check_cuda:
+	@echo "检查CUDA安装..."
+	@if [ -d "$(CUDA_PATH)" ]; then \
+		echo "CUDA路径: $(CUDA_PATH)"; \
+		$(NVCC) --version; \
+	else \
+		echo "错误: 找不到CUDA安装路径"; \
+		exit 1; \
+	fi
+
+# 检查PostgreSQL配置
+check_pg:
+	@echo "检查PostgreSQL配置..."
+	@echo "pg_config路径: $(shell which pg_config)"
+	@echo "PostgreSQL版本: $(shell $(PG_CONFIG) --version)"
+	@echo "包含目录: $(shell $(PG_CONFIG) --includedir)"
+	@echo "库目录: $(shell $(PG_CONFIG) --libdir)"
+
+.PHONY: all clean install check_cuda check_pg
