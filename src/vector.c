@@ -48,7 +48,7 @@ _PG_init(void)
 	HalfvecInit();
 	HnswInit();
 	IvfflatInit();
-	IvfjlInit();
+	// IvfjlInit();
 }
 
 /*

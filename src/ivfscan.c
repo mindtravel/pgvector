@@ -5,6 +5,7 @@
 #include "access/relscan.h"
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_type_d.h"
+#include "cuda/cuda_wrapper.h"
 #include "lib/pairingheap.h"
 #include "ivfflat.h"
 #include "miscadmin.h"
@@ -12,6 +13,7 @@
 #include "storage/bufmgr.h"
 #include "utils/memutils.h"
 #include "ivfjl.h"
+
 
 #define GetScanList(ptr) pairingheap_container(IvfflatScanList, ph_node, ptr)
 #define GetScanListConst(ptr) pairingheap_const_container(IvfflatScanList, ph_node, ptr)
@@ -112,6 +114,75 @@ GetScanLists(IndexScanDesc scan, Datum value)
  */
 static void
 GetScanItems(IndexScanDesc scan, Datum value)
+{
+	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
+	TupleDesc	tupdesc = RelationGetDescr(scan->indexRelation);
+	TupleTableSlot *slot = so->vslot;
+	int			batchProbes = 0;
+
+	tuplesort_reset(so->sortstate);
+
+	/* Search closest probes lists */
+	while (so->listIndex < so->maxProbes && (++batchProbes) <= so->probes)
+	{
+		BlockNumber searchPage = so->listPages[so->listIndex++];
+
+		/* Search all entry pages for list */
+		while (BlockNumberIsValid(searchPage))
+		{
+			Buffer		buf;
+			Page		page;
+			OffsetNumber maxoffno;
+
+			buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, searchPage, RBM_NORMAL, so->bas);
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			page = BufferGetPage(buf);
+			maxoffno = PageGetMaxOffsetNumber(page);
+
+			for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno))
+			{
+				IndexTuple	itup;
+				Datum		datum;
+				bool		isnull;
+				ItemId		itemid = PageGetItemId(page, offno);
+
+				itup = (IndexTuple) PageGetItem(page, itemid);
+				datum = index_getattr(itup, 1, tupdesc, &isnull);
+
+				/*
+				 * Add virtual tuple
+				 *
+				 * Use procinfo from the index instead of scan key for
+				 * performance
+				 */
+				ExecClearTuple(slot);
+				slot->tts_values[0] = so->distfunc(so->procinfo, so->collation, datum, value);
+				slot->tts_isnull[0] = false;
+				slot->tts_values[1] = PointerGetDatum(&itup->t_tid);
+				slot->tts_isnull[1] = false;
+				ExecStoreVirtualTuple(slot);
+
+				tuplesort_puttupleslot(so->sortstate, slot);
+			}
+
+			searchPage = IvfflatPageGetOpaque(page)->nextblkno;
+
+			UnlockReleaseBuffer(buf);
+		}
+	}
+
+	tuplesort_performsort(so->sortstate);
+
+#if defined(IVFFLAT_MEMORY)
+	elog(INFO, "memory: %zu MB", MemoryContextMemAllocated(CurrentMemoryContext, true) / (1024 * 1024));
+#endif
+}
+
+/*
+ * Get items
+ */
+static void
+GetScanItems_GPU(IndexScanDesc scan, Datum value)
 {
 	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
 	TupleDesc	tupdesc = RelationGetDescr(scan->indexRelation);
@@ -308,6 +379,21 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 	so->listIndex = 0;
 	so->lists = palloc(maxProbes * sizeof(IvfflatScanList));
 
+// #ifdef USE_CUDA
+// 	/* 初始化CUDA支持 */
+// 	so->use_cuda = false;
+// 	so->cuda_ctx = NULL;
+	
+// 	/* 检查CUDA是否可用 */
+// 	if (cuda_is_available()) {
+// 		so->cuda_ctx = cuda_search_init(1000, dimensions); /* 预分配1000个向量 */
+// 		if (so->cuda_ctx) {
+// 			so->use_cuda = true;
+// 			elog(INFO, "CUDA加速已启用");
+// 		}
+// 	}
+// #endif
+
 	MemoryContextSwitchTo(oldCtx);
 
 	scan->opaque = so;
@@ -368,7 +454,7 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
 
 		value = GetScanValue(scan);
 		IvfflatBench("GetScanLists", GetScanLists(scan, value));
-		IvfflatBench("GetScanItems", GetScanItems(scan, value));
+		IvfflatBench("GetScanItems", GetScanItems_GPU(scan, value));
 		so->first = false;
 		so->value = value;
 	}
@@ -378,7 +464,7 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
 		if (so->listIndex == so->maxProbes)
 			return false;
 
-		IvfflatBench("GetScanItems", GetScanItems(scan, so->value));
+		IvfflatBench("GetScanItems", GetScanItems_GPU(scan, so->value));
 	}
 
 	heaptid = (ItemPointer) DatumGetPointer(slot_getattr(so->mslot, 2, &isnull));
@@ -399,6 +485,14 @@ ivfflatendscan(IndexScanDesc scan)
 
 	/* Free any temporary files */
 	tuplesort_end(so->sortstate);
+
+// #ifdef USE_CUDA
+// 	/* 清理CUDA资源 */
+// 	if (so->cuda_ctx) {
+// 		cuda_search_cleanup((CudaSearchContext*)so->cuda_ctx);
+// 		so->cuda_ctx = NULL;
+// 	}
+// #endif
 
 	MemoryContextDelete(so->tmpCtx);
 
