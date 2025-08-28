@@ -14,6 +14,7 @@ DATA_built = sql/$(EXTENSION)--$(EXTVERSION).sql
 
 # 目标文件 - 包含CUDA对象文件
 OBJS = cuda/cuda_wrapper.o \
+	cuda/cuda_distances.o \
 	src/bitutils.o \
 	src/bitvec.o \
 	src/halfutils.o \
@@ -82,7 +83,7 @@ include $(PGXS)
 
 # CUDA编译规则 - 必须在include $(PGXS)之后
 %.o: %.cu
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr
 
 # 检查CUDA
 check_cuda:
