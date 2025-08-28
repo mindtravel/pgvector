@@ -7,8 +7,8 @@ public:
     ~VectorNormalizer();
 
     // 向量归一化（L2范数归一化，原地修改输入数组）
-    void normalize(float* data, int n);
-
+    void normalize(float** vector_list, int n_batch, int n_dim);
+    void normalize_async(float*** vector_list, int n_lists, int n_batch, int n_dim);
     // 获取最近一次归一化的模长
     float last_norm() const;
 
@@ -20,7 +20,7 @@ class CosineDistanceOp {
 public:
     CosineDistanceOp(int n);
     ~CosineDistanceOp();
-    float compute(const float* a, const float* b);
+    float compute(const float* a, const float* b, const int n) ;
 
 private:
     int n_, blockSize_, gridSize_;
