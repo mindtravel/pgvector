@@ -83,7 +83,7 @@ include $(PGXS)
 
 # CUDA编译规则 - 必须在include $(PGXS)之后
 %.o: %.cu
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC
 
 # 检查CUDA
 check_cuda:

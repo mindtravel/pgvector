@@ -5,7 +5,6 @@
 #include "access/relscan.h"
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_type_d.h"
-#include "cuda/cuda_wrapper.h"
 #include "lib/pairingheap.h"
 #include "ivfflat.h"
 #include "miscadmin.h"
@@ -14,6 +13,9 @@
 #include "utils/memutils.h"
 #include "ivfjl.h"
 
+#ifdef USE_CUDA
+#include "cuda/cuda_wrapper.h"
+#endif
 
 #define GetScanList(ptr) pairingheap_container(IvfflatScanList, ph_node, ptr)
 #define GetScanListConst(ptr) pairingheap_const_container(IvfflatScanList, ph_node, ptr)
@@ -454,7 +456,8 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
 
 		value = GetScanValue(scan);
 		IvfflatBench("GetScanLists", GetScanLists(scan, value));
-		IvfflatBench("GetScanItems", GetScanItems_GPU(scan, value));
+		// IvfflatBench("GetScanItems", GetScanItems_GPU(scan, value));
+		IvfflatBench("GetScanItems", GetScanItems(scan, value));
 		so->first = false;
 		so->value = value;
 	}
@@ -464,7 +467,8 @@ ivfflatgettuple(IndexScanDesc scan, ScanDirection dir)
 		if (so->listIndex == so->maxProbes)
 			return false;
 
-		IvfflatBench("GetScanItems", GetScanItems_GPU(scan, so->value));
+		// IvfflatBench("GetScanItems", GetScanItems_GPU(scan, so->value));
+		IvfflatBench("GetScanItems", GetScanItems(scan, so->value));
 	}
 
 	heaptid = (ItemPointer) DatumGetPointer(slot_getattr(so->mslot, 2, &isnull));
