@@ -52,9 +52,11 @@ IvfflatInit(void)
 							NULL, &ivfflat_max_probes,
 							IVFFLAT_MAX_LISTS, IVFFLAT_MIN_LISTS, IVFFLAT_MAX_LISTS, PGC_USERSET, 0, NULL, NULL, NULL);
 	// 取消注释来验证cuda代码是否被正确编译
+#ifdef USE_CUDA
 	if(!cuda_is_available()){
 		elog(ERROR, "CUDA is not available!");
 	}
+#endif
 	MarkGUCPrefixReserved("ivfflat");
 }
 
