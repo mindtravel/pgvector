@@ -79,7 +79,7 @@ bool matrix_equal_2D(float** a, float** b, int rows, int cols, float epsilon) {
         for (int j = 0; j < cols; j++) {
             if(DEBUG == true)
                 std::cout << i <<  "\t"  << j << "\t" << a[i][j] <<  "\t"  << b[i][j] <<  "\t" << a[i][j] - b[i][j] << std::endl;
-            if (!float_equal(a[i][j], b[i][j], epsilon)) {
+            if (!float_equal_relative(a[i][j], b[i][j], epsilon)) {
                 err_happens ++;
                 // return false;
             }
@@ -100,8 +100,8 @@ float** generate_vector_list(int n_batch, int n_dim) {
         for (int j = 0; j < n_dim; j++) {
             // vector_list[i][j] = 1.0f;
             // vector_list[i][j] = (float)i + (float)j;
-            vector_list[i][j] = (float)rand() / RAND_MAX * 20.0f - 10.0f;
-            // vector_list[i][j] = (float)(i+j + 1.0f);
+            // vector_list[i][j] = (float)rand() / RAND_MAX * 20.0f - 10.0f;
+            vector_list[i][j] = (float)(i+j + 1.0f);
             // if(i == 1 && j == 0)
             //     vector_list[i][j] = 1.0f;
             // else

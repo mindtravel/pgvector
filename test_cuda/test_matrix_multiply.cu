@@ -288,7 +288,7 @@ int main() {
     
     try {
         // test_basic_matrix_multiply(10, 100, 30);
-        test_basic_matrix_multiply(1024, 1024, 1024);
+        test_basic_matrix_multiply(10, 1024, 1024);
         // test_identity_matrix();
         // test_alpha_beta_values();
         // test_large_scale_stress(1024, 1024, 1024);

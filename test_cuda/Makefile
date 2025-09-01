@@ -16,7 +16,7 @@ test_vector_normalizer: test_vector_normalizer.cu ../cuda/kernels.cu ../cuda/nor
 	$(NVCC) $(CUDA_FLAGS) $(CUDA_INCLUDE) $(CUDA_LIBS) $^ -o $@
 
 # 编译CosineDistanceOp测试
-test_cosine_distance: test_cosine_distance.cu ../cuda/matrix-multiply.cu ../cuda/kernels.cu test_utils.cpp
+test_cosine_distance: test_cosine_distance.cu ../cuda/distances.cu ../cuda/kernels.cu test_utils.cpp
 	$(NVCC) $(CUDA_FLAGS) $(CUDA_INCLUDE) $(CUDA_LIBS) $^ -o $@
 
 # 编译L2DistanceOp测试
