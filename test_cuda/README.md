@@ -5,13 +5,11 @@
 ## 测试内容
 
 ### 1. VectorNormalizer 测试 (`test_vector_normalizer.cu`)
-- **功能**: 向量L2范数归一化
+- **功能**: 向归一化/L2Norm
 - **测试用例**:
   - 基本归一化功能
   - 零向量处理
-  - 单位向量处理
-  - 大维度向量
-  - 性能测试
+  - 大规模异步压力性能测试
 
 ### 2. CosineDistanceOp 测试 (`test_cosine_distance.cu`)
 - **功能**: 余弦距离计算
@@ -23,15 +21,12 @@
   - 大维度向量
   - 性能测试（与CPU版本对比）
 
-### 3. L2DistanceOp 测试 (`test_l2_distance.cu`)
-- **功能**: L2距离计算
+### 3. MatrixMultiplyOp 测试 (`test_matrix_multiply.cu`)
+- **功能**: 矩阵乘法
 - **测试用例**:
-  - 基本L2距离计算
-  - 相同向量（距离为0）
-  - 单位向量（正交距离为√2）
-  - 零向量处理
-  - 大维度向量
-  - 性能测试（与CPU版本对比）
+  - 基本矩阵乘法
+  - 大规模异步压力性能测试
+
 
 ## 编译和运行
 
