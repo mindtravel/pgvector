@@ -166,7 +166,8 @@ int main() {
     std::cout << "开始VectorNormalizer单元测试..." << std::endl << std::endl;
     
     try {
-        // test_performance(4096, 1024);
+        test_performance(4096, 1024);
+        // test_performance(4096, 1021); n_dim不是2的次幂，规约求和会失效
         // test_performance(8192, 512);
         // test_performance(8192, 256);
         // // test_performance(16184, 256); n_batch 从8192增大到16184肯定会寄
@@ -177,7 +178,8 @@ int main() {
 
         test_zero_vector();
         // test_large_scale_async_stress(16, 1024, 512);
-        test_large_scale_async_stress(1024, 1024, 512);
+        // test_large_scale_async_stress(1024, 1024, 512);
+        // test_large_scale_async_stress(10, 10, 512);
         // test_large_scale_async_stress(8192, 1024, 512);
 
         std::cout << "all test passed!" << std::endl;

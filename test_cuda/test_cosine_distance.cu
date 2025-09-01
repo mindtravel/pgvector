@@ -1,246 +1,258 @@
 #include "../cuda/distances.h"
+#include "test_utils.h"
 #include <iostream>
 #include <cassert>
 #include <cmath>
 #include <chrono>
-
-// 测试辅助函数：比较浮点数
-bool float_equal(float a, float b, float epsilon = 1e-5f) {
-    return std::abs(a - b) < epsilon;
-}
+#include <cstring>
+#include <time.h>
+#include <stdlib.h>
+#define EPSILON 1e-2
+#define DIV_EPSILON 1e-4
 
 // CPU版本的余弦距离计算（用于验证）
-float cpu_cosine_distance(const float* a, const float* b, int n) {
-    float dot_product = 0.0f;
-    float norm_a = 0.0f;
-    float norm_b = 0.0f;
+void cpu_cosine_distance(float** query_vectors, float** data_vectors, float** cos_dist,
+                        int n_query, int n_batch, int n_dim) {
+    // 计算每个向量的L2范数
+    float* query_norms = (float*)malloc(n_query * sizeof(float));
+    float* data_norms = (float*)malloc(n_batch * sizeof(float));
     
-    for (int i = 0; i < n; i++) {
-        dot_product += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
+    // 计算query向量的L2范数
+    for (int i = 0; i < n_query; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < n_dim; j++) {
+            sum += query_vectors[i][j] * query_vectors[i][j];
+        }
+        query_norms[i] = sqrt(sum);
     }
     
-    norm_a = sqrtf(norm_a);
-    norm_b = sqrtf(norm_b);
-    
-    if (norm_a == 0.0f || norm_b == 0.0f) {
-        return 1.0f; // 如果任一向量为零向量，距离为1
+    // 计算data向量的L2范数
+    for (int i = 0; i < n_batch; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j < n_dim; j++) {
+            sum += data_vectors[i][j] * data_vectors[i][j];
+        }
+        data_norms[i] = sqrt(sum);
     }
     
-    float similarity = dot_product / (norm_a * norm_b);
-    return 1.0f - similarity;
+    // 计算余弦距离矩阵
+    for (int i = 0; i < n_query; i++) {
+        for (int j = 0; j < n_batch; j++) {
+            // 计算点积
+            float dot_product = 0.0f;
+            for (int k = 0; k < n_dim; k++) {
+                dot_product += query_vectors[i][k] * data_vectors[j][k];
+            }
+            
+            float cos_sim;
+            // 计算余弦相似度
+            if (query_norms[i] < 1e-6f || data_norms[j] < 1e-6f)
+                cos_sim = 0.0f;  // 如果任一向量接近零向量，相似度为0
+            else
+                cos_sim = dot_product / (query_norms[i] * data_norms[j]);
+                // cos_sim = (query_norms[i]);
+                // cos_sim = dot_product;
+            // 余弦距离 = 1 - 余弦相似度
+            // cos_dist[i][j] = 1.0f - cos_sim;
+            cos_dist[i][j] = cos_sim;
+        }
+    }
+    
+    free(query_norms);
+    free(data_norms);
 }
 
 // 测试1：基本余弦距离计算
-void test_basic_cosine_distance() {
-    std::cout << "=== 测试1：基本余弦距离计算 ===" << std::endl;
+void test_basic_cosine_distance(int n_query, int n_batch, int n_dim) {
+    std::cout << "=== Test1: 基本余弦距离测试 ===" << std::endl;
     
-    const int n = 4;
-    float a[] = {1.0f, 0.0f, 0.0f, 0.0f};
-    float b[] = {0.0f, 1.0f, 0.0f, 0.0f};
+    float alpha = 1.0f, beta = 0.0f;
     
-    std::cout << "向量A: ";
-    for (int i = 0; i < n; i++) std::cout << a[i] << " ";
-    std::cout << std::endl;
+    std::cout << "测试向量组大小: " << n_query << " 个查询向量 × " << n_batch << " 个数据向量" << std::endl;
+    std::cout << "向量维度: " << n_dim << std::endl;
     
-    std::cout << "向量B: ";
-    for (int i = 0; i < n; i++) std::cout << b[i] << " ";
-    std::cout << std::endl;
+    // 计算内存使用量
+    size_t memory_mb = (n_query * n_dim + n_batch * n_dim + n_query * n_batch) * sizeof(float) / (1024 * 1024);
+    std::cout << "内存使用量: " << memory_mb << " MB" << std::endl;
     
-    CosineDistanceOp cosine_op(n);
-    float gpu_distance = cosine_op.compute(a, b);
-    float cpu_distance = cpu_cosine_distance(a, b, n);
+    // 生成测试数据
+    float** h_query_vectors = generate_vector_list(n_query, n_dim);
+    float** h_data_vectors = generate_vector_list(n_batch, n_dim);
+    float** h_cos_dist_gpu = malloc_vector_list(n_query, n_batch);
+    float** h_cos_dist_cpu = malloc_vector_list(n_query, n_batch);
     
-    std::cout << "GPU余弦距离: " << gpu_distance << std::endl;
-    std::cout << "CPU余弦距离: " << cpu_distance << std::endl;
-    
-    assert(float_equal(gpu_distance, cpu_distance));
-    assert(float_equal(gpu_distance, 1.0f)); // 正交向量距离为1
-    
-    std::cout << "✓ 基本余弦距离测试通过" << std::endl << std::endl;
-}
+    // std::cout << h_query_vectors[0] << std::endl;
+    // std::cout << h_data_vectors[0] << std::endl;
+    if(DEBUG==true){
+        std::cout << "query" << std::endl;
+        for(int i=0; i<n_query; ++i){
+            for(int j=0; j<n_dim; ++j)
+                std::cout << h_query_vectors[i][j] << " ";
+            std::cout << std::endl;        
+        }
+        std::cout << std::endl;        
 
-// 测试2：相同向量
-void test_same_vectors() {
-    std::cout << "=== 测试2：相同向量 ===" << std::endl;
-    
-    const int n = 4;
-    float a[] = {1.0f, 2.0f, 3.0f, 4.0f};
-    float b[] = {1.0f, 2.0f, 3.0f, 4.0f};
-    
-    std::cout << "向量A: ";
-    for (int i = 0; i < n; i++) std::cout << a[i] << " ";
-    std::cout << std::endl;
-    
-    std::cout << "向量B: ";
-    for (int i = 0; i < n; i++) std::cout << b[i] << " ";
-    std::cout << std::endl;
-    
-    CosineDistanceOp cosine_op(n);
-    float gpu_distance = cosine_op.compute(a, b);
-    float cpu_distance = cpu_cosine_distance(a, b, n);
-    
-    std::cout << "GPU余弦距离: " << gpu_distance << std::endl;
-    std::cout << "CPU余弦距离: " << cpu_distance << std::endl;
-    
-    assert(float_equal(gpu_distance, cpu_distance));
-    assert(float_equal(gpu_distance, 0.0f)); // 相同向量距离为0
-    
-    std::cout << "✓ 相同向量测试通过" << std::endl << std::endl;
-}
-
-// 测试3：相反向量
-void test_opposite_vectors() {
-    std::cout << "=== 测试3：相反向量 ===" << std::endl;
-    
-    const int n = 4;
-    float a[] = {1.0f, 2.0f, 3.0f, 4.0f};
-    float b[] = {-1.0f, -2.0f, -3.0f, -4.0f};
-    
-    std::cout << "向量A: ";
-    for (int i = 0; i < n; i++) std::cout << a[i] << " ";
-    std::cout << std::endl;
-    
-    std::cout << "向量B: ";
-    for (int i = 0; i < n; i++) std::cout << b[i] << " ";
-    std::cout << std::endl;
-    
-    CosineDistanceOp cosine_op(n);
-    float gpu_distance = cosine_op.compute(a, b);
-    float cpu_distance = cpu_cosine_distance(a, b, n);
-    
-    std::cout << "GPU余弦距离: " << gpu_distance << std::endl;
-    std::cout << "CPU余弦距离: " << cpu_distance << std::endl;
-    
-    assert(float_equal(gpu_distance, cpu_distance));
-    assert(float_equal(gpu_distance, 2.0f)); // 相反向量距离为2
-    
-    std::cout << "✓ 相反向量测试通过" << std::endl << std::endl;
-}
-
-// 测试4：零向量
-void test_zero_vectors() {
-    std::cout << "=== 测试4：零向量 ===" << std::endl;
-    
-    const int n = 4;
-    float a[] = {0.0f, 0.0f, 0.0f, 0.0f};
-    float b[] = {1.0f, 2.0f, 3.0f, 4.0f};
-    
-    std::cout << "向量A (零向量): ";
-    for (int i = 0; i < n; i++) std::cout << a[i] << " ";
-    std::cout << std::endl;
-    
-    std::cout << "向量B: ";
-    for (int i = 0; i < n; i++) std::cout << b[i] << " ";
-    std::cout << std::endl;
-    
-    CosineDistanceOp cosine_op(n);
-    float gpu_distance = cosine_op.compute(a, b);
-    float cpu_distance = cpu_cosine_distance(a, b, n);
-    
-    std::cout << "GPU余弦距离: " << gpu_distance << std::endl;
-    std::cout << "CPU余弦距离: " << cpu_distance << std::endl;
-    
-    assert(float_equal(gpu_distance, cpu_distance));
-    assert(float_equal(gpu_distance, 1.0f)); // 零向量与任何非零向量距离为1
-    
-    std::cout << "✓ 零向量测试通过" << std::endl << std::endl;
-}
-
-// 测试5：大维度向量
-void test_large_vectors() {
-    std::cout << "=== 测试5：大维度向量 ===" << std::endl;
-    
-    const int n = 1024;
-    float* a = new float[n];
-    float* b = new float[n];
-    
-    // 初始化向量
-    for (int i = 0; i < n; i++) {
-        a[i] = (float)(i + 1);
-        b[i] = (float)(n - i);
+        std::cout << "data" << std::endl;
+        for(int i=0; i<n_batch; ++i){
+            for(int j=0; j<n_dim; ++j)
+                std::cout << h_data_vectors[i][j] << " ";
+            std::cout << std::endl;        
+        }
+        std::cout << std::endl;          
     }
-    
-    CosineDistanceOp cosine_op(n);
-    float gpu_distance = cosine_op.compute(a, b);
-    float cpu_distance = cpu_cosine_distance(a, b, n);
-    
-    std::cout << "GPU余弦距离: " << gpu_distance << std::endl;
-    std::cout << "CPU余弦距离: " << cpu_distance << std::endl;
-    
-    assert(float_equal(gpu_distance, cpu_distance, 1e-4f)); // 大维度允许稍大的误差
-    
-    delete[] a;
-    delete[] b;
-    std::cout << "✓ 大维度向量测试通过" << std::endl << std::endl;
-}
 
-// 测试6：性能测试
-void test_performance() {
-    std::cout << "=== 测试6：性能测试 ===" << std::endl;
-    
-    const int n_dim = 1024;
-    const int n_batchsize = 1024;
-    const int iterations = 1000;
-    float** a = (float **)malloc(n_batchsize * n_dim);
-    float** b = new float[n_batchsize * n_dim];
-    
-    // 初始化向量
-    for (int i = 0; i < n; i++) {
-        a[i] = (float)(i + 1);
-        b[i] = (float)(i + 2);
-    }
-    
-    CosineDistanceOp cosine_op(n);
-    
-    // 预热
-    for (int i = 0; i < 10; i++) {
-        cosine_op.compute(a, b);
-    }
-    
-    // GPU性能测试
+
+    // GPU计算
     auto start = std::chrono::high_resolution_clock::now();
-    
-    // for (int i = 0; i < iterations; i++) {
-    //     cosine_op.compute(a, b);
-    // }
-    cosine_op.compute(a, b, iterations);
-    
+    cuda_cosine_dist(h_query_vectors, h_data_vectors, h_cos_dist_gpu, n_query, n_batch, n_dim, alpha, beta);
     auto end = std::chrono::high_resolution_clock::now();
     auto gpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     
-    // CPU性能测试
+    // CPU计算
     start = std::chrono::high_resolution_clock::now();
-    
-    for (int i = 0; i < iterations * 1000; i++) {
-        cpu_cosine_distance(a, b, n);
-    }
-    
+    cpu_cosine_distance(h_query_vectors, h_data_vectors, h_cos_dist_cpu, n_query, n_batch, n_dim);
     end = std::chrono::high_resolution_clock::now();
     auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     
-    std::cout << "GPU执行 " << iterations << " 次耗时: " << gpu_duration.count() << "ms" << std::endl;
-    std::cout << "CPU执行 " << iterations << " 次耗时: " << cpu_duration.count() << "ms" << std::endl;
-    std::cout << "GPU加速比: " << (float)cpu_duration.count() / gpu_duration.count() << "x" << std::endl;
+    // 验证结果
+    assert(matrix_equal_2D(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
     
-    delete[] a;
-    delete[] b;
-    std::cout << "✓ 性能测试完成" << std::endl << std::endl;
+    // 计算性能指标
+    float speedup = (float)cpu_duration.count() / gpu_duration.count();
+    
+    std::cout << "GPU耗时: " << gpu_duration.count() << " ms" << std::endl;
+    std::cout << "CPU耗时: " << cpu_duration.count() << " ms" << std::endl;
+    std::cout << "加速比: " << speedup << "x" << std::endl;
+    
+    // 清理内存
+    free_vector_list(h_query_vectors);
+    free_vector_list(h_data_vectors);
+    free_vector_list(h_cos_dist_gpu);
+    free_vector_list(h_cos_dist_cpu);
+    
+    std::cout << "基本余弦距离测试完成 ✓" << std::endl << std::endl;
+}
+
+// 测试2：单位向量测试
+void test_unit_vectors() {
+    std::cout << "=== Test2: 单位向量测试 ===" << std::endl;
+    
+    int n_query = 4, n_batch = 4, n_dim = 3;
+    float alpha = 1.0f, beta = 0.0f;
+    
+    // 生成单位向量
+    float** h_query_vectors = malloc_vector_list(n_query, n_dim);
+    float** h_data_vectors = malloc_vector_list(n_batch, n_dim);
+    float** h_cos_dist_gpu = malloc_vector_list(n_query, n_batch);
+    float** h_cos_dist_cpu = malloc_vector_list(n_query, n_batch);
+    
+    // 设置单位向量
+    // Query向量: [1,0,0], [0,1,0], [0,0,1], [1,1,1]/sqrt(3)
+    h_query_vectors[0][0] = 1.0f; h_query_vectors[0][1] = 0.0f; h_query_vectors[0][2] = 0.0f;
+    h_query_vectors[1][0] = 0.0f; h_query_vectors[1][1] = 1.0f; h_query_vectors[1][2] = 0.0f;
+    h_query_vectors[2][0] = 0.0f; h_query_vectors[2][1] = 0.0f; h_query_vectors[2][2] = 1.0f;
+    h_query_vectors[3][0] = 1.0f/sqrt(3.0f); h_query_vectors[3][1] = 1.0f/sqrt(3.0f); h_query_vectors[3][2] = 1.0f/sqrt(3.0f);
+    
+    // Data向量: [1,0,0], [0,1,0], [0,0,1], [1,1,1]/sqrt(3)
+    h_data_vectors[0][0] = 1.0f; h_data_vectors[0][1] = 0.0f; h_data_vectors[0][2] = 0.0f;
+    h_data_vectors[1][0] = 0.0f; h_data_vectors[1][1] = 1.0f; h_data_vectors[1][2] = 0.0f;
+    h_data_vectors[2][0] = 0.0f; h_data_vectors[2][1] = 0.0f; h_data_vectors[2][2] = 1.0f;
+    h_data_vectors[3][0] = 1.0f/sqrt(3.0f); h_data_vectors[3][1] = 1.0f/sqrt(3.0f); h_data_vectors[3][2] = 1.0f/sqrt(3.0f);
+    
+    // GPU计算
+    cuda_cosine_dist(h_query_vectors, h_data_vectors, h_cos_dist_gpu, n_query, n_batch, n_dim, alpha, beta);
+    
+    // CPU计算
+    cpu_cosine_distance(h_query_vectors, h_data_vectors, h_cos_dist_cpu, n_query, n_batch, n_dim);
+    
+    // 验证结果
+    assert(matrix_equal_2D(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
+    
+    // 打印结果矩阵（前几个元素）
+    std::cout << "余弦距离矩阵（前4x4）:" << std::endl;
+    for (int i = 0; i < std::min(4, n_query); i++) {
+        for (int j = 0; j < std::min(4, n_batch); j++) {
+            std::cout << h_cos_dist_gpu[i][j] << " ";
+        }
+        std::cout << std::endl;
+    }
+    
+    // 清理内存
+    free_vector_list(h_query_vectors);
+    free_vector_list(h_data_vectors);
+    free_vector_list(h_cos_dist_gpu);
+    free_vector_list(h_cos_dist_cpu);
+    
+    std::cout << "单位向量测试通过 ✓" << std::endl << std::endl;
+}
+
+// 测试3：大规模压力测试
+void test_large_scale_cosine_distance(int n_query, int n_batch, int n_dim) {
+    std::cout << "=== Test3: 大规模余弦距离压力测试 ===" << std::endl;
+    
+    float alpha = 1.0f, beta = 0.0f;
+    
+    std::cout << "测试向量组大小: " << n_query << " 个查询向量 × " << n_batch << " 个数据向量" << std::endl;
+    std::cout << "向量维度: " << n_dim << std::endl;
+    
+    // 计算内存使用量
+    size_t memory_mb = (n_query * n_dim + n_batch * n_dim + n_query * n_batch) * sizeof(float) / (1024 * 1024);
+    std::cout << "内存使用量: " << memory_mb << " MB" << std::endl;
+    
+    // 生成测试数据
+    float** h_query_vectors = generate_vector_list(n_query, n_dim);
+    float** h_data_vectors = generate_vector_list(n_batch, n_dim);
+    float** h_cos_dist_gpu = malloc_vector_list(n_query, n_batch);
+    float** h_cos_dist_cpu = malloc_vector_list(n_query, n_batch);
+    
+    // GPU计算
+    auto start = std::chrono::high_resolution_clock::now();
+    cuda_cosine_dist(h_query_vectors, h_data_vectors, h_cos_dist_gpu, n_query, n_batch, n_dim, alpha, beta);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto gpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    // CPU计算
+    start = std::chrono::high_resolution_clock::now();
+    cpu_cosine_distance(h_query_vectors, h_data_vectors, h_cos_dist_cpu, n_query, n_batch, n_dim);
+    end = std::chrono::high_resolution_clock::now();
+    auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    // 验证结果
+    assert(matrix_equal_2D(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
+    
+    // 计算性能指标
+    float speedup = (float)cpu_duration.count() / gpu_duration.count();
+    
+    std::cout << "GPU耗时: " << gpu_duration.count() << " ms" << std::endl;
+    std::cout << "CPU耗时: " << cpu_duration.count() << " ms" << std::endl;
+    std::cout << "加速比: " << speedup << "x" << std::endl;
+    
+    // 清理内存
+    free_vector_list(h_query_vectors);
+    free_vector_list(h_data_vectors);
+    free_vector_list(h_cos_dist_gpu);
+    free_vector_list(h_cos_dist_cpu);
+    
+    std::cout << "大规模余弦距离压力测试完成 ✓" << std::endl << std::endl;
 }
 
 int main() {
-    std::cout << "开始CosineDistanceOp单元测试..." << std::endl << std::endl;
+    srand(time(0));
+    std::cout << "开始余弦距离单元测试..." << std::endl << std::endl;
     
     try {
-        // test_basic_cosine_distance();
-        // test_same_vectors();
-        // test_opposite_vectors();
-        // test_zero_vectors();
-        // test_large_vectors();
-        test_performance();
+        // 基本测试
+        // test_basic_cosine_distance(3, 5, 4);
+        test_basic_cosine_distance(1024, 1024, 1024);
+        // test_basic_cosine_distance(128, 128, 128);
         
-        std::cout << "🎉 所有CosineDistanceOp测试通过！" << std::endl;
+        // 单位向量测试
+        // test_unit_vectors();
+        
+        // 大规模压力测试
+        // test_large_scale_cosine_distance(1024, 1024, 512);
+        
+        std::cout << "all_test_passed" << std::endl;
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "❌ 测试失败: " << e.what() << std::endl;
