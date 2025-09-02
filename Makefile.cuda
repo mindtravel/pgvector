@@ -34,7 +34,9 @@ OBJS = cuda/cuda_wrapper.o \
 	src/ivfvacuum.o \
 	src/sparsevec.o \
 	src/vector.o \
-	src/ivfjl.o
+	src/ivfjl.o \
+	src/ivfflat_parallel.o \
+	src/vector_batch.o
 
 # 头文件
 HEADERS = src/halfvec.h src/sparsevec.h src/vector.h
@@ -71,7 +73,7 @@ PG_CPPFLAGS += $(CUDA_INC) -DUSE_CUDA
 SHLIB_LINK += $(CUDA_LIB)
 
 # 默认目标
-all: sql/$(EXTENSION)--$(EXTVERSION).sql
+all: vector.so sql/$(EXTENSION)--$(EXTVERSION).sql
 
 sql/$(EXTENSION)--$(EXTVERSION).sql: sql/$(EXTENSION).sql
 	cp $< $@
@@ -84,6 +86,24 @@ include $(PGXS)
 # CUDA编译规则 - 必须在include $(PGXS)之后
 %.o: %.cu
 	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC
+
+# 强制覆盖CUDA对象文件的构建规则，避免.bc文件依赖
+cuda/cuda_wrapper.o: cuda/cuda_wrapper.cu
+	@echo "编译CUDA文件: $< -> $@"
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC
+
+cuda/cuda_distances.o: cuda/cuda_distances.cu
+	@echo "编译CUDA文件: $< -> $@"
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC
+
+# 强制覆盖所有.bc文件的依赖，将它们重定向到.o文件
+%.bc: %.o
+	@echo "跳过.bc文件生成，直接使用.o文件: $<"
+	@touch $@
+
+# 或者完全禁用.bc文件
+.SUFFIXES: .o .c .cu
+.SUFFIXES: .o .c .cu
 
 # 检查CUDA
 check_cuda:
