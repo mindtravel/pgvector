@@ -980,3 +980,83 @@ CREATE OPERATOR CLASS sparsevec_l1_ops
 	OPERATOR 1 <+> (sparsevec, sparsevec) FOR ORDER BY float_ops,
 	FUNCTION 1 l1_distance(sparsevec, sparsevec),
 	FUNCTION 3 hnsw_sparsevec_support(internal);
+
+-- 批量向量查询扩展
+-- 添加到 vector.sql 中
+
+-- 向量数组类型
+CREATE TYPE vector_batch;
+
+CREATE FUNCTION vector_batch_in(cstring, oid, integer) RETURNS vector_batch
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_batch_out(vector_batch) RETURNS cstring
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_batch_recv(internal, oid, integer) RETURNS vector_batch
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION vector_batch_send(vector_batch) RETURNS bytea
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE vector_batch (
+	INPUT     = vector_batch_in,
+	OUTPUT    = vector_batch_out,
+	RECEIVE   = vector_batch_recv,
+	SEND      = vector_batch_send,
+	STORAGE   = external
+);
+
+-- 向量数组构造函数
+CREATE FUNCTION vector_batch_from_array(vector[]) RETURNS vector_batch
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- 批量距离计算函数
+CREATE FUNCTION batch_l2_distance(vector_batch, vector) RETURNS float8[]
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION batch_cosine_distance(vector_batch, vector) RETURNS float8[]
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION batch_vector_negative_inner_product(vector_batch, vector) RETURNS float8[]
+	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- -- 批量最近邻查询函数
+-- CREATE FUNCTION batch_knn_search(
+-- 	vector_batch,           -- 查询向量数组
+-- 	anyelement,            -- 目标表（用于类型推导）
+-- 	text,                  -- 向量列名
+-- 	integer DEFAULT 10,    -- 每个查询返回的结果数
+-- 	text DEFAULT '<->'     -- 距离操作符
+-- ) RETURNS SETOF record
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+-- -- 批量范围查询函数  
+-- CREATE FUNCTION batch_range_search(
+-- 	vector_batch,           -- 查询向量数组
+-- 	anyelement,            -- 目标表
+-- 	text,                  -- 向量列名  
+-- 	float8,                -- 距离阈值
+-- 	text DEFAULT '<->'     -- 距离操作符
+-- ) RETURNS SETOF record
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+-- 创建批量查询操作符
+CREATE OPERATOR <->> (
+	LEFTARG = vector_batch, 
+	RIGHTARG = vector, 
+	PROCEDURE = batch_l2_distance
+);
+
+CREATE OPERATOR <=>> (
+	LEFTARG = vector_batch, 
+	RIGHTARG = vector, 
+	PROCEDURE = batch_cosine_distance
+);
+
+CREATE OPERATOR <#>> (
+	LEFTARG = vector_batch, 
+	RIGHTARG = vector, 
+	PROCEDURE = batch_vector_negative_inner_product
+);
+

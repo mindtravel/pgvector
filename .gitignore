@@ -3,3 +3,4 @@ vector_search
 *.bc
 *.so
 .vscode
+test_cuda/test*
