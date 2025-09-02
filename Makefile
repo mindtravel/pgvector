@@ -23,7 +23,9 @@ OBJS = src/bitutils.o \
 	src/ivfvacuum.o \
 	src/sparsevec.o \
 	src/vector.o \
-	src/ivfjl.o
+	src/ivfjl.o \
+	src/ivfflat_parallel.o \
+	src/vector_batch.o
 	
 HEADERS = src/halfvec.h src/sparsevec.h src/vector.h
 
@@ -60,8 +62,8 @@ PG_CFLAGS += $(OPTFLAGS) -ftree-vectorize -fassociative-math -fno-signed-zeros -
 
 all: sql/$(EXTENSION)--$(EXTVERSION).sql
 
-sql/$(EXTENSION)--$(EXTVERSION).sql: sql/$(EXTENSION).sql
-	cp $< $@
+sql/$(EXTENSION)--$(EXTVERSION).sql: sql/$(EXTENSION).sql sql/vector_batch.sql
+	cat $^ > $@
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

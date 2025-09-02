@@ -369,6 +369,7 @@ vector_recv(PG_FUNCTION_ARGS)
 
 	dim = pq_getmsgint(buf, sizeof(int16));
 	unused = pq_getmsgint(buf, sizeof(int16));
+	// elog(LOG, "DEBUG: vector_recv: 接收到 %d 维向量",  dim);
 
 	CheckDim(dim);
 	CheckExpectedDim(typmod, dim);
