@@ -3,3 +3,6 @@ vector_search
 *.bc
 *.so
 .vscode
+test_cuda/test_cosine_distance
+test_cuda/test_matrix_multiply
+test_cuda/test_vector_normalizer
