@@ -3,7 +3,7 @@
 #include "matrix-multiply.h"
 #include "kernels.h"
 #include "cudatimer.h"
-#define ENABLE_CUDA_TIMING 0 /*是否启用CUDATimer计时*/
+#define ENABLE_CUDA_TIMING 1 /*是否启用CUDATimer计时*/
 
 /**
  * 矩阵乘法接口

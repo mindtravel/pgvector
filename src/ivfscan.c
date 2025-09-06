@@ -323,6 +323,7 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 	int			maxProbes;
 	MemoryContext oldCtx;
 
+	// elog("LOG", "ivfflatbeginscan");
 	scan = RelationGetIndexScan(index, nkeys, norderbys);
 
 	/* Get lists and dimensions from metapage */

@@ -110,6 +110,7 @@ VectorBatchGetVectorCopy(VectorBatch *arr, int idx)
 Datum
 vector_batch_in(PG_FUNCTION_ARGS)
 {
+
 	char	   *str = PG_GETARG_CSTRING(0);
 	Oid			typioparam = PG_GETARG_OID(1);
 	int32		typmod = PG_GETARG_INT32(2);
@@ -155,6 +156,8 @@ vector_batch_in(PG_FUNCTION_ARGS)
 				 errmsg("empty vector array")));
 
 	result = InitVectorBatch(count, dim);
+
+	elog(LOG, "DEBUG: vector_batch_in: 接收到 %d 个向量，每个向量 %d 维", count, dim);
 
 	/* 解析每个向量 */
 	ptr = str + 1;
