@@ -4,7 +4,7 @@
 #include "postgres.h"
 #include "vector.h"
 
-#define VECTOR_BATCH_MAX_VECTORS 1024
+#define VECTOR_BATCH_MAX_VECTORS 10240
 
 // 向量数组结构
 typedef struct VectorBatch

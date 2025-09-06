@@ -16,7 +16,7 @@ extern void gpu_ivf_search_cleanup(void);
 /*
 * gpu 批查询函数，先保留
 */
-extern int gpu_ivf_search_batch(
+extern int gpu_ivf_search_l2_batch(
     float* query_vector,           // 查询向量
     float* list_vectors,           // 列表向量数据
     int* list_offsets,             // 每个列表的偏移量

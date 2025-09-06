@@ -252,6 +252,9 @@ typedef struct IvfflatScanList
 	double		distance;
 }			IvfflatScanList;
 
+/*
+扫描过程的相关状态
+*/
 typedef struct IvfflatScanOpaqueData
 {
 	const		IvfflatTypeInfo *typeInfo;

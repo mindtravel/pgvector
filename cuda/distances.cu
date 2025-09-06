@@ -158,20 +158,3 @@ void cuda_cosine_dist(float** query_vector_group_cpu, float** data_vector_group_
         }
     }
 }
-
-float L2DistanceOp::operator()(const float* d_A, const float* d_B, int n) {
-    float* d_result;
-    cudaMalloc(&d_result, n * sizeof(float));
-
-    int blockSize = 256;
-    int gridSize = (n + blockSize - 1) / blockSize;
-    l2_distance_kernel<<<gridSize, blockSize>>>(d_A, d_B, d_result, n);
-
-    thrust::device_ptr<float> thrust_ptr(d_result);
-    float sum = thrust::reduce(thrust_ptr, thrust_ptr + n);
-
-    float l2_distance = sqrtf(sum);
-
-    cudaFree(d_result);
-    return l2_distance;
-}
