@@ -11,7 +11,7 @@
 #define IVFJL_MAX_CANDIDATE_MULTIPLES		100
 #define IVFJL_DEFAULT_PROBES	1
 
-#define IVFJL_DEFAULT_REDUCED_DIM 64
+#define IVFJL_DEFAULT_REDUCED_DIM 32
 
 #define IVFJL_LIST_SIZE(size)	(offsetof(IvfjlListData, jlCenter) + size)
 
@@ -57,7 +57,7 @@ typedef struct IvfjlScanOpaqueData {
     IvfflatScanOpaqueData   base;               /* 复用 ivfflat 的 scan opaque */
     JLProjection            jlProj;             /* JL 投影矩阵 */
     int			            jlDimensions;
-	Datum		            jlValue;		    /*jl优化*/
+	Datum		            jlValue;		    /*jl投影后的值*/
     bool                    reorder;            /* 是否使用原始向量进行重排序 */
     int                     reorderCandidates;  /* 重排序候选集大小 */
 }   IvfjlScanOpaqueData;
@@ -76,7 +76,8 @@ typedef IvfjlScanOpaqueData* IvfjlScanOpaque;
 void IvfflatInit(void);
 
 void GenerateJLProjection(JLProjection *proj, int original_dim, int reduced_dim, MemoryContext ctx);/*生成 JL 投影矩阵*/
-void JLProjectVector(const JLProjection *proj, Vector *srcVector, Vector *dstVector);/*对向量做 JL 投影*/
+// void JLProjectVector(const JLProjection *proj, Vector *srcVector, Vector *dstVector);/*对向量做 JL 投影*/
+void JLProjectVector(const JLProjection *proj, float *src, float *dst);/*对向量做 JL 投影*/
 void FreeJLProjection(JLProjection *proj);/*释放 JL 投影矩阵*/
 
 void WriteJLToMetaPage(Page page, JLProjection *proj);/*JL 投影矩阵序列化到元数据页*/

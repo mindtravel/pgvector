@@ -85,9 +85,9 @@ extern int	ivfflat_max_probes;
 
 /* JL 投影结构体 */
 typedef struct JLProjection {
-    int original_dim;
-    int reduced_dim;
-    float *matrix; // 行优先，大小 reduced_dim * original_dim
+	int original_dim;
+	int reduced_dim;
+	float* matrix; // 行优先，大小 reduced_dim * original_dim
 } JLProjection;
 
 typedef enum IvfflatIterativeScanMode
@@ -102,10 +102,10 @@ typedef struct VectorArrayData
 	int			maxlen;
 	int			dim;
 	Size		itemsize;
-	char	   *items;
+	char* items;
 }			VectorArrayData;
 
-typedef VectorArrayData * VectorArray;
+typedef VectorArrayData* VectorArray;
 
 typedef struct ListInfo
 {
@@ -125,7 +125,7 @@ typedef struct IvfflatOptions
 
 typedef struct IvfflatSpool
 {
-	Tuplesortstate *sortstate;
+	Tuplesortstate* sortstate;
 	Relation	heap;
 	Relation	index;
 }			IvfflatSpool;
@@ -159,21 +159,21 @@ typedef struct IvfflatShared
 
 typedef struct IvfflatLeader
 {
-	ParallelContext *pcxt;
+	ParallelContext* pcxt;
 	int			nparticipanttuplesorts;
-	IvfflatShared *ivfshared;
-	Sharedsort *sharedsort;
+	IvfflatShared* ivfshared;
+	Sharedsort* sharedsort;
 	Snapshot	snapshot;
-	char	   *ivfcenters;
+	char* ivfcenters;
 }			IvfflatLeader;
 
 typedef struct IvfflatTypeInfo
 {
 	int			maxDimensions;
-	Datum		(*normalize) (PG_FUNCTION_ARGS);
-	Size		(*itemSize) (int dimensions);
-	void		(*updateCenter) (Pointer v, int dimensions, float *x);
-	void		(*sumCenter) (Pointer v, float *x);
+	Datum(*normalize) (PG_FUNCTION_ARGS);
+	Size(*itemSize) (int dimensions);
+	void		(*updateCenter) (Pointer v, int dimensions, float* x);
+	void		(*sumCenter) (Pointer v, float* x);
 }			IvfflatTypeInfo;
 
 typedef struct IvfflatBuildState
@@ -181,8 +181,8 @@ typedef struct IvfflatBuildState
 	/* Info */
 	Relation	heap;
 	Relation	index;
-	IndexInfo  *indexInfo;
-	const		IvfflatTypeInfo *typeInfo;
+	IndexInfo* indexInfo;
+	const		IvfflatTypeInfo* typeInfo;
 	TupleDesc	tupdesc;
 
 	/* Settings */
@@ -190,30 +190,30 @@ typedef struct IvfflatBuildState
 	int			lists;
 	/* JL优化 */
 	int			jlDimensions; // jl优化
-    JLProjection	*jlProj;     /* JL 投影矩阵：存指针 */
+	JLProjection* jlProj;     /* JL 投影矩阵：存指针 */
 	bool        reorder;            /* 是否使用原始向量进行重排序 */
-    int         reorderCandidates;  /* 重排序候选集大小 */
+	int         reorderCandidates;  /* 重排序候选集大小 */
 
 	/* Statistics */
 	double		indtuples;
 	double		reltuples;
 
 	/* Support functions */
-	FmgrInfo   *procinfo;
-	FmgrInfo   *normprocinfo;
-	FmgrInfo   *kmeansnormprocinfo;
+	FmgrInfo* procinfo;
+	FmgrInfo* normprocinfo;
+	FmgrInfo* kmeansnormprocinfo;
 	Oid			collation;
 
 	/* Variables */
 	VectorArray samples;
 	VectorArray centers;
 	VectorArray jlCenters; // jl优化
-	ListInfo   *listInfo;
+	ListInfo* listInfo;
 
 #ifdef IVFFLAT_KMEANS_DEBUG
 	double		inertia;
-	double	   *listSums;
-	int		   *listCounts;
+	double* listSums;
+	int* listCounts;
 #endif
 
 	/* Sampling */
@@ -222,15 +222,15 @@ typedef struct IvfflatBuildState
 	int			rowstoskip;
 
 	/* Sorting */
-	Tuplesortstate *sortstate;
+	Tuplesortstate* sortstate;
 	TupleDesc	sortdesc;
-	TupleTableSlot *slot;
+	TupleTableSlot* slot;
 
 	/* Memory */
 	MemoryContext tmpCtx;
 
 	/* Parallel builds */
-	IvfflatLeader *ivfleader;
+	IvfflatLeader* ivfleader;
 }			IvfflatBuildState;
 
 typedef struct IvfflatMetaPageData
@@ -242,7 +242,7 @@ typedef struct IvfflatMetaPageData
 	uint16		jlDimensions; // jl投影后的维度
 }			IvfflatMetaPageData;
 
-typedef IvfflatMetaPageData * IvfflatMetaPage;
+typedef IvfflatMetaPageData* IvfflatMetaPage;
 
 typedef struct IvfflatPageOpaqueData
 {
@@ -251,7 +251,7 @@ typedef struct IvfflatPageOpaqueData
 	uint16		page_id;		/* for identification of IVFFlat indexes */
 }			IvfflatPageOpaqueData;
 
-typedef IvfflatPageOpaqueData * IvfflatPageOpaque;
+typedef IvfflatPageOpaqueData* IvfflatPageOpaque;
 
 typedef struct IvfflatListData
 {
@@ -260,7 +260,7 @@ typedef struct IvfflatListData
 	Vector		center;
 }			IvfflatListData;
 
-typedef IvfflatListData * IvfflatList;
+typedef IvfflatListData* IvfflatList;
 
 typedef struct IvfflatScanList
 {
@@ -271,7 +271,7 @@ typedef struct IvfflatScanList
 
 typedef struct IvfflatScanOpaqueData
 {
-	const		IvfflatTypeInfo *typeInfo;
+	const		IvfflatTypeInfo* typeInfo;
 	int			probes;
 	int			maxProbes;
 	int			dimensions;
@@ -280,26 +280,26 @@ typedef struct IvfflatScanOpaqueData
 	MemoryContext tmpCtx;
 
 	/* Sorting */
-	Tuplesortstate *sortstate;
+	Tuplesortstate* sortstate;
 	TupleDesc	tupdesc;
-	TupleTableSlot *vslot;
-	TupleTableSlot *mslot;
+	TupleTableSlot* vslot;
+	TupleTableSlot* mslot;
 	BufferAccessStrategy bas;
 
 	/* Support functions */
-	FmgrInfo   *procinfo;
-	FmgrInfo   *normprocinfo;
+	FmgrInfo* procinfo;
+	FmgrInfo* normprocinfo;
 	Oid			collation;
-	Datum		(*distfunc) (FmgrInfo *flinfo, Oid collation, Datum arg1, Datum arg2);
+	Datum(*distfunc) (FmgrInfo* flinfo, Oid collation, Datum arg1, Datum arg2);
 
 	/* Lists */
-	pairingheap *listQueue;
-	BlockNumber *listPages;
+	pairingheap* listQueue;
+	BlockNumber* listPages;
 	int			listIndex;
-	IvfflatScanList *lists;
+	IvfflatScanList* lists;
 }			IvfflatScanOpaqueData;
 
-typedef IvfflatScanOpaqueData * IvfflatScanOpaque;
+typedef IvfflatScanOpaqueData* IvfflatScanOpaque;
 
 #define VECTOR_ARRAY_SIZE(_length, _size) (sizeof(VectorArrayData) + (_length) * MAXALIGN(_size))
 
@@ -308,7 +308,7 @@ typedef IvfflatScanOpaqueData * IvfflatScanOpaque;
 static inline Pointer
 VectorArrayGet(VectorArray arr, int offset)
 {
-	return ((char *) arr->items) + (offset * arr->itemsize);
+	return ((char*)arr->items) + (offset * arr->itemsize);
 }
 
 static inline void
@@ -320,36 +320,37 @@ VectorArraySet(VectorArray arr, int offset, Pointer val)
 /* Methods */
 VectorArray VectorArrayInit(int maxlen, int dimensions, Size itemsize);
 void		VectorArrayFree(VectorArray arr);
-void		IvfflatKmeans(Relation index, VectorArray samples, VectorArray centers, const IvfflatTypeInfo * typeInfo);
-FmgrInfo   *IvfflatOptionalProcInfo(Relation index, uint16 procnum);
-Datum		IvfflatNormValue(const IvfflatTypeInfo * typeInfo, Oid collation, Datum value);
-bool		IvfflatCheckNorm(FmgrInfo *procinfo, Oid collation, Datum value);
+void		IvfflatKmeans(Relation index, VectorArray samples, VectorArray centers, const IvfflatTypeInfo* typeInfo);
+FmgrInfo* IvfflatOptionalProcInfo(Relation index, uint16 procnum);
+Datum		IvfflatNormValue(const IvfflatTypeInfo* typeInfo, Oid collation, Datum value);
+bool		IvfflatCheckNorm(FmgrInfo* procinfo, Oid collation, Datum value);
 int			IvfflatGetLists(Relation index);
-void		IvfflatGetMetaPageInfo(Relation index, int *lists, int *dimensions);
+void		IvfflatGetMetaPageInfo(Relation index, int* lists, int* dimensions);
 void		IvfflatUpdateList(Relation index, ListInfo listInfo, BlockNumber insertPage, BlockNumber originalInsertPage, BlockNumber startPage, ForkNumber forkNum);
-void		IvfflatCommitBuffer(Buffer buf, GenericXLogState *state);
-void		IvfflatAppendPage(Relation index, Buffer *buf, Page *page, GenericXLogState **state, ForkNumber forkNum);
+void		IvfflatCommitBuffer(Buffer buf, GenericXLogState* state);
+void		IvfflatAppendPage(Relation index, Buffer* buf, Page* page, GenericXLogState** state, ForkNumber forkNum);
 Buffer		IvfflatNewBuffer(Relation index, ForkNumber forkNum);
 void		IvfflatInitPage(Buffer buf, Page page);
-void		IvfflatInitRegisterPage(Relation index, Buffer *buf, Page *page, GenericXLogState **state);
+void		IvfflatInitRegisterPage(Relation index, Buffer* buf, Page* page, GenericXLogState** state);
 void		IvfflatInit(void);
-const		IvfflatTypeInfo *IvfflatGetTypeInfo(Relation index);
-PGDLLEXPORT void IvfflatParallelBuildMain(dsm_segment *seg, shm_toc *toc);
+const		IvfflatTypeInfo* IvfflatGetTypeInfo(Relation index);
+PGDLLEXPORT void IvfflatParallelBuildMain(dsm_segment* seg, shm_toc* toc);
 
 /* Index access methods */
-IndexBuildResult *ivfflatbuild(Relation heap, Relation index, IndexInfo *indexInfo);
+IndexBuildResult* ivfflatbuild(Relation heap, Relation index, IndexInfo* indexInfo);
 void		ivfflatbuildempty(Relation index);
-bool		ivfflatinsert(Relation index, Datum *values, bool *isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
+bool		ivfflatinsert(Relation index, Datum* values, bool* isnull, ItemPointer heap_tid, Relation heap, IndexUniqueCheck checkUnique
 #if PG_VERSION_NUM >= 140000
-						  ,bool indexUnchanged
+	, bool indexUnchanged
 #endif
-						  ,IndexInfo *indexInfo
+	, IndexInfo* indexInfo
 );
-IndexBulkDeleteResult *ivfflatbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats, IndexBulkDeleteCallback callback, void *callback_state);
-IndexBulkDeleteResult *ivfflatvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats);
+IndexBulkDeleteResult* ivfflatbulkdelete(IndexVacuumInfo* info, IndexBulkDeleteResult* stats, IndexBulkDeleteCallback callback, void* callback_state);
+IndexBulkDeleteResult* ivfflatvacuumcleanup(IndexVacuumInfo* info, IndexBulkDeleteResult* stats);
 IndexScanDesc ivfflatbeginscan(Relation index, int nkeys, int norderbys);
 void		ivfflatrescan(IndexScanDesc scan, ScanKey keys, int nkeys, ScanKey orderbys, int norderbys);
 bool		ivfflatgettuple(IndexScanDesc scan, ScanDirection dir);
 void		ivfflatendscan(IndexScanDesc scan);
 
+static int CompareLists(const pairingheap_node* a, const pairingheap_node* b, void* arg);
 #endif

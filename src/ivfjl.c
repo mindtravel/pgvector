@@ -220,10 +220,10 @@ ivfjlhandler(PG_FUNCTION_ARGS)
 	amroutine->amadjustmembers = NULL;
 #endif
 	amroutine->ambeginscan = ivfjlbeginscan;
-	amroutine->amrescan = ivfflatrescan;
+	amroutine->amrescan = ivfjlrescan;
 	amroutine->amgettuple = ivfflatgettuple;
 	amroutine->amgetbitmap = NULL;
-	amroutine->amendscan = ivfflatendscan;
+	amroutine->amendscan = ivfjlendscan;
 	amroutine->ammarkpos = NULL;
 	amroutine->amrestrpos = NULL;
 
@@ -247,11 +247,7 @@ void GenerateJLProjection(JLProjection *proj, int original_dim, int reduced_dim,
 }
 
 // JL 投影
-void JLProjectVector(const JLProjection *proj, Vector* srcVector, Vector* dstVector) {
-	float* src;
-	float* dst;
-	src = srcVector->x;
-	dst = dstVector->x;
+void JLProjectVector(const JLProjection *proj, float * src, float * dst) {
     for (int i = 0; i < proj->reduced_dim; i++) {
         float sum = 0.0f;
         for (int j = 0; j < proj->original_dim; j++) {
