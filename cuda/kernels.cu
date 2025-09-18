@@ -11,6 +11,11 @@
 #include <chrono>
 #include <thrust/device_ptr.h>
 #include <thrust/reduce.h>
+#include <thrust/sort.h>
+#include <thrust/sequence.h>
+#include <thrust/transform.h>
+#include <thrust/functional.h>
+#include <thrust/execution_policy.h>
 #include "cudatimer.h"
 
 /*
@@ -166,6 +171,102 @@ __global__ void cos_distance_kernel(
     // d_cos_dist[idx] = (query_norm);
 }
 
+__global__ void topk_kernel(
+    int *d_index,
+    float *d_dist,
+    int *d_topk_index,
+    float *d_topk_dist,
+    int n_query, int n_batch, int k
+){
+    /**
+     * 动态维护一个最小top_k
+     * 使用Thrust库在GPU上进行排序操作
+     * 
+     * Args:
+     * int *d_index    （当前）batch对应向量的索引，形状为 [n_batch]
+     * float *d_dist        距离矩阵，形状为 [n_query, n_batch]
+     * int *d_topk_index    （当前）K近邻索引，形状为 [n_query, k]
+     * float *d_topk_dist   （当前）k近邻距离，形状为 [n_query, k]
+     * int n_query          query数量
+     * int n_batch          一个batch的向量个数
+     * int k                近邻个数k
+     */
+    
+    int query_id = blockIdx.x;
+    if (query_id >= n_query) return;
+    
+    // 计算当前query在数组中的偏移量
+    int query_offset = query_id * k;
+    int dist_offset = query_id * n_batch;
+    
+    // 创建临时数组用于合并当前topk和新的batch距离
+    // 总大小 = k (已有topk) + n_batch (新batch)
+    int total_size = k + n_batch;
+    
+    // 使用共享内存存储临时数据
+    // extern __shared__ float shared_data[];
+    // float *temp_dist = shared_data;
+    // int *temp_index = (int*)(shared_data + total_size);
+    
+    // 每个线程处理一部分数据
+    int tid = threadIdx.x;
+    int block_size = blockDim.x;
+    
+    // // 复制当前topk结果到临时数组
+    // for (int i = tid; i < k; i += block_size) {
+    //     temp_dist[i] = d_topk_dist[query_offset + i];
+    //     temp_index[i] = d_topk_index[query_offset + i];
+    // }
+    
+    // 复制新batch的距离到topk数组的后半部分
+    for (int i = tid; i < n_batch; i += block_size) {
+        d_topk_dist[k + i] = d_dist[dist_offset + i];
+        d_topk_index[k + i] = d_index[i];
+    }
+    
+    __syncthreads();
+    
+    // 只有第一个线程执行排序操作
+    if (tid == 0) {
+        // 使用Thrust进行排序
+        thrust::device_ptr<float> dist_ptr(d_topk_dist);
+        thrust::device_ptr<int> index_ptr(d_topk_index);
+        
+        // 按距离排序，同时保持索引对应关系
+        thrust::sort_by_key(dist_ptr, dist_ptr + total_size, index_ptr);
+        
+        // // 将排序后的前k个结果复制回全局内存
+        // for (int i = 0; i < k; i++) {
+        //     d_topk_dist[query_offset + i] = temp_dist[i];
+        //     d_topk_index[query_offset + i] = temp_index[i];
+        // }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // CUDA核函数：计算两个向量的点积
 __global__ void dotProductKernel(const float* a, const float* b, float* result, int n) {
@@ -207,6 +308,36 @@ __global__ void l2_distance_kernel(const float* A, const float* B, float* result
     if (idx < n) {
         float diff = A[idx] - B[idx];
         result[idx] = diff * diff;
+    }
+}
+
+// 辅助函数：调用topk_kernel
+void launch_topk_kernel(
+    int *d_index,
+    float *d_dist,
+    int *d_topk_index,
+    float *d_topk_dist,
+    int n_query, int n_batch, int k,
+    cudaStream_t stream = 0
+) {
+    // 计算共享内存大小
+    // 需要存储: (k + n_batch) * sizeof(float) + (k + n_batch) * sizeof(int)
+    int total_size = k + n_batch;
+    size_t shared_mem_size = total_size * (sizeof(float) + sizeof(int));
+    
+    // 设置网格和块大小
+    dim3 grid(n_query);
+    dim3 block(min(256, total_size)); // 使用256个线程或数据大小，取较小值
+    
+    // 启动kernel
+    topk_kernel<<<grid, block, shared_mem_size, stream>>>(
+        d_index, d_dist, d_topk_index, d_topk_dist, n_query, n_batch, k
+    );
+    
+    // 检查错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA kernel launch failed: %s\n", cudaGetErrorString(err));
     }
 }
 
