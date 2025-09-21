@@ -15,7 +15,7 @@ typedef struct ScanKeyBatchData
     void* batch_data;     /* 连续存储的批量查询向量数据 */
     int         vec_dim;        /* 向量维度 */
     Size        vec_size;       /* 每个向量的大小 */
-    bool        data_contiguous;/* 数据是否在连续内存中 */
+    bool        data_continuous;
 } ScanKeyBatchData;
 
 typedef ScanKeyBatchData* ScanKeyBatch;
@@ -25,7 +25,7 @@ extern ScanKeyBatch ScanKeyBatchCreate(int nkeys, int vec_dim);
 extern void ScanKeyBatchFree(ScanKeyBatch batch);
 extern void ScanKeyBatchAddVector(ScanKeyBatch batch, int index, Datum vector);
 extern Datum ScanKeyBatchGetVector(ScanKeyBatch batch, int index);
-extern bool ScanKeyBatchIsContiguous(ScanKeyBatch batch);
-extern void* ScanKeyBatchGetContiguousData(ScanKeyBatch batch);
+extern bool ScanKeyBatchIsContinuous(ScanKeyBatch batch);
+extern void* ScanKeyBatchGetContinuousData(ScanKeyBatch batch);
 
 #endif /* SCANBATCH_H */

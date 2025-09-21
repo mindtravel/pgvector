@@ -30,7 +30,7 @@ ScanKeyBatchCreate(int nkeys, int vec_dim)
     /* 分配连续内存存储所有向量数据 */
     size = nkeys * vec_size;
     batch->batch_data = palloc(size);
-    batch->data_contiguous = true;
+    batch->data_continuous = true;
     batch->keySize = sizeof(ScanKeyData);
 
     /* 初始化每个ScanKey */
@@ -110,7 +110,7 @@ ScanKeyBatchGetVector(ScanKeyBatch batch, int index)
 bool
 ScanKeyBatchIsContinuous(ScanKeyBatch batch)
 {
-    return batch->data_contiguous;
+    return batch->data_continuous;
 }
 
 /*
