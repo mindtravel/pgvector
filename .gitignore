@@ -1,8 +1,13 @@
-vector_search
+# 忽略所有不包含点号的文件和目录（除Makefile）
+*[!.]*
+!*/
+!Makefile
+!Dockerfile
+
+# 忽略编译产物
 *.o
 *.bc
 *.so
+
+# 忽略VSCode配置文件
 .vscode
-test_cuda/test_cosine_distance
-test_cuda/test_matrix_multiply
-test_cuda/test_vector_normalizer

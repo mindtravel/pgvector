@@ -186,7 +186,7 @@ void print_cuda_1D(std::string name, T* d_arr, int nx) {
 template <typename T>
 void print_cuda_2D(std::string name, T* d_arr, int nx, int ny) {
     COUT_ENDL("[debug]:", name);
-    size_t arr_size = nx * sizeof(T);
+    size_t arr_size = nx * ny * sizeof(T);
 
     T* h_arr = (T*)malloc(arr_size);
     cudaMemcpy(h_arr, d_arr, arr_size, cudaMemcpyDeviceToHost);

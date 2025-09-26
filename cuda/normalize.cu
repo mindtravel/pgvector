@@ -1,14 +1,8 @@
 #include "kernels.h"
 #include "normalize.h"
-#include <cuda_runtime.h>
-#include <math.h>
-#include <assert.h>
 #include <device_launch_parameters.h>
-#include <cmath>
-#include <chrono>
-#include <thrust/device_ptr.h>
-#include <thrust/reduce.h>
 #include "cudatimer.h"
+#include "pch.h"
 
 /*
 * normalization接口

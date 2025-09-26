@@ -86,7 +86,6 @@ bool matrix_equal(float* a, float* b, int rows, int cols, float epsilon) {
 
 /**
  * 比较矩阵（列主序）
- * 
  */
 bool equal_2D_float(float** a, float** b, int rows, int cols, float epsilon) {
     int err_happens = 0;
@@ -110,21 +109,21 @@ bool equal_2D_float(float** a, float** b, int rows, int cols, float epsilon) {
 }
 
 bool equal_2D_int(int** a, int** b, int rows, int cols) {
-    std::cout << "result" << std::endl;
+    COUT_ENDL("result:");
     int err_happens = 0;
     if(DEBUG == true)
-        std::cout << "i" <<  "\t"  << "j" << "\t" << "a[i][j]" <<  "\t"  << "b[i][j]" <<  "\t" << "diff" << std::endl;
+        COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
     for (int i = 0; i < rows; i++) {
         for (int j = 0; j < cols; j++) {
             if(DEBUG == true)
-                std::cout << std::setprecision(5) << i <<  "\t"  << j << "\t" << a[i][j] <<  "\t"  << b[i][j] <<  "\t" << a[i][j] - b[i][j] << std::endl;
+                COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
             if (!a[i][j] == b[i][j]) {
                 err_happens ++;
                 // return false;
             }
         }
     }
-    std::cout << err_happens << std::endl;
+    COUT_ENDL(err_happens);
     return true;
 }
 

@@ -1,5 +1,5 @@
 #include "../cuda/normalize.h"
-#include "test_utils.h"
+#include "test_utils.cuh"
 #include <iostream>
 #include <cassert>
 #include <cmath>
@@ -48,11 +48,11 @@ bool test_normlization_cpu(float** vector_list, int n_batch, int n_dim){
 测试n_batch和n_dim超过多少的时候算法会失效
 */ 
 void test_performance(int n_batch, int n_dim) {
-    std::cout << "=== Test1: Performance ===" << std::endl;
+    COUT_VAL("=== Test1: Performance ===");
     
     float** vector_list = generate_vector_list(n_batch, n_dim);
     
-    std::cout << "nbatch=" << n_batch << " n_dim=" << n_dim << std::endl;
+    COUT_VAL("nbatch=", n_batch, " n_dim=", n_dim);
 
     auto start = std::chrono::high_resolution_clock::now();
     normalize(vector_list, n_batch, n_dim);
@@ -61,7 +61,7 @@ void test_performance(int n_batch, int n_dim) {
 
     assert(test_normlization_cpu(vector_list, n_batch, n_dim));
 
-    std::cout << "gpu耗时：" << duration.count() << "ms" << std::endl;
+    COUT_VAL("gpu耗时：", duration.count(), "ms");
 
     vector_list = generate_vector_list(n_batch, n_dim);
 
@@ -72,9 +72,9 @@ void test_performance(int n_batch, int n_dim) {
 
     assert(test_normlization_cpu(vector_list, n_batch, n_dim));
 
-    std::cout << "cpu耗时：" << duration.count() << "ms" << std::endl;
-    
-    std::cout << "Normalization test passed" << std::endl << std::endl;
+    COUT_VAL("cpu耗时：", duration.count(), "ms");
+    COUT_VAL("Normalization test passed");
+    COUT_ENDL();
 }
 
 /*

@@ -1,5 +1,5 @@
 #include "../cuda/distances.h"
-#include "test_utils.h"
+#include "test_utils.cuh"
 #include <iostream>
 #include <cassert>
 #include <cmath>
@@ -78,8 +78,8 @@ void test_basic_cosine_distance(int n_query, int n_batch, int n_dim) {
     // 生成测试数据
     float** h_query_vectors = generate_vector_list(n_query, n_dim);
     float** h_data_vectors = generate_vector_list(n_batch, n_dim);
-    float** h_cos_dist_gpu = malloc_vector_list(n_query, n_batch);
-    float** h_cos_dist_cpu = malloc_vector_list(n_query, n_batch);
+    float** h_cos_dist_gpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
+    float** h_cos_dist_cpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
     
     // std::cout << h_query_vectors[0] << std::endl;
     // std::cout << h_data_vectors[0] << std::endl;
@@ -125,10 +125,10 @@ void test_basic_cosine_distance(int n_query, int n_batch, int n_dim) {
     std::cout << "加速比: " << speedup << "x" << std::endl;
     
     // 清理内存
-    free_vector_list(h_query_vectors);
-    free_vector_list(h_data_vectors);
-    free_vector_list(h_cos_dist_gpu);
-    free_vector_list(h_cos_dist_cpu);
+    free_vector_list((void**)h_query_vectors);
+    free_vector_list((void**)h_data_vectors);
+    free_vector_list((void**)h_cos_dist_gpu);
+    free_vector_list((void**)h_cos_dist_cpu);
     
     std::cout << "基本余弦距离测试完成 ✓" << std::endl << std::endl;
 }
@@ -141,10 +141,10 @@ void test_unit_vectors() {
     float alpha = 1.0f, beta = 0.0f;
     
     // 生成单位向量
-    float** h_query_vectors = malloc_vector_list(n_query, n_dim);
-    float** h_data_vectors = malloc_vector_list(n_batch, n_dim);
-    float** h_cos_dist_gpu = malloc_vector_list(n_query, n_batch);
-    float** h_cos_dist_cpu = malloc_vector_list(n_query, n_batch);
+    float** h_query_vectors = (float**)malloc_vector_list(n_query, n_dim, sizeof(float));
+    float** h_data_vectors = (float**)malloc_vector_list(n_batch, n_dim, sizeof(float));
+    float** h_cos_dist_gpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
+    float** h_cos_dist_cpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
     
     // 设置单位向量
     // Query向量: [1,0,0], [0,1,0], [0,0,1], [1,1,1]/sqrt(3)
@@ -178,10 +178,10 @@ void test_unit_vectors() {
     }
     
     // 清理内存
-    free_vector_list(h_query_vectors);
-    free_vector_list(h_data_vectors);
-    free_vector_list(h_cos_dist_gpu);
-    free_vector_list(h_cos_dist_cpu);
+    free_vector_list((void**)h_query_vectors);
+    free_vector_list((void**)h_data_vectors);
+    free_vector_list((void**)h_cos_dist_gpu);
+    free_vector_list((void**)h_cos_dist_cpu);
     
     std::cout << "单位向量测试通过 ✓" << std::endl << std::endl;
 }
@@ -202,8 +202,8 @@ void test_large_scale_cosine_distance(int n_query, int n_batch, int n_dim) {
     // 生成测试数据
     float** h_query_vectors = generate_vector_list(n_query, n_dim);
     float** h_data_vectors = generate_vector_list(n_batch, n_dim);
-    float** h_cos_dist_gpu = malloc_vector_list(n_query, n_batch);
-    float** h_cos_dist_cpu = malloc_vector_list(n_query, n_batch);
+    float** h_cos_dist_gpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
+    float** h_cos_dist_cpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
     
     // GPU计算
     auto start = std::chrono::high_resolution_clock::now();
@@ -228,10 +228,10 @@ void test_large_scale_cosine_distance(int n_query, int n_batch, int n_dim) {
     std::cout << "加速比: " << speedup << "x" << std::endl;
     
     // 清理内存
-    free_vector_list(h_query_vectors);
-    free_vector_list(h_data_vectors);
-    free_vector_list(h_cos_dist_gpu);
-    free_vector_list(h_cos_dist_cpu);
+    free_vector_list((void**)h_query_vectors);
+    free_vector_list((void**)h_data_vectors);
+    free_vector_list((void**)h_cos_dist_gpu);
+    free_vector_list((void**)h_cos_dist_cpu);
     
     std::cout << "大规模余弦距离压力测试完成 ✓" << std::endl << std::endl;
 }

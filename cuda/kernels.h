@@ -21,13 +21,3 @@ __global__ void topk_kernel(
     float *d_topk_dist, 
     int n_query, int n_batch, int k
 );
-
-// 辅助函数声明
-void launch_topk_kernel(
-    int *d_index,
-    float *d_dist,
-    int *d_topk_index,
-    float *d_topk_dist,
-    int n_query, int n_batch, int k,
-    cudaStream_t stream = 0
-);

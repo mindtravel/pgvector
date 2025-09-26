@@ -1,9 +1,8 @@
 /*
- * 简化的 int 索引版本 select_topk 测试
- * 避免复杂的依赖问题
+ * cuda_select_topk 测试
+ * 
  */
 
-#include "../../cuda/select_topk.cuh"
 #include "../../cuda/select_topk.cuh"
 #include "../../test_cuda/test_utils.cuh"
 #include <cuda_runtime.h>
@@ -91,7 +90,7 @@ void cuda_test_select_topk() {
     cudaMemcpy(h_out_idx.data(), d_out_idx, out_idx_size, cudaMemcpyDeviceToHost);
     
     // 验证结果
-    for (int i = 0; i < batch_size; i++) {
+    for (int i = 0; i < batch_size; i++)  {
         COUT_ENDL("批次", i , ":");
         COUT_ENDL("  原始数据: ");
         

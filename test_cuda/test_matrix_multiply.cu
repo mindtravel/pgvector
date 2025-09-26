@@ -1,5 +1,5 @@
 #include "../cuda/matrix-multiply.h"
-#include "test_utils.h"
+#include "test_utils.cuh"
 #include <iostream>
 #include <cassert>
 #include <cmath>
@@ -104,8 +104,8 @@ void test_basic_matrix_multiply(int M, int N, int K) {
     // 生成测试数据
     float** h_A = generate_vector_list(M, K);
     float** h_B = generate_vector_list(N, K);
-    float** h_C_gpu = malloc_vector_list(M, N);
-    float** h_C_cpu = malloc_vector_list(M, N);
+    float** h_C_gpu = (float**)malloc_vector_list(M, N, sizeof(float));
+    float** h_C_cpu = (float**)malloc_vector_list(M, N, sizeof(float));
     
     if (DEBUG){
         std::cout << "A" << std::endl;
@@ -155,10 +155,10 @@ void test_basic_matrix_multiply(int M, int N, int K) {
     std::cout << "GPU性能: " << gflops << " GFLOPS" << std::endl;
     
     // 清理内存
-    free_vector_list(h_A);
-    free_vector_list(h_B);
-    free_vector_list(h_C_gpu);
-    free_vector_list(h_C_cpu);
+    free_vector_list((void**)h_A);
+    free_vector_list((void**)h_B);
+    free_vector_list((void**)h_C_gpu);
+    free_vector_list((void**)h_C_cpu);
 }
 
 // 测试2：单位矩阵测试
@@ -245,8 +245,8 @@ void test_large_scale_stress(int M, int N, int K) {
     // 生成测试数据
     float** h_A = generate_vector_list(M, K);
     float** h_B = generate_vector_list(N, K);
-    float** h_C_gpu = malloc_vector_list(M, N);
-    float** h_C_cpu = malloc_vector_list(M, N);
+    float** h_C_gpu = (float**)malloc_vector_list(M, N, sizeof(float));
+    float** h_C_cpu = (float**)malloc_vector_list(M, N, sizeof(float));
 
 
     // GPU计算
@@ -274,10 +274,10 @@ void test_large_scale_stress(int M, int N, int K) {
     std::cout << "GPU性能: " << gflops << " GFLOPS" << std::endl;
     
     // 清理内存
-    free_vector_list(h_A);
-    free_vector_list(h_B);
-    free_vector_list(h_C_gpu);
-    free_vector_list(h_C_cpu);
+    free_vector_list((void**)h_A);
+    free_vector_list((void**)h_B);
+    free_vector_list((void**)h_C_gpu);
+    free_vector_list((void**)h_C_cpu);
     
     std::cout << "大规模压力测试完成 ✓" << std::endl << std::endl;
 }
