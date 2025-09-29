@@ -4,7 +4,9 @@ EXTVERSION = 0.8.0
 MODULE_big = vector
 DATA = $(wildcard sql/*--*--*.sql)
 DATA_built = sql/$(EXTENSION)--$(EXTVERSION).sql
-OBJS = src/bitutils.o \
+
+OBJS = \
+	src/bitutils.o \
 	src/bitvec.o \
 	src/halfutils.o \
 	src/halfvec.o \
@@ -26,7 +28,11 @@ OBJS = src/bitutils.o \
 	src/ivfjl.o \
 	src/vector_batch.o
 	
-HEADERS = src/halfvec.h src/sparsevec.h src/vector.h src/vector_batch.h
+HEADERS = \
+	src/halfvec.h \
+	src/sparsevec.h \
+	src/vector.h \
+	src/vector_batch.h
 
 TESTS = $(wildcard test/sql/*.sql)
 REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))

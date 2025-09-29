@@ -1,11 +1,13 @@
 #include "distances.h"
-#include <device_launch_parameters.h>
 #include <cublas_v2.h>
+#include <thrust/device_vector.h>
+#include <thrust/fill.h>
 
 #include "kernels.h"
-#include "select_topk.cuh"
+// #include "select_topk.cuh"
 
-#include "../test_cuda/test_utils.cuh"
+#include "fusion_cos_topk.cuh"
+#include "../unit_tests/common/test_utils.cuh"
 #include "pch.h"
 
 
@@ -162,7 +164,7 @@ void cuda_cosine_dist(float** h_query_vectors, float** h_data_vectors, float** h
 
 void cuda_cosine_dist_topk(
     float** h_query_vectors, float** h_data_vectors, 
-    int* data_index, int** topk_index,
+    int* data_index, int** topk_index, float** topk_cos_dist,
     int n_query, int n_batch, int n_dim,
     int k /*查找的最近邻个数*/
 ){ 
@@ -187,11 +189,11 @@ void cuda_cosine_dist_topk(
     }
     
     size_t size_query = n_query * n_dim * sizeof(float);
-    // size_t size_idx = n_batch * sizeof(int);
     size_t size_data = n_batch * n_dim * sizeof(float);
-    size_t size_dist = n_query * (n_batch + k) * sizeof(float);
-    size_t size_idx = n_query * (n_batch + k) * sizeof(int);
-    // size_t size_topk_dist = n_query * k * sizeof(float);
+    size_t size_dist = n_query * n_batch * sizeof(float);
+    size_t size_idx = n_query * n_batch * sizeof(int);
+    size_t size_topk_dist = n_query * k * sizeof(float);
+    size_t size_topk_idx = n_query * k * sizeof(int);
 
     // cuBLAS句柄
     cublasHandle_t handle;
@@ -199,14 +201,14 @@ void cuda_cosine_dist_topk(
     // cublasSetStream(handle, streams[0]); 
 
     // 分配设备内存
-    float *d_query_vectors, *d_data_vectors, *d_cos_dist, *d_topk_cos_dist,
+    float *d_query_vectors, *d_data_vectors, *d_inner_product, *d_topk_cos_dist,
         *d_query_norm, *d_data_norm;
     int *d_index, *d_topk_index;
     {
         CUDATimer timer_manage("GPU Memory Allocation", ENABLE_CUDA_TIMING, false);
         cudaMalloc(&d_query_vectors, size_query);
         cudaMalloc(&d_data_vectors, size_data);
-        cudaMalloc(&d_cos_dist, size_dist);/*存储各个query需要查找的data向量的距离*/
+        cudaMalloc(&d_inner_product, size_dist);/*存储各个query需要查找的data向量的距离*/
         cudaMalloc(&d_index, size_idx);/*存储各个query需要查找的data向量的索引*/
         cudaMalloc(&d_topk_cos_dist, size_topk_dist);/*存储topk距离*/
         cudaMalloc(&d_topk_index, size_topk_idx);/*存储topk索引*/
@@ -248,23 +250,31 @@ void cuda_cosine_dist_topk(
         /* 复制索引数组 */
         cudaMemcpy2D(
             d_index,
-            n_batch * sizeof(float),
+            n_batch * sizeof(int),
             data_index,
             0,/* spitch设为0，意为每次都复制同一行 */
-            n_batch * sizeof(float),
+            n_batch * sizeof(int),
             n_query,
             cudaMemcpyHostToDevice
         );
+
         /* 初始化距离数组（为一个小于-1的负数） */
-        cudaMemset((void*)d_topk_cos_dist, (int)0xFE, n_query * k * sizeof(float));
+        thrust::fill(
+            thrust::device_pointer_cast(d_topk_cos_dist),/*使用pointer_cast不用创建临时对象*/
+            thrust::device_pointer_cast(d_topk_cos_dist) + size_topk_dist,
+            FLT_MAX
+        );
+        // cudaMemset((void*)d_topk_cos_dist, (int)0xEF, n_query * k * sizeof(float)) /*也可以投机取巧用memset，正好将数组为一个非常大的负数*/
+        table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
+
     }
 
     // print_cuda_2D("index matrix", d_index, n_query, n_batch);
-    // print_cuda_2D("cos distance matrix", d_cos_dist, n_query, n_batch);
-    // print_2D("query vector on host", h_query_vectors, n_query, n_dim);
-    // print_2D("data vector on host", h_data_vectors, n_batch, n_dim);
-    // print_cuda_2D("query vector on device", d_query_vectors, n_query, n_dim);
-    // print_cuda_2D("data vector on device", d_data_vectors, n_batch, n_dim);
+    // print_cuda_2D("cos distance matrix", d_inner_product, n_query, n_batch);
+    // print_2D("query vector", h_query_vectors, n_query, n_dim);
+    // print_2D("data vector", h_data_vectors, n_batch, n_dim);
+    // print_cuda_2D("query vector", d_query_vectors, n_query, n_dim);
+    // print_cuda_2D("data vector", d_data_vectors, n_batch, n_dim);
     // print_cuda_2D("topk index matrix", d_topk_index, n_query, k);
     // print_cuda_2D("topk cos distance matrix", d_topk_cos_dist, n_query, k);
 
@@ -282,7 +292,9 @@ void cuda_cosine_dist_topk(
             n_batch, n_dim
         );        
 
+        // table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
        
+        table_cuda_1D("d_query_norm", d_query_norm, n_query);
         table_cuda_1D("data_norm", d_data_norm, n_batch);
         // table_cuda_2D("data vectors", d_data_vectors, n_batch, n_dim);
 
@@ -297,55 +309,41 @@ void cuda_cosine_dist_topk(
             d_data_vectors, n_dim,            
             d_query_vectors, n_dim,               
             &beta, 
-            d_cos_dist, n_batch
+            d_inner_product, n_batch
         );    
         
         cudaDeviceSynchronize(); 
 
-        cos_distance_kernel<<<dataDim, queryDim>>>(
-            d_query_norm, d_data_norm, d_cos_dist,
-            n_query, n_batch, n_dim
+        print_cuda_2D("inner product", d_inner_product, n_query, n_batch);
+
+        table_cuda_2D("topk index", d_topk_index, n_query, k);
+        table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
+
+        fusion_cos_topk_kernel<<<queryDim, dataDim>>>(
+            d_query_norm, d_data_norm, d_inner_product,
+            d_topk_index, d_topk_cos_dist,
+            n_query, n_batch, k
         );
-        
-        // table_cuda_2D("cos distance matrix", d_cos_dist, n_query, n_batch);
+
+        // cos_distance_kernel<<<dataDim, queryDim>>>(
+            // d_query_norm, d_data_norm, d_inner_product,
+            // n_query, n_batch, n_dim
+        // );
+        table_cuda_2D("topk index", d_topk_index, n_query, k);
+        table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
 
         cudaDeviceSynchronize(); 
         
         // 设置CUDA设备以确保RAFT库使用正确的设备
         
-        raft::resources handle;
 
-        // 创建输入矩阵视图
-        auto d_cos_dist_view = raft::make_device_matrix_view<const float, int64_t, raft::row_major>(
-            d_cos_dist, n_query, n_batch);
-        auto d_index_view = raft::make_device_matrix_view<const int, int64_t, raft::row_major>(
-            d_index, n_query, n_batch);
-        
-        // 创建输出矩阵视图
-        auto d_topk_cos_dist_view = raft::make_device_matrix_view<float, int64_t, raft::row_major>(
-            d_topk_cos_dist, n_query, k);
-        auto d_topk_index_view = raft::make_device_matrix_view<int, int64_t, raft::row_major>(
-            d_topk_index, n_query, k);
-
-        COUT_ENDL("here");
-
-        select_k(handle,
-            d_cos_dist_view,
-            std::make_optional(d_index_view),
-            d_topk_cos_dist_view,
-            d_topk_index_view,
-            true,  // select_min = true
-            false, // sorted = false
-            SelectAlgo::kAuto,
-            std::nullopt);
-
-        table_2D("topk_index", topk_index, n_query, k);
     }
 
 
     {
         CUDATimer timer_trans2("D2H Data Transfer", ENABLE_CUDA_TIMING);
-        cudaMemcpy(topk_index, d_topk_index, n_query * k * sizeof(int), cudaMemcpyDeviceToHost);        
+        cudaMemcpy(topk_index[0], d_topk_index, n_query * k * sizeof(int), cudaMemcpyDeviceToHost);        
+        cudaMemcpy(topk_cos_dist[0], d_topk_cos_dist, n_query * k * sizeof(float), cudaMemcpyDeviceToHost);        
     }
 
     {
@@ -353,10 +351,12 @@ void cuda_cosine_dist_topk(
         cublasDestroy(handle);
         cudaFree(d_query_vectors);
         cudaFree(d_data_vectors);
-        cudaFree(d_cos_dist);
+        cudaFree(d_inner_product);
         cudaFree(d_query_norm);
         cudaFree(d_data_norm);
         cudaFree(d_index);
+        cudaFree(d_topk_cos_dist);
+        cudaFree(d_topk_index);
         
         // 销毁CUDA流
         for (int i = 0; i < NUM_STREAMS; i++) {

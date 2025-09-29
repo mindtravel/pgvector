@@ -13,7 +13,8 @@ DATA = $(wildcard sql/*--*--*.sql)
 DATA_built = sql/$(EXTENSION)--$(EXTVERSION).sql
 
 # 目标文件 - 包含CUDA对象文件
-OBJS = cuda/cuda_wrapper.o \
+OBJS = \
+	cuda/cuda_wrapper.o \
 	src/bitutils.o \
 	src/bitvec.o \
 	src/halfutils.o \
@@ -37,7 +38,11 @@ OBJS = cuda/cuda_wrapper.o \
 	src/vector_batch.o
 
 # 头文件
-HEADERS = src/halfvec.h src/sparsevec.h src/vector.h src/vector_batch.h
+HEADERS = \
+src/halfvec.h \
+src/sparsevec.h \
+src/vector.h \
+src/vector_batch.h
 
 # 测试
 TESTS = $(wildcard test/sql/*.sql)

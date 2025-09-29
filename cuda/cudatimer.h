@@ -1,4 +1,7 @@
 //=== cudatimer.h ===//
+#ifndef CUDATIMER_H
+#define CUDATIMER_H
+
 #include <iostream>
 #include <string>
 #include <map>
@@ -66,3 +69,4 @@ public:
 
 // 静态成员初始化
 // bool CUDATimer::global_enable = true;
+#endif

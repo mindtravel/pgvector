@@ -1,7 +1,6 @@
 #include <cublas_v2.h>
 #include "matrix-multiply.h"
 #include "kernels.h"
-#include "cudatimer.h"
 #include "pch.h"
 #define ENABLE_CUDA_TIMING 1 /*是否启用CUDATimer计时*/
 

@@ -1,7 +1,5 @@
 #include "kernels.h"
 #include "normalize.h"
-#include <device_launch_parameters.h>
-#include "cudatimer.h"
 #include "pch.h"
 
 /*

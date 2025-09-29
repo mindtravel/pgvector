@@ -1,8 +1,5 @@
 # 忽略所有不包含点号的文件和目录（除Makefile）
-*[!.]*
-!*/
-!Makefile
-!Dockerfile
+
 
 # 忽略编译产物
 *.o
@@ -11,3 +8,5 @@
 
 # 忽略VSCode配置文件
 .vscode
+
+unit_tests/build/*
