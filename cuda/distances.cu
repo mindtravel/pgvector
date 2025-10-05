@@ -164,14 +164,14 @@ void cuda_cosine_dist(float** h_query_vectors, float** h_data_vectors, float** h
 
 void cuda_cosine_dist_topk(
     float** h_query_vectors, float** h_data_vectors, 
-    int* data_index, int** topk_index, float** topk_cos_dist,
+    int** h_index, int** h_topk_index, float** h_topk_cos_dist,
     int n_query, int n_batch, int n_dim,
     int k /*查找的最近邻个数*/
 ){ 
     /**
     * 对一个batch的查询向量，找出余弦距离最近的topk，返回一个形状为 [batch, k] 的索引矩阵
     **/
-//    table_2D("topk_index", topk_index, n_query, k);
+//    table_2D("h_topk_index", h_topk_index, n_query, k);
 
     float alpha = 1.0f; 
     float beta = 0.0f;
@@ -191,7 +191,7 @@ void cuda_cosine_dist_topk(
     size_t size_query = n_query * n_dim * sizeof(float);
     size_t size_data = n_batch * n_dim * sizeof(float);
     size_t size_dist = n_query * n_batch * sizeof(float);
-    size_t size_idx = n_query * n_batch * sizeof(int);
+    size_t size_index = n_query * n_batch * sizeof(int);
     size_t size_topk_dist = n_query * k * sizeof(float);
     size_t size_topk_idx = n_query * k * sizeof(int);
 
@@ -209,7 +209,7 @@ void cuda_cosine_dist_topk(
         cudaMalloc(&d_query_vectors, size_query);
         cudaMalloc(&d_data_vectors, size_data);
         cudaMalloc(&d_inner_product, size_dist);/*存储各个query需要查找的data向量的距离*/
-        cudaMalloc(&d_index, size_idx);/*存储各个query需要查找的data向量的索引*/
+        cudaMalloc(&d_index, size_index);/*存储各个query需要查找的data向量的索引*/
         cudaMalloc(&d_topk_cos_dist, size_topk_dist);/*存储topk距离*/
         cudaMalloc(&d_topk_index, size_topk_idx);/*存储topk索引*/
 
@@ -251,12 +251,13 @@ void cuda_cosine_dist_topk(
         cudaMemcpy2D(
             d_index,
             n_batch * sizeof(int),
-            data_index,
-            0,/* spitch设为0，意为每次都复制同一行 */
+            h_index[0],
+            n_batch * sizeof(int),
             n_batch * sizeof(int),
             n_query,
             cudaMemcpyHostToDevice
         );
+        CHECK_CUDA_ERRORS;
 
         /* 初始化距离数组（为一个小于-1的负数） */
         thrust::fill(
@@ -265,7 +266,7 @@ void cuda_cosine_dist_topk(
             FLT_MAX
         );
         // cudaMemset((void*)d_topk_cos_dist, (int)0xEF, n_query * k * sizeof(float)) /*也可以投机取巧用memset，正好将数组为一个非常大的负数*/
-        table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
+        // table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
 
     }
 
@@ -294,8 +295,8 @@ void cuda_cosine_dist_topk(
 
         // table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
        
-        table_cuda_1D("d_query_norm", d_query_norm, n_query);
-        table_cuda_1D("data_norm", d_data_norm, n_batch);
+        // table_cuda_1D("query_norm", d_query_norm, n_query);
+        // table_cuda_1D("data_norm", d_data_norm, n_batch);
         // table_cuda_2D("data vectors", d_data_vectors, n_batch, n_dim);
 
         /**
@@ -314,13 +315,13 @@ void cuda_cosine_dist_topk(
         
         cudaDeviceSynchronize(); 
 
-        print_cuda_2D("inner product", d_inner_product, n_query, n_batch);
+        // print_cuda_2D("inner product", d_inner_product, n_query, n_batch);
 
-        table_cuda_2D("topk index", d_topk_index, n_query, k);
+        // table_cuda_2D("topk index", d_topk_index, n_query, k);
         table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
 
         fusion_cos_topk_kernel<<<queryDim, dataDim>>>(
-            d_query_norm, d_data_norm, d_inner_product,
+            d_query_norm, d_data_norm, d_inner_product, d_index,
             d_topk_index, d_topk_cos_dist,
             n_query, n_batch, k
         );
@@ -342,8 +343,8 @@ void cuda_cosine_dist_topk(
 
     {
         CUDATimer timer_trans2("D2H Data Transfer", ENABLE_CUDA_TIMING);
-        cudaMemcpy(topk_index[0], d_topk_index, n_query * k * sizeof(int), cudaMemcpyDeviceToHost);        
-        cudaMemcpy(topk_cos_dist[0], d_topk_cos_dist, n_query * k * sizeof(float), cudaMemcpyDeviceToHost);        
+        cudaMemcpy(h_topk_index[0], d_topk_index, n_query * k * sizeof(int), cudaMemcpyDeviceToHost);        
+        cudaMemcpy(h_topk_cos_dist[0], d_topk_cos_dist, n_query * k * sizeof(float), cudaMemcpyDeviceToHost);        
     }
 
     {
@@ -363,4 +364,6 @@ void cuda_cosine_dist_topk(
             cudaStreamDestroy(streams[i]);
         }
     }
+
+    CHECK_CUDA_ERRORS;
 }

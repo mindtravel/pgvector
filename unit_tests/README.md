@@ -2,66 +2,13 @@
 
 这个目录包含了PGVector项目的单元测试，使用CMake进行构建管理。
 
-## 目录结构
-
-```
-unit_tests/
-├── CMakeLists.txt              # 主CMake配置
-├── build_and_test.sh          # 构建和测试脚本
-├── common/                    # 公共头文件
-│   └── test_utils.cuh         # 测试工具头文件
-├── test_vector_normalizer/    # 向量归一化测试
-│   ├── CMakeLists.txt
-│   └── test_vector_normalizer.cu
-├── test_print_cuda/           # CUDA打印功能测试
-│   ├── CMakeLists.txt
-│   └── test_print_cuda.cu
-├── test_fusion_cosine_topk/   # 融合余弦Top-K测试
-│   ├── CMakeLists.txt
-│   └── test_fusion_cosine_topk.cu
-└── README.md                  # 本文件
-```
-
-## 如何编译和测试
 
 ### 编译和测试所有项目
-
-### 方法1：使用构建脚本（推荐）
+使用测试脚本，在脚本中注释来略过部分测试
 
 ```bash
 cd /root/pgvector/unit_tests
 ./build_and_test.sh
-```
-
-### 方法2：手动构建
-
-```bash
-cd /root/pgvector/unit_tests
-
-# 创建构建目录
-mkdir -p build
-cd build
-
-# 配置CMake
-cmake .. -DCMAKE_BUILD_TYPE=Release
-
-# 编译
-make -j$(nproc)
-
-# 运行所有测试
-./test_vector_normalizer/test_vector_normalizer
-./test_print_cuda/test_print_cuda
-./test_cosine_distance/test_cosine_distance
-```
-
-### 方法3：使用CMake测试框架
-
-```bash
-cd /root/pgvector/unit_tests
-mkdir -p build && cd build
-cmake ..
-make
-ctest --output-on-failure
 ```
 
 ## 测试内容

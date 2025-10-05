@@ -1,4 +1,5 @@
-#pragma once
+#ifndef KERNELS_H
+#define KERNELS_H
 
 // 全局CUDA核函数声明
 __global__ void dotProductKernel(const float* a, const float* b, float* result, int n);
@@ -21,3 +22,5 @@ __global__ void topk_kernel(
     float *d_topk_dist, 
     int n_query, int n_batch, int k
 );
+
+#endif

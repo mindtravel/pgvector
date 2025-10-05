@@ -3,14 +3,14 @@
 
 #include "../cuda/distances.h"
 #include "../cuda/pch.h"
-#include "test_utils.cuh"
+#include "../common/test_utils.cuh"
 
 #define EPSILON 1e-2
 #define DIV_EPSILON 1e-4
 
 // CPU版本余弦版本k近邻计算（用于验证）
 void cpu_cosine_distance_topk(float** query_vectors, float** data_vectors, 
-                        int* data_index, 
+                        int** data_index, 
                         int** topk_index, float** topk_dist,
                         int n_query, int n_batch, int n_dim, int k) {
     // 计算每个向量的L2范数
@@ -55,7 +55,7 @@ void cpu_cosine_distance_topk(float** query_vectors, float** data_vectors,
                 cos_sim = 1.0f - (dot_product / sqrt(query_norms[i] * data_norms[j]));
             
             // 存储余弦相似度和对应的数据索引
-            cos_pairs[j] = std::make_pair(cos_sim, data_index[j]);
+            cos_pairs[j] = std::make_pair(cos_sim, data_index[i][j]);
             // COUT_TABLE(i,j,dot_product,query_norms[i],data_norms[j], cos_sim);
         }
         
@@ -82,10 +82,12 @@ void cpu_cosine_distance_topk(float** query_vectors, float** data_vectors,
     free(data_norms);
 }
 
-int* generate_data_index(int size){
-    int* data_index = (int*)malloc(size * sizeof(int));
-    for(int i = 0; i < size; i++){
-        data_index[i] = i;
+int** generate_data_index(int size_x, int size_y){
+    int** data_index = (int**)malloc_vector_list(size_x, size_y, sizeof(int));
+    for(int i = 0; i < size_x; i++){
+        for(int j = 0; j < size_y; j++){
+            data_index[i][j] = j;
+        }
     }
     return data_index;
 }
@@ -104,9 +106,9 @@ void test_basic_cosine_distance_topk(int n_query, int n_batch, int n_dim, int k)
     // 生成测试数据
     float** h_query_vectors = generate_vector_list(n_query, n_dim);
     float** h_data_vectors = generate_vector_list(n_batch, n_dim);
-    // float** h_cos_dist_gpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
-    // float** h_cos_dist_cpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
-    int* data_index = generate_data_index(n_batch);
+    // float** h_cos_dist_cpu = (float**)ector_list(n_batch, n_dim);
+    // float** h_cos_dist_gpu = (float*malloc_vector_list(n_query, n_batch, sizeof(float));
+    int** data_index = generate_data_index(n_query, n_batch);
     int** topk_index_cpu = (int**)malloc_vector_list(n_query, k, sizeof(int));
     int** topk_index_gpu = (int**)malloc_vector_list(n_query, k, sizeof(int));
 
@@ -200,7 +202,7 @@ void test_large_scale_cosine_distance_topk(int n_query, int n_batch, int n_dim, 
     float** h_data_vectors = generate_vector_list(n_batch, n_dim);
     // float** h_cos_dist_gpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
     // float** h_cos_dist_cpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
-    int* data_index = generate_data_index(n_batch);
+    int** data_index = generate_data_index(n_query, n_batch);
     int** topk_index_cpu = (int**)malloc_vector_list(n_query, k, sizeof(int));
     int** topk_index_gpu = (int**)malloc_vector_list(n_query, k, sizeof(int));
     float** topk_dist_cpu = (float**)malloc_vector_list(n_query, k, sizeof(float));
