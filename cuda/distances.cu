@@ -184,9 +184,6 @@ void cuda_cosine_dist_topk(
     dim3 vectorDim(n_dim);
 
     cudaStream_t streams[NUM_STREAMS];
-    for (int i = 0; i < NUM_STREAMS; i++) {
-        cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking);
-    }
     
     size_t size_query = n_query * n_dim * sizeof(float);
     size_t size_data = n_batch * n_dim * sizeof(float);
@@ -197,7 +194,6 @@ void cuda_cosine_dist_topk(
 
     // cuBLAS句柄
     cublasHandle_t handle;
-    cublasCreate(&handle);
     // cublasSetStream(handle, streams[0]); 
 
     // 分配设备内存
@@ -206,6 +202,7 @@ void cuda_cosine_dist_topk(
     int *d_index, *d_topk_index;
     {
         CUDATimer timer_manage("GPU Memory Allocation", ENABLE_CUDA_TIMING, false);
+
         cudaMalloc(&d_query_vectors, size_query);
         cudaMalloc(&d_data_vectors, size_data);
         cudaMalloc(&d_inner_product, size_dist);/*存储各个query需要查找的data向量的距离*/
@@ -215,6 +212,12 @@ void cuda_cosine_dist_topk(
 
         cudaMalloc(&d_query_norm, n_query * sizeof(float)); /*存储query的l2 Norm*/
         cudaMalloc(&d_data_norm, n_batch * sizeof(float)); /*存储data的l2 Norm*/
+
+        for (int i = 0; i < NUM_STREAMS; i++) {
+            cudaStreamCreateWithFlags(&streams[i], cudaStreamNonBlocking);
+        }
+
+        cublasCreate(&handle);
     }
 
     // 复制数据到设备
@@ -257,7 +260,7 @@ void cuda_cosine_dist_topk(
             n_query,
             cudaMemcpyHostToDevice
         );
-        CHECK_CUDA_ERRORS;
+        // CHECK_CUDA_ERRORS;
 
         /* 初始化距离数组（为一个小于-1的负数） */
         thrust::fill(
@@ -318,7 +321,7 @@ void cuda_cosine_dist_topk(
         // print_cuda_2D("inner product", d_inner_product, n_query, n_batch);
 
         // table_cuda_2D("topk index", d_topk_index, n_query, k);
-        table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
+        // table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
 
         fusion_cos_topk_kernel<<<queryDim, dataDim>>>(
             d_query_norm, d_data_norm, d_inner_product, d_index,
@@ -330,8 +333,8 @@ void cuda_cosine_dist_topk(
             // d_query_norm, d_data_norm, d_inner_product,
             // n_query, n_batch, n_dim
         // );
-        table_cuda_2D("topk index", d_topk_index, n_query, k);
-        table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
+        // table_cuda_2D("topk index", d_topk_index, n_query, k);
+        // table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
 
         cudaDeviceSynchronize(); 
         
@@ -365,5 +368,5 @@ void cuda_cosine_dist_topk(
         }
     }
 
-    CHECK_CUDA_ERRORS;
+    // CHECK_CUDA_ERRORS;
 }
