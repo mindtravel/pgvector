@@ -4,6 +4,7 @@
 #include <iostream>
 #include <iomanip>
 #include <cstdlib>
+#include <algorithm>
 #include <cuda_runtime.h>
 
 #define DEBUG true
@@ -53,13 +54,141 @@ inline void table_impl(T&& first, Args&&... rest) {
 void _check_cuda_last_error(const char *file, int line);
 #define CHECK_CUDA_ERRORS _check_cuda_last_error(__FILE__, __LINE__);/*用于捕捉CUDA函数错误信息的宏*/
 
-bool float_equal(float a, float b, float epsilon = 1e-5f);
-bool float_equal_relative(float a, float b, float epsilon = 1e-5f);
+bool compare_float(float a, float b, float epsilon = 1e-5f);
+bool compare_float_relative(float a, float b, float epsilon = 1e-5f);
 
-bool matrix_equal(float* a, float* b, int rows, int cols, float epsilon = 1e-5f);
+/**
+ * 比较数字：浮点数采用绝对误差
+ */
+template<typename T>
+bool compare_numbers_relative(T a, T b, float epsilon) {
+    if constexpr (std::is_floating_point_v<T>) {
+        /* 浮点数 */
+        return std::abs(a - b) * 2.0 / (std::abs(a) + std::abs(b)) < epsilon;
+    } else {
+        /* 整数 */
+        return a == b;
+    }
+}
 
-bool equal_2D_float(float** a, float** b, int rows, int cols, float epsilon = 1e-5f);
-bool equal_2D_int(int** a, int** b, int rows, int cols);
+/**
+ * 比较数字：浮点数采用相对误差
+ */
+template<typename T>
+bool compare_numbers(T a, T b, float epsilon = 1e-5) {
+    if constexpr (std::is_floating_point_v<T>) {
+        /* 浮点数 */
+        return std::abs(a - b) < epsilon;
+    } else {
+        /* 整数 */
+        return a == b;
+    }
+}
+
+/* 
+* 比较一维数组
+*/
+template<typename T>
+bool compare_1D(T* a, T* b, int n, float epsilon = 1e-5f) {
+    int err_happens = 0;
+    for(int i = 0; i < n; ++i){
+        if (!compare_numbers(a[i], b[i], epsilon)) {
+            if(err_happens == 0){
+                COUT_ENDL("mismatch!");
+                COUT_TABLE("i", "a[i]", "b[i]", "diff");
+            }
+
+            err_happens ++;
+            if(DEBUG == true)
+                COUT_TABLE(i, a[i], b[i], a[i] - b[i]);
+        }
+    }
+    if(err_happens == 0){
+        COUT_ENDL("all match!");
+        return true;
+    }
+    COUT_ENDL(err_happens);
+    return true;
+}
+
+template<typename T>
+bool compare_2D(T* a, T* b, int nx, int ny, float epsilon = 1e-5f) {
+    int err_happens = 0;
+    for(int i = 0; i < nx; ++i){
+        for (int j = 0; j < ny; j++) {
+            if (!compare_numbers(a[i][j], b[i][j], epsilon)) {
+                if(err_happens == 0){
+                    COUT_ENDL("mismatch!");
+                    COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
+                }
+    
+                err_happens ++;
+                if(DEBUG == true)
+                    COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
+            }
+        }
+    }
+    if(err_happens == 0){
+        COUT_ENDL("all match!");
+        return true;
+    }
+    COUT_ENDL(err_happens);
+    return true;
+}
+
+template<typename T>
+bool compare_set_1D(T** a, T** b, int n, float epsilon = 1e-5f) {
+    int err_happens = 0;
+    std::sort(a, a + n);
+    std::sort(b, b + n);
+
+    for(int i = 0; i < n; ++i){
+        if (!compare_numbers(a[i], b[i], epsilon)) {
+            if(err_happens == 0){
+                COUT_ENDL("mismatch!");
+                COUT_TABLE("i", "a[i]", "b[i]", "diff");
+            }
+
+            err_happens ++;
+            if(DEBUG == true)
+                COUT_TABLE(i, a[i], b[i], a[i] - b[i]);
+        }
+    }
+    if(err_happens == 0){
+        COUT_ENDL("all match!");
+        return true;
+    }
+    COUT_ENDL(err_happens);
+    return true;
+}
+
+template<typename T>
+bool compare_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
+    int err_happens = 0;
+    for(int i = 0; i < nx; ++i){
+        std::sort(a[i], a[i] + ny);
+        std::sort(b[i], b[i] + ny);
+
+        for (int j = 0; j < ny; j++) {
+            if (!compare_numbers(a[i][j], b[i][j], epsilon)) {
+                if(err_happens == 0){
+                    COUT_ENDL("mismatch!");
+                    COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
+                }
+    
+                err_happens ++;
+                if(DEBUG == true)
+                    COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
+            }
+        }
+    }
+    if(err_happens == 0){
+        COUT_ENDL("all match!");
+        return true;
+    }
+    COUT_ENDL(err_happens);
+    return true;
+}
 
 float** generate_vector_list(int n_batch, int n_dim);
 float*** generate_large_scale_vectors(int n_lists, int n_batch, int n_dim);

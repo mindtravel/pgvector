@@ -35,7 +35,7 @@ bool test_normlization_cpu(float** vector_list, int n_batch, int n_dim){
         for(int j=0; j<n_dim; ++j){
             sum += vector_list[i][j] * vector_list[i][j];
         }  
-        if(!float_equal(sum, 1.0f)){
+        if(!compare_numbers(sum, 1.0f)){
             return false;
         }
     }

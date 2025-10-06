@@ -95,8 +95,7 @@ int** generate_data_index(int size_x, int size_y){
 // 测试1：基本余弦k近邻计算
 void test_basic_cosine_distance_topk(int n_query, int n_batch, int n_dim, int k) {
     COUT_VAL("=== Test1: 基本余弦k近邻测试 ===");    
-    COUT_VAL("测试向量组大小: ", n_query, " 个查询向量 × ", n_batch, " 个数据向量");    
-    COUT_VAL("向量维度: ", n_dim);    
+    COUT_VAL(n_query, " 个查询向量 × ", n_batch, " 个数据向量", ", 向量维度: ", n_dim, ", 找top", k);    
     
     // 计算内存使用量
     size_t memory_mb = (n_query * n_dim + n_batch * n_dim + n_query * n_batch) * sizeof(float) / (1024 * 1024);
@@ -123,20 +122,6 @@ void test_basic_cosine_distance_topk(int n_query, int n_batch, int n_dim, int k)
             topk_dist_gpu[i][j] = -std::numeric_limits<float>::max();
         }
     }
-    // for(int i = 0; i < n_query; ++i){
-    //     for(int j = 0; j < k; ++j){
-    //         COUT_ENDL(topk_dist_cpu[i][j], topk_dist_gpu[i][j]);
-    //     }
-    // }
-    
-    // std::cout << h_query_vectors[0] << std::endl;
-    // std::cout << h_data_vectors[0] << std::endl;
-    if(DEBUG==true){
-        // print_2D("query: ", h_query_vectors, n_query, n_dim);    
-        // print_2D("data: ", h_data_vectors, n_batch, n_dim);  
-        // print_1D("index", data_index, n_batch);  
-    }
-
 
     // GPU计算
     auto start = std::chrono::high_resolution_clock::now();
@@ -157,14 +142,17 @@ void test_basic_cosine_distance_topk(int n_query, int n_batch, int n_dim, int k)
         n_query, n_batch, n_dim, k
     );
     end = std::chrono::high_resolution_clock::now();
-
     auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
-    
     // 验证结果
-    // assert(equal_2D_int(topk_index_gpu, topk_index_cpu, n_query, k));
-    assert(equal_2D_float(topk_dist_cpu, topk_dist_gpu, n_query, k));
+    assert(compare_set_2D(topk_index_gpu, topk_index_cpu, n_query, k));
+    assert(compare_set_2D(topk_dist_gpu, topk_dist_cpu, n_query, k));
     
+    // print_2D("cpu topk index", topk_index_cpu, n_query, k); 
+    // print_2D("gpu topk index", topk_index_gpu, n_query, k); 
+    // print_2D("cpu topk dist", topk_dist_cpu, n_query, k); 
+    // print_2D("gpu topk dist", topk_dist_gpu, n_query, k); 
+
     // 计算性能指标
     float speedup = (float)cpu_duration.count() / gpu_duration.count();
     
@@ -229,8 +217,8 @@ void test_large_scale_cosine_distance_topk(int n_query, int n_batch, int n_dim, 
     auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     
     // 验证结果
-    // assert(equal_2D_int(topk_index_cpu, topk_index_gpu, n_query, k));
-    assert(equal_2D_float(topk_dist_cpu, topk_dist_gpu, n_query, k));
+    assert(compare_2D(topk_index_cpu, topk_index_gpu, n_query, k));
+    assert(compare_2D(topk_dist_cpu, topk_dist_gpu, n_query, k));
     
     // 计算性能指标
     float speedup = (float)cpu_duration.count() / gpu_duration.count();
@@ -255,15 +243,21 @@ int main() {
     std::cout << "开始余弦距离单元测试..." << std::endl << std::endl;
     
     try {
-        // 基本测试
-        test_basic_cosine_distance_topk(3, 5, 4, 2);
-        // test_basic_cosine_distance_topk(1024, 1024, 1024, 100);
-        // test_basic_cosine_distance(128, 128, 128);
+        /**
+         * 基本余弦+topk算子测试，逐步增大各个参数发现，k的最大值只支持16左右
+         * 原因是可能是并行堆操作发生在共享内存中，而共享内存是很有限的
+         */
+        // test_basic_cosine_distance_topk(4, 8, 8, 4);
+        // test_basic_cosine_distance_topk(16, 8, 8, 4);
+        // test_basic_cosine_distance_topk(64, 8, 8, 4);
+        test_basic_cosine_distance_topk(1024, 128, 512, 16);
+        test_basic_cosine_distance_topk(1024, 1024, 1024, 16);
+        test_basic_cosine_distance_topk(1024, 1024, 1024, 16);
         
-        // 单位向量测试
+        // 单位向量测试（未完成）
         // test_unit_vectors();
         
-        // 大规模压力测试
+        // 大规模压力测试（未完成）
         // test_large_scale_cosine_distance(1024, 1024, 512);
         
         std::cout << "all_test_passed" << std::endl;

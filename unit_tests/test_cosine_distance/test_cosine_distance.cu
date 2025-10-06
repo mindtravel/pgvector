@@ -110,7 +110,7 @@ void test_basic_cosine_distance(int n_query, int n_batch, int n_dim) {
     auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     
     // 验证结果
-    assert(equal_2D_float(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
+    assert(compare_2D(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
     
     // 计算性能指标
     float speedup = (float)cpu_duration.count() / gpu_duration.count();
@@ -161,7 +161,7 @@ void test_unit_vectors() {
     cpu_cosine_distance(h_query_vectors, h_data_vectors, h_cos_dist_cpu, n_query, n_batch, n_dim);
     
     // 验证结果
-    assert(equal_2D_float(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
+    assert(compare_2D(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
     
     // 打印结果矩阵（前几个元素）
     std::cout << "余弦距离矩阵（前4x4）:" << std::endl;
@@ -213,7 +213,7 @@ void test_large_scale_cosine_distance(int n_query, int n_batch, int n_dim) {
     auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     
     // 验证结果
-    assert(equal_2D_float(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
+    assert(compare_2D(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
     
     // 计算性能指标
     float speedup = (float)cpu_duration.count() / gpu_duration.count();

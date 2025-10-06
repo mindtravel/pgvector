@@ -137,7 +137,7 @@ void test_basic_matrix_multiply(int M, int N, int K) {
     auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     
     // 验证结果
-    assert(equal_2D_float(h_C_gpu, h_C_cpu, M, N, EPSILON));
+    assert(compare_2D(h_C_gpu, h_C_cpu, M, N, EPSILON));
     
     // 计算性能指标
     float gflops = 2.0f * M * N * K / (gpu_duration.count() / 1000.0f) / 1e9;
@@ -175,7 +175,7 @@ void test_identity_matrix() {
     cpu_matrix_multiply(h_A, h_B, h_C_cpu, M, N, K, alpha, beta);
     
     // 验证结果（A是单位矩阵，所以结果应该等于B）
-    assert(matrix_equal(h_C_gpu, h_B, M, N, EPSILON));
+    assert(compare_1D(h_C_gpu, h_B, M*N, EPSILON));
     
     std::cout << "单位矩阵测试通过 ✓" << std::endl << std::endl;
     
@@ -211,7 +211,7 @@ void test_alpha_beta_values() {
     cpu_matrix_multiply(h_A, h_B, h_C_cpu, M, N, K, alpha, beta);
     
     // 验证结果
-    assert(matrix_equal(h_C_gpu, h_C_cpu, M, N, EPSILON));
+    assert(compare_1D(h_C_gpu, h_C_cpu, M*N, EPSILON));
     
     std::cout << "Alpha=" << alpha << ", Beta=" << beta << " 测试通过 ✓" << std::endl << std::endl;
     
@@ -256,7 +256,7 @@ void test_large_scale_stress(int M, int N, int K) {
     auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     
     // 验证结果
-    assert(equal_2D_float(h_C_gpu, h_C_cpu, M, N, EPSILON));
+    assert(compare_2D(h_C_gpu, h_C_cpu, M, N, EPSILON));
     
     // 计算性能指标
     float gflops = 2.0f * M * N * K / (gpu_duration.count() / 1000.0f) / 1e9;

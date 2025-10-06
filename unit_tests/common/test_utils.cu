@@ -5,6 +5,7 @@
 #include "test_utils.cuh"
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
 
 void _check_cuda_last_error(const char *file, int line)
 {
@@ -22,30 +23,6 @@ void _check_cuda_last_error(const char *file, int line)
         cudaDeviceReset(); // 尝试清理CUDA资源
         exit(EXIT_FAILURE);
     }
-}
-
-
-/*
-* 比较浮点数
-*/
-bool float_equal(float a, float b, float epsilon) {
-    return std::abs(a - b) < epsilon;
-}
-
-bool float_equal_relative(float a, float b, float epsilon) {
-    return std::abs(a - b) * 2.0 / (std::abs(a) + std::abs(b)) < epsilon;
-}
-
-/* 
-* 比较向量
-*/
-bool vector_equal(float* a, float* b, int n, float epsilon = 1e-5f) {
-    for (int i = 0; i < n; i++) {
-        if (!float_equal(a[i], b[i], epsilon)) {
-            return false;
-        }
-    }
-    return true;
 }
 
 /**
@@ -81,72 +58,6 @@ void free_vector_list(void** vector_list) {
     }
 }
 
-/**
- * 比较矩阵（列主序）
- * 
- */
-bool matrix_equal(float* a, float* b, int rows, int cols, float epsilon) {
-    int err_happens = 0;
-    for (int i = 0; i < rows * cols; i++) {
-        if (!float_equal(a[i], b[i], epsilon)) {
-            if(err_happens == 0){
-                COUT_ENDL("mismatch!");
-                COUT_TABLE("i", "a[i]", "b[i]", "diff");
-            }
-
-            err_happens ++;
-            if(DEBUG == true)
-                COUT_TABLE(i, a[i], b[i], a[i] - b[i]);
-            return false;
-        }
-    }
-    COUT_ENDL(err_happens);
-    return true;
-}
-
-/**
- * 比较矩阵（列主序）
- */
-bool equal_2D_float(float** a, float** b, int rows, int cols, float epsilon) {
-    int err_happens = 0;
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
-
-            if (!float_equal_relative(a[i][j], b[i][j], epsilon)) {
-                if(err_happens == 0){
-                    COUT_ENDL("mismatch!");
-                    COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
-                }
-
-                err_happens ++;
-                if(DEBUG == true)
-                    COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
-            }
-        }
-    }
-    COUT_ENDL(err_happens);
-    return true;
-}
-
-bool equal_2D_int(int** a, int** b, int rows, int cols) {
-    COUT_ENDL("result:");
-    int err_happens = 0;
-    if(DEBUG == true)
-        COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
-            if(DEBUG == true)
-                COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
-            if (!a[i][j] == b[i][j]) {
-                err_happens ++;
-                // return false;
-            }
-        }
-    }
-    COUT_ENDL(err_happens);
-    return true;
-}
-
 /*
 * 生成向量组
 */ 
@@ -158,8 +69,8 @@ float** generate_vector_list(int n_batch, int n_dim) {
         for (int j = 0; j < n_dim; j++) {
             // vector_list[i][j] = 1.0f;
             // vector_list[i][j] = (float)i + (float)j;
-            // vector_list[i][j] = (float)rand() / RAND_MAX * 20.0f - 10.0f;
-            vector_list[i][j] = (float)(i+j + 1.0f);
+            vector_list[i][j] = (float)rand() / RAND_MAX * 20.0f - 10.0f;
+            // vector_list[i][j] = (float)(i+j + 1.0f);
             // if(i == 1 && j == 0)
             //     vector_list[i][j] = 1.0f;
             // else
@@ -171,7 +82,7 @@ float** generate_vector_list(int n_batch, int n_dim) {
 }
 
 /*
-* 生成大规模向量组 (1024*1024*512)
+* 生成大规模向量组
 */ 
 float*** generate_large_scale_vectors(int n_lists, int n_batch, int n_dim) {
     std::cout << "生成大规模数据: " << n_lists << " lists, " 
