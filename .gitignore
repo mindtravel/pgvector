@@ -7,6 +7,14 @@
 *.so
 cuda/pch.h.pch
 
+# 忽略核心转储文件
+core
+core.*
+*.core
+
+# 忽略测试目录中的大文件
+test_cuda/
+
 # 忽略VSCode配置文件
 .vscode
 
