@@ -5,6 +5,7 @@
 *.o
 *.bc
 *.so
+*.pch
 
 # 忽略VSCode配置文件
 .vscode
