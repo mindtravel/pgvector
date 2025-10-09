@@ -290,16 +290,22 @@ typedef struct IvfflatScanOpaqueData
 	*/
 #ifdef USE_CUDA
 	bool        use_gpu;           // 是否使用GPU
-	bool        gpu_initialized;   // GPU是否已初始化
-	float*      gpu_query_vector;  // GPU上的查询向量
-	float*      gpu_list_vectors;  // GPU上的列表向量
-	int*        gpu_list_offsets;  // GPU上的列表偏移
-	int*        gpu_list_counts;   // GPU上的列表计数
+	bool        centers_uploaded; // 聚类中心是否已上传到GPU
+	void*       cuda_ctx;          // CUDA上下文
 	float*      gpu_distances;     // GPU上的距离结果
-	int*        gpu_indices;       // GPU上的索引结果
-	size_t      gpu_buffer_size;   // GPU缓冲区大小
-	int         total_vectors;     // 总向量数量
 #endif
+// #ifdef USE_CUDA   
+// 	bool        use_gpu;           // 是否使用GPU
+// 	bool        gpu_initialized;   // GPU是否已初始化
+// 	float*      gpu_query_vector;  // GPU上的查询向量
+// 	float*      gpu_list_vectors;  // GPU上的列表向量
+// 	int*        gpu_list_offsets;  // GPU上的列表偏移
+// 	int*        gpu_list_counts;   // GPU上的列表计数
+// 	float*      gpu_distances;     // GPU上的距离结果
+// 	int*        gpu_indices;       // GPU上的索引结果
+// 	size_t      gpu_buffer_size;   // GPU缓冲区大小
+// 	int         total_vectors;     // 总向量数量
+// #endif
 
 }			IvfflatScanOpaqueData;
 

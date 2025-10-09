@@ -51,10 +51,11 @@ IvfflatInit(void)
 	DefineCustomIntVariable("ivfflat.max_probes", "Sets the max number of probes for iterative scans",
 							NULL, &ivfflat_max_probes,
 							IVFFLAT_MAX_LISTS, IVFFLAT_MIN_LISTS, IVFFLAT_MAX_LISTS, PGC_USERSET, 0, NULL, NULL, NULL);
-	// 取消注释来验证cuda代码是否被正确编译
+
 #ifdef USE_CUDA
+	// 验证cuda代码是否被正确编译
 	if(!cuda_is_available()){
-		elog(ERROR, "CUDA is not available!");
+		elog(LOG, "CUDA is not available, GPU features will be disabled!");
 	}
 #endif
 	MarkGUCPrefixReserved("ivfflat");
