@@ -49,32 +49,32 @@ bool test_normlization_cpu(float** vector_list, int n_batch, int n_dim){
 */ 
 void test_performance(int n_batch, int n_dim) {
     COUT_VAL("=== Test1: Performance ===");
-    
+    bool pass = true;
+
     float** vector_list = generate_vector_list(n_batch, n_dim);
     
     COUT_VAL("nbatch=", n_batch, " n_dim=", n_dim);
 
-    auto start = std::chrono::high_resolution_clock::now();
-    normalize(vector_list, n_batch, n_dim);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    long long gpu_duration_ms = 0, cpu_duration_ms = 0;
 
-    assert(test_normlization_cpu(vector_list, n_batch, n_dim));
+    MEASURE_MS_AND_SAVE("gpu耗时：", gpu_duration_ms,
+        normalize(vector_list, n_batch, n_dim);
+    );
 
-    COUT_VAL("gpu耗时：", duration.count(), "ms");
+    pass &= test_normlization_cpu(vector_list, n_batch, n_dim);
+
 
     vector_list = generate_vector_list(n_batch, n_dim);
 
-    start = std::chrono::high_resolution_clock::now();
-    normlization_cpu(vector_list, n_batch, n_dim);
-    end = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    MEASURE_MS_AND_SAVE("cpu耗时：", cpu_duration_ms,
+        normlization_cpu(vector_list, n_batch, n_dim);
+    );
+    
+    pass &= test_normlization_cpu(vector_list, n_batch, n_dim);
 
-    assert(test_normlization_cpu(vector_list, n_batch, n_dim));
+    COUT_ENDL("加速比", (float)cpu_duration_ms / (float)gpu_duration_ms, "x");
 
-    COUT_VAL("cpu耗时：", duration.count(), "ms");
-    COUT_VAL("Normalization test passed");
-    COUT_ENDL();
+    COUT_ENDL("Normalization test passed");
 }
 
 /*
@@ -90,21 +90,19 @@ void test_zero_vector() {
 测试3：压力测试
 不断输入很多个向量组，看数据传输的异步优化效果
 */ 
-void test_large_scale_async_stress(int n_lists, int n_batch, int n_dim) {
-    std::cout << "=== 大规模数据压力测试 ===" << std::endl;
-        
-    std::cout << "测试规模: " << n_lists << " lists × " 
-              << n_batch << " vectors × " 
-              << n_dim << " dimensions" << std::endl;
+bool test_large_scale_async_stress(int n_lists, int n_batch, int n_dim) {
+    bool pass = true;
+
+    COUT_ENDL("=== 大规模数据压力测试 ===");
+    COUT_ENDL("测试规模: ", n_lists, " lists × ", n_batch, " vectors × ", n_dim, " dimensions");
     
     // 计算总内存使用量
     size_t total_memory_mb = (size_t)n_lists * n_batch * n_dim * sizeof(float) / (1024 * 1024);
-    std::cout << "总内存使用量: " << total_memory_mb << " MB" << std::endl;
-    
+    COUT_ENDL("总内存使用量: ", total_memory_mb, " MB");
     // 生成大规模数据
     float*** vector_lists = generate_large_scale_vectors(n_lists, n_batch, n_dim);
     
-    std::cout << "注册内存为页锁定..." << std::endl;
+    COUT_ENDL("注册内存为页锁定...");
     for (int list_id = 0; list_id < n_lists; list_id++) {
         cudaError_t error = cudaHostRegister(
             vector_lists[list_id][0], 
@@ -114,43 +112,36 @@ void test_large_scale_async_stress(int n_lists, int n_batch, int n_dim) {
         if (error != cudaSuccess) {
             std::cerr << "cudaHostRegister failed for list " << list_id 
                       << ": " << cudaGetErrorString(error) << std::endl;
-            return;
+            pass = false;
         }
     }
-    std::cout << "内存注册完成 ✓" << std::endl;
+    COUT_ENDL("内存注册完成 ✓");
 
-    auto start_time = std::chrono::high_resolution_clock::now();
-    
-    normalize_async(
-        vector_lists, 
-        n_lists,
-        n_batch, 
-        n_dim
+    long long gpu_duration_ms = 0;
+    MEASURE_MS_AND_SAVE("gpu异步操作", gpu_duration_ms,
+        normalize_async(
+            vector_lists, 
+            n_lists,
+            n_batch, 
+            n_dim
+        );    
     );
-            
-    // 记录结束时间
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);   
 
-    // 验证结果
+
+    /* 验证结果 */ 
     for (int list_id = 0; list_id < n_lists; list_id++) {
-        assert(test_normlization_cpu(vector_lists[list_id], n_batch, n_dim));
+        pass &= test_normlization_cpu(vector_lists[list_id], n_batch, n_dim);
     }
-        
-    // 输出性能统计
-    std::cout << "\n=== 性能统计 ===" << std::endl;
-    std::cout << "总处理时间: " << duration.count() << " ms" << std::endl;
-    std::cout << "平均每list处理时间: " << (float)duration.count() / n_lists << " ms" << std::endl;
     
-    // 计算吞吐量
+    /* 计算吞吐量 */ 
     size_t total_vectors = (size_t)n_lists * n_batch;
-    float vectors_per_second = (float)total_vectors / (duration.count() / 1000.0f);
-    std::cout << "向量处理吞吐量: " << vectors_per_second << " vectors/second" << std::endl;
+    float vectors_per_second = (float)total_vectors / (gpu_duration_ms / 1000.0f);
+    COUT_ENDL("向量处理吞吐量: ", vectors_per_second, " vectors/second");
     
-    // 计算内存带宽
+    /* 计算内存带宽 */ 
     size_t total_data_processed = total_vectors * n_dim * sizeof(float) * 2; // 读写各一次
-    float bandwidth_gbps = (float)total_data_processed / (duration.count() / 1000.0f) / (1024 * 1024 * 1024);
-    std::cout << "内存带宽: " << bandwidth_gbps << " GB/s" << std::endl;
+    float bandwidth_gbps = (float)total_data_processed / (gpu_duration_ms / 1000.0f) / (1024 * 1024 * 1024);
+    COUT_ENDL("内存带宽: ", bandwidth_gbps, " GB/s");
     
     // 清理内存
     for (int list_id = 0; list_id < n_lists; list_id++) {
@@ -159,33 +150,29 @@ void test_large_scale_async_stress(int n_lists, int n_batch, int n_dim) {
     }
     free(vector_lists);
     
-    std::cout << "大规模压力测试完成 ✓" << std::endl;
+    return pass;
 }
 
 int main() {
-    std::cout << "开始VectorNormalizer单元测试..." << std::endl << std::endl;
+    COUT_ENDL("开始VectorNormalizer单元测试...");
     
-    try {
-        // test_performance(4096, 1024);
-        // test_performance(4096, 1021); n_dim不是2的次幂，规约求和会失效
-        // test_performance(8192, 512);
-        // test_performance(8192, 256);
-        // // test_performance(16184, 256); n_batch 从8192增大到16184肯定会寄
-        // test_performance(8192, 128);
-        // test_performance(2048, 1024);
-        // // test_performance(2048, 2048);n_dim 从1024增大到2048肯定会寄
-        // test_performance(8192, 1024);
+    bool pass = true;
+    // test_performance(4096, 1024);
+    // test_performance(4096, 1021); n_dim不是2的次幂，规约求和会失效
+    // test_performance(8192, 512);
+    // test_performance(8192, 256);
+    // // test_performance(16184, 256); n_batch 从8192增大到16184肯定会寄
+    // test_performance(8192, 128);
+    // test_performance(2048, 1024);
+    // // test_performance(2048, 2048);n_dim 从1024增大到2048肯定会寄
+    // test_performance(8192, 1024);
 
-        // test_zero_vector();
-        // test_large_scale_async_stress(16, 1024, 512);
-        test_large_scale_async_stress(1024, 1024, 1024);
-        // test_large_scale_async_stress(10, 10, 512);
-        // test_large_scale_async_stress(8192, 1024, 512);
+    // test_zero_vector();
+    // test_large_scale_async_stress(16, 1024, 512);
+    pass &= check_pass("大规模压力测试", test_large_scale_async_stress(1024, 1024, 1024));
+    // test_large_scale_async_stress(10, 10, 512);
+    // test_large_scale_async_stress(8192, 1024, 512);
 
-        std::cout << "all test passed!" << std::endl;
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "❌ 测试失败: " << e.what() << std::endl;
-        return 1;
-    }
+    COUT_ENDL("all test passed");
+    return 0;
 }

@@ -8,5 +8,5 @@ int main(){
     // cudaMemset(&d_test, 0, x*y*sizeof(float));
     cudaMemcpy(d_test, test, x*y*sizeof(float), cudaMemcpyHostToDevice);
 
-    print_cuda_2D("test print cuda 2d", d_test, x, y);
+    COUT_ENDL("test print cuda 2d", d_test, x, y);
 }

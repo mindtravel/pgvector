@@ -84,17 +84,17 @@ void cpu_matrix_multiply_2D(float** a, float** b, float** c,
 }
 
 // 测试1：基本矩阵乘法计算
-void test_basic_matrix_multiply(int M, int N, int K) {
-    std::cout << "=== Test1: 基本矩阵乘法测试 ===" << std::endl;
+bool test_basic_matrix_multiply(int M, int N, int K) {
+    COUT_ENDL("=== Test1: 基本矩阵乘法测试 ===");
+    bool pass = true;
     
     float alpha = 1.0f, beta = 0.0f;
     
-    std::cout << "测试矩阵大小: " << M << "x" << K << " × " << K << "x" << N << std::endl;
-    
+    COUT_ENDL("测试矩阵大小: ", M, "x", K, " × ", K, "x", N);
+
     // 计算内存使用量
     size_t memory_mb = (M * K + K * N + M * N) * sizeof(float) / (1024 * 1024);
-    std::cout << "内存使用量: " << memory_mb << " MB" << std::endl;
-    
+    COUT_ENDL("内存使用量: ", memory_mb, " MB");
     // 生成测试数据
     float** h_A = generate_vector_list(M, K);
     float** h_B = generate_vector_list(N, K);
@@ -121,43 +121,36 @@ void test_basic_matrix_multiply(int M, int N, int K) {
         // }
     }
 
+    long long gpu_duration_ms = 0, cpu_duration_ms = 0;
 
-
-    // GPU计算
-
-    auto start = std::chrono::high_resolution_clock::now();
-    cuda_sgemmNN_ours(h_A, h_B, h_C_gpu, M, N, K, alpha, beta);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto gpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    /* GPU 计算 */
+    MEASURE_MS_AND_SAVE("gpu耗时：", gpu_duration_ms,
+        cuda_sgemmNN_ours(h_A, h_B, h_C_gpu, M, N, K, alpha, beta);
+    );
     
-    // CPU计算
-    start = std::chrono::high_resolution_clock::now();
-    cpu_matrix_multiply_2D(h_A, h_B, h_C_cpu, M, N, K, alpha, beta);
-    end = std::chrono::high_resolution_clock::now();
-    auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
+    /* CPU 计算 */
+    MEASURE_MS_AND_SAVE("cpu耗时：", cpu_duration_ms,
+        cpu_matrix_multiply_2D(h_A, h_B, h_C_cpu, M, N, K, alpha, beta);
+    );
+
+    COUT_ENDL("加速比", (float)cpu_duration_ms / (float)gpu_duration_ms, "x");
+
+
     // 验证结果
-    assert(compare_2D(h_C_gpu, h_C_cpu, M, N, EPSILON));
-    
-    // 计算性能指标
-    float gflops = 2.0f * M * N * K / (gpu_duration.count() / 1000.0f) / 1e9;
-    float speedup = (float)cpu_duration.count() / gpu_duration.count();
-    
-    std::cout << "GPU耗时: " << gpu_duration.count() << " ms" << std::endl;
-    std::cout << "CPU耗时: " << cpu_duration.count() << " ms" << std::endl;
-    std::cout << "加速比: " << speedup << "x" << std::endl;
-    std::cout << "GPU性能: " << gflops << " GFLOPS" << std::endl;
+    pass &= compare_2D(h_C_gpu, h_C_cpu, M, N, EPSILON);
     
     // 清理内存
     free_vector_list((void**)h_A);
     free_vector_list((void**)h_B);
     free_vector_list((void**)h_C_gpu);
     free_vector_list((void**)h_C_cpu);
+
+    return pass;
 }
 
 // 测试2：单位矩阵测试
 void test_identity_matrix() {
-    std::cout << "=== Test2: 单位矩阵测试 ===" << std::endl;
+    COUT_ENDL("=== Test2: 单位矩阵测试 ===");
     
     int M = 64, N = 64, K = 64;
     float alpha = 1.0f, beta = 0.0f;
@@ -177,7 +170,7 @@ void test_identity_matrix() {
     // 验证结果（A是单位矩阵，所以结果应该等于B）
     assert(compare_1D(h_C_gpu, h_B, M*N, EPSILON));
     
-    std::cout << "单位矩阵测试通过 ✓" << std::endl << std::endl;
+    COUT_ENDL("单位矩阵测试通过 ✓");
     
     // 清理内存
     free(h_A);
@@ -188,7 +181,7 @@ void test_identity_matrix() {
 
 // 测试3：不同alpha和beta值测试
 void test_alpha_beta_values() {
-    std::cout << "=== Test3: Alpha/Beta值测试 ===" << std::endl;
+    COUT_ENDL("=== Test3: Alpha/Beta值测试 ===");
     
     int M = 32, N = 32, K = 32;
     float alpha = 2.5f, beta = 1.5f;
@@ -204,16 +197,24 @@ void test_alpha_beta_values() {
     memcpy(h_C_gpu, h_C_initial, M * N * sizeof(float));
     memcpy(h_C_cpu, h_C_initial, M * N * sizeof(float));
     
-    // GPU计算
-    cuda_sgemmNN(h_A, h_B, h_C_gpu, M, N, K, alpha, beta);
+    long long gpu_duration_ms = 0, cpu_duration_ms = 0;
+
+    /* GPU 计算 */
+    MEASURE_MS_AND_SAVE("gpu耗时：", gpu_duration_ms,
+        cuda_sgemmNN(h_A, h_B, h_C_gpu, M, N, K, alpha, beta);
+    );
     
-    // CPU计算
-    cpu_matrix_multiply(h_A, h_B, h_C_cpu, M, N, K, alpha, beta);
-    
+    /* CPU 计算 */
+    MEASURE_MS_AND_SAVE("cpu耗时：", cpu_duration_ms,
+        cpu_matrix_multiply(h_A, h_B, h_C_cpu, M, N, K, alpha, beta);
+    );
+
+    COUT_ENDL("加速比", (float)cpu_duration_ms / (float)gpu_duration_ms, "x");
+
     // 验证结果
     assert(compare_1D(h_C_gpu, h_C_cpu, M*N, EPSILON));
     
-    std::cout << "Alpha=" << alpha << ", Beta=" << beta << " 测试通过 ✓" << std::endl << std::endl;
+    COUT_ENDL("Alpha=", alpha, ", Beta=", beta, " 测试通过 ✓");
     
     // 清理内存
     free(h_A);
@@ -225,16 +226,16 @@ void test_alpha_beta_values() {
 
 // 测试4：压力测试
 void test_large_scale_stress(int M, int N, int K) {
-    std::cout << "=== Test4: 大规模压力测试 ===" << std::endl;
+    COUT_ENDL("=== Test4: 大规模压力测试 ===");
     
     
     float alpha = 1.0f, beta = 0.0f;
     
-    std::cout << "测试矩阵大小: " << M << "x" << K << " × " << K << "x" << N << std::endl;
+    COUT_ENDL("测试矩阵大小: ", M, "x", K, " × ", K, "x", N);
     
     // 计算内存使用量
     size_t memory_mb = (M * K + K * N + M * N) * sizeof(float) / (1024 * 1024);
-    std::cout << "内存使用量: " << memory_mb << " MB" << std::endl;
+    COUT_ENDL("内存使用量: ", memory_mb, " MB");
     
     // 生成测试数据
     float** h_A = generate_vector_list(M, K);
@@ -243,54 +244,46 @@ void test_large_scale_stress(int M, int N, int K) {
     float** h_C_cpu = (float**)malloc_vector_list(M, N, sizeof(float));
 
 
-    // GPU计算
-    auto start = std::chrono::high_resolution_clock::now();
-    cuda_sgemmNN_ours(h_A, h_B, h_C_gpu, M, N, K, alpha, beta);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto gpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    /* GPU 计算 */
+    long long gpu_duration_ms, cpu_duration_ms;
+
+    MEASURE_MS_AND_SAVE("gpu耗时：", gpu_duration_ms,
+        cuda_sgemmNN_ours(h_A, h_B, h_C_gpu, M, N, K, alpha, beta);
+    );
     
-    // CPU计算
-    start = std::chrono::high_resolution_clock::now();
-    cpu_matrix_multiply_2D(h_A, h_B, h_C_cpu, M, N, K, alpha, beta);
-    end = std::chrono::high_resolution_clock::now();
-    auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    /* CPU 计算 */
+    MEASURE_MS_AND_SAVE("cpu耗时：", cpu_duration_ms,
+        cpu_matrix_multiply_2D(h_A, h_B, h_C_cpu, M, N, K, alpha, beta);
+    );
     
     // 验证结果
     assert(compare_2D(h_C_gpu, h_C_cpu, M, N, EPSILON));
-    
-    // 计算性能指标
-    float gflops = 2.0f * M * N * K / (gpu_duration.count() / 1000.0f) / 1e9;
-    float speedup = (float)cpu_duration.count() / gpu_duration.count();
-    
-    std::cout << "GPU耗时: " << gpu_duration.count() << " ms" << std::endl;
-    std::cout << "CPU耗时: " << cpu_duration.count() << " ms" << std::endl;
-    std::cout << "加速比: " << speedup << "x" << std::endl;
-    std::cout << "GPU性能: " << gflops << " GFLOPS" << std::endl;
-    
+    COUT_ENDL("加速比", (float)cpu_duration_ms / (float)gpu_duration_ms, "x");
+
+
     // 清理内存
     free_vector_list((void**)h_A);
     free_vector_list((void**)h_B);
     free_vector_list((void**)h_C_gpu);
     free_vector_list((void**)h_C_cpu);
     
-    std::cout << "大规模压力测试完成 ✓" << std::endl << std::endl;
+    COUT_ENDL("大规模压力测试完成 ✓");
 }
 
 int main() {
     srand(time(0));
-    std::cout << "开始矩阵乘法单元测试..." << std::endl << std::endl;
+    COUT_ENDL("开始矩阵乘法单元测试...");
     
-    try {
-        // test_basic_matrix_multiply(10, 100, 30);
-        test_basic_matrix_multiply(10, 1024, 1024);
-        // test_identity_matrix();
-        // test_alpha_beta_values();
-        // test_large_scale_stress(1024, 1024, 1024);
-        
-        std::cout << "all_test_passed" << std::endl;
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "❌ 测试失败: " << e.what() << std::endl;
-        return 1;
-    }
+    bool pass = true;
+    // test_basic_matrix_multiply(10, 100, 30);
+    
+    // test_basic_matrix_multiply(10, 100, 30);
+    pass &= check_pass("基本矩阵乘法测试", test_basic_matrix_multiply(10, 1024, 1024));
+
+    // test_identity_matrix();
+    // test_alpha_beta_values();
+    // test_large_scale_stress(1024, 1024, 1024);
+    
+    COUT_ENDL("all_test_passed");
+    return 0;
 }

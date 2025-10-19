@@ -10,6 +10,37 @@
 #define DEBUG true
 
 /**
+ * 用宏简化计时语法
+ */
+#define MEASURE_MS(TESTNAME, ...) \
+    do { \
+        auto __measure_start = std::chrono::high_resolution_clock::now(); \
+        __VA_ARGS__; \
+        auto __measure_end = std::chrono::high_resolution_clock::now(); \
+        auto __measure_dur = std::chrono::duration_cast<std::chrono::milliseconds>(__measure_end - __measure_start); \
+        COUT_VAL((TESTNAME), __measure_dur.count(), "ms"); \
+    } while(0)
+
+/**
+ * @brief 用宏简化计时语法，并将结果（毫秒）存入指定的变量。
+ * @param TESTNAME 字符串字面量，用于日志输出的测试名称。
+ * @param TIMESPEND_VAR 用于接收耗时结果的变量（例如 double, long long 等类型）。
+ * @param ... 要执行计时的代码块。
+ */
+#define MEASURE_MS_AND_SAVE(TESTNAME, TIMESPEND_VAR, ...) \
+    do { \
+        auto __measure_start = std::chrono::high_resolution_clock::now(); \
+        __VA_ARGS__; \
+        auto __measure_end = std::chrono::high_resolution_clock::now(); \
+        auto __measure_dur = std::chrono::duration_cast<std::chrono::milliseconds>(__measure_end - __measure_start); \
+        (TIMESPEND_VAR) = __measure_dur.count(); \
+        /* COUT_VAL 宏用于在控制台打印日志，可以保留或移除 */ \
+        /* 假设 COUT_VAL 宏的定义类似于： */ \
+        /* #define COUT_VAL(name, val, unit) std::cout << (name) << ": " << (val) << " " << (unit) << std::endl */ \
+        COUT_VAL((TESTNAME), (TIMESPEND_VAR), "ms"); \
+    } while(0)
+
+/**
  * 用宏简化cout语法
  */
 inline void cout_endl() {
@@ -50,6 +81,11 @@ inline void table_impl(T&& first, Args&&... rest) {
 #define COUT_TABLE(...) do { table_impl(__VA_ARGS__); } while(0)
 #define COUT_VAL(...) do { cout_impl(__VA_ARGS__); } while(0)
 #define COUT_ENDL(...) do { cout_endl(__VA_ARGS__); } while(0)
+
+inline bool check_pass(std::string test_names, bool pass){
+    COUT_ENDL( (test_names), (pass) ? "✅ PASS" : "❌ FAIL");
+    return pass;
+}
 
 void _check_cuda_last_error(const char *file, int line);
 #define CHECK_CUDA_ERRORS _check_cuda_last_error(__FILE__, __LINE__);/*用于捕捉CUDA函数错误信息的宏*/
@@ -108,7 +144,7 @@ bool compare_1D(T* a, T* b, int n, float epsilon = 1e-5f) {
         return true;
     }
     COUT_ENDL(err_happens);
-    return true;
+    return false;
 }
 
 template<typename T>
@@ -133,7 +169,7 @@ bool compare_2D(T* a, T* b, int nx, int ny, float epsilon = 1e-5f) {
         return true;
     }
     COUT_ENDL(err_happens);
-    return true;
+    return false;
 }
 
 template<typename T>
@@ -159,7 +195,7 @@ bool compare_set_1D(T** a, T** b, int n, float epsilon = 1e-5f) {
         return true;
     }
     COUT_ENDL(err_happens);
-    return true;
+    return false;
 }
 
 template<typename T>
@@ -187,7 +223,69 @@ bool compare_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
         return true;
     }
     COUT_ENDL(err_happens);
-    return true;
+    return false;
+}
+
+/**
+ * 计算两个集合（一维数组）中完全相同的元素个数（考虑epsilon容差）
+ * 使用双指针方式遍历已排序的a/b，统计相等元素个数
+ * 返回值为完全相同的元素个数
+ */
+template<typename T>
+int count_equal_elements_set_1D(T** a, T** b, int n, float epsilon = 1e-5f) {
+    std::sort(a, a + n);
+    std::sort(b, b + n);
+    int i = 0, j = 0;
+    int count_equal = 0;
+    while (i < n && j < n) {
+        if (compare_numbers(a[i], b[j], epsilon)) {
+            count_equal++;
+            i++;
+            j++;
+        }
+        else if (a[i] < b[j] - epsilon) {
+            i++;
+        }
+        else {
+            j++;
+        }
+    }
+    if (count_equal != n)
+        COUT_ENDL("Number of inequal elements:", n - count_equal, "out of", n);
+    return count_equal == n;
+}
+
+/**
+ * 计算两个集合（二维数组）中完全相同的元素个数（考虑epsilon容差）
+ * 使用双指针方式遍历已排序的a/b，统计相等元素个数
+ * 返回值为完全相同的元素个数
+ */
+template<typename T>
+int count_equal_elements_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
+    int count_equal = 0;
+
+    for(int i = 0; i < nx; ++i){
+        std::sort(a[i], a[i] + ny);
+        std::sort(b[i], b[i] + ny);
+
+        int j = 0, k = 0;
+        while (j < ny && k < ny) {
+            if (compare_numbers(a[i][j], b[i][k], epsilon)) {
+                count_equal++;
+                j++;
+                k++;
+            }
+            else if (a[i][j] < b[i][k] - epsilon) {
+                j++;
+            }
+            else {
+                k++;
+            }
+        }
+    }
+    if (count_equal != nx * ny)
+        COUT_ENDL("Number of inequal elements:", nx * ny - count_equal, "out of", nx * ny);
+    return count_equal == nx * ny;
 }
 
 float** generate_vector_list(int n_batch, int n_dim);

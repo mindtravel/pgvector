@@ -58,17 +58,18 @@ void cpu_cosine_distance(float** query_vectors, float** data_vectors, float** co
 }
 
 // 测试1：基本余弦距离计算
-void test_basic_cosine_distance(int n_query, int n_batch, int n_dim) {
-    std::cout << "=== Test1: 基本余弦距离测试 ===" << std::endl;
-    
+bool test_basic_cosine_distance(int n_query, int n_batch, int n_dim) {
+    COUT_ENDL("=== Test1: 基本余弦距离测试 ===");
+    bool pass = true;
+
     float alpha = 1.0f, beta = 0.0f;
     
-    std::cout << "测试向量组大小: " << n_query << " 个查询向量 × " << n_batch << " 个数据向量" << std::endl;
-    std::cout << "向量维度: " << n_dim << std::endl;
+    COUT_ENDL("测试向量组大小: ", n_query, " 个查询向量 × ", n_batch, " 个数据向量");
+    COUT_ENDL("向量维度: ", n_dim);
     
     // 计算内存使用量
     size_t memory_mb = (n_query * n_dim + n_batch * n_dim + n_query * n_batch) * sizeof(float) / (1024 * 1024);
-    std::cout << "内存使用量: " << memory_mb << " MB" << std::endl;
+    COUT_ENDL("内存使用量: ", memory_mb, " MB");
     
     // 生成测试数据
     float** h_query_vectors = generate_vector_list(n_query, n_dim);
@@ -96,36 +97,27 @@ void test_basic_cosine_distance(int n_query, int n_batch, int n_dim) {
         // std::cout << std::endl;          
     }
 
+    long long cpu_duration_ms = 0, gpu_duration_ms = 0;
 
-    // GPU计算
-    auto start = std::chrono::high_resolution_clock::now();
-    cuda_cosine_dist(h_query_vectors, h_data_vectors, h_cos_dist_gpu, n_query, n_batch, n_dim, alpha, beta);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto gpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    MEASURE_MS_AND_SAVE("gpu耗时：", gpu_duration_ms, 
+        cuda_cosine_dist(h_query_vectors, h_data_vectors, h_cos_dist_gpu, n_query, n_batch, n_dim, alpha, beta);
+    );
     
-    // CPU计算
-    start = std::chrono::high_resolution_clock::now();
-    cpu_cosine_distance(h_query_vectors, h_data_vectors, h_cos_dist_cpu, n_query, n_batch, n_dim);
-    end = std::chrono::high_resolution_clock::now();
-    auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    MEASURE_MS_AND_SAVE("cpu耗时：", cpu_duration_ms,
+        cpu_cosine_distance(h_query_vectors, h_data_vectors, h_cos_dist_cpu, n_query, n_batch, n_dim);
+    );
     
     // 验证结果
-    assert(compare_2D(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
-    
-    // 计算性能指标
-    float speedup = (float)cpu_duration.count() / gpu_duration.count();
-    
-    std::cout << "GPU耗时: " << gpu_duration.count() << " ms" << std::endl;
-    std::cout << "CPU耗时: " << cpu_duration.count() << " ms" << std::endl;
-    std::cout << "加速比: " << speedup << "x" << std::endl;
-    
+    pass &= compare_2D(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON);
+    COUT_ENDL("加速比", (float)cpu_duration_ms / (float)gpu_duration_ms, "x");
+
     // 清理内存
     free_vector_list((void**)h_query_vectors);
     free_vector_list((void**)h_data_vectors);
     free_vector_list((void**)h_cos_dist_gpu);
     free_vector_list((void**)h_cos_dist_cpu);
-    
-    std::cout << "基本余弦距离测试完成 ✓" << std::endl << std::endl;
+
+    return pass;
 }
 
 // 测试2：单位向量测试
@@ -200,27 +192,19 @@ void test_large_scale_cosine_distance(int n_query, int n_batch, int n_dim) {
     float** h_cos_dist_gpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
     float** h_cos_dist_cpu = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
     
-    // GPU计算
-    auto start = std::chrono::high_resolution_clock::now();
-    cuda_cosine_dist(h_query_vectors, h_data_vectors, h_cos_dist_gpu, n_query, n_batch, n_dim, alpha, beta);
-    auto end = std::chrono::high_resolution_clock::now();
-    auto gpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
-    // CPU计算
-    start = std::chrono::high_resolution_clock::now();
-    cpu_cosine_distance(h_query_vectors, h_data_vectors, h_cos_dist_cpu, n_query, n_batch, n_dim);
-    end = std::chrono::high_resolution_clock::now();
-    auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    
+    long long cpu_duration_ms = 0, gpu_duration_ms = 0;
+
+    MEASURE_MS_AND_SAVE("gpu耗时：", gpu_duration_ms,
+        cuda_cosine_dist(h_query_vectors, h_data_vectors, h_cos_dist_gpu, n_query, n_batch, n_dim, alpha, beta);
+    );
+
+    MEASURE_MS_AND_SAVE("cpu耗时：", cpu_duration_ms,
+        cpu_cosine_distance(h_query_vectors, h_data_vectors, h_cos_dist_cpu, n_query, n_batch, n_dim);
+    );
+
     // 验证结果
     assert(compare_2D(h_cos_dist_gpu, h_cos_dist_cpu, n_query, n_batch, EPSILON));
-    
-    // 计算性能指标
-    float speedup = (float)cpu_duration.count() / gpu_duration.count();
-    
-    std::cout << "GPU耗时: " << gpu_duration.count() << " ms" << std::endl;
-    std::cout << "CPU耗时: " << cpu_duration.count() << " ms" << std::endl;
-    std::cout << "加速比: " << speedup << "x" << std::endl;
+    COUT_ENDL("加速比", (float)cpu_duration_ms / (float)gpu_duration_ms, "x");
     
     // 清理内存
     free_vector_list((void**)h_query_vectors);
@@ -233,24 +217,19 @@ void test_large_scale_cosine_distance(int n_query, int n_batch, int n_dim) {
 
 int main() {
     srand(time(0));
-    std::cout << "开始余弦距离单元测试..." << std::endl << std::endl;
+    COUT_ENDL("开始余弦距离单元测试...");
     
-    try {
-        // 基本测试
-        // test_basic_cosine_distance(3, 5, 4);
-        test_basic_cosine_distance(1024, 1024, 1024);
-        // test_basic_cosine_distance(128, 128, 128);
-        
-        // 单位向量测试
-        // test_unit_vectors();
-        
-        // 大规模压力测试
-        // test_large_scale_cosine_distance(1024, 1024, 512);
-        
-        std::cout << "all_test_passed" << std::endl;
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "❌ 测试失败: " << e.what() << std::endl;
-        return 1;
-    }
+    bool test1 = true;
+    // 基本测试
+    // test_basic_cosine_distance(3, 5, 4);
+    // test_basic_cosine_distance(128, 128, 128);
+    test1 &= check_pass("Test 1 (基本功能):", test_basic_cosine_distance(1024, 1024, 1024));
+    // 单位向量测试
+    // test_unit_vectors();
+    
+    // 大规模压力测试
+    // test_large_scale_cosine_distance(1024, 1024, 512);
+    
+    COUT_ENDL("all_test_passed");
+    return 0;
 }
