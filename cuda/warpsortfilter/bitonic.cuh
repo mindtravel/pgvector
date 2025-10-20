@@ -124,195 +124,48 @@ private:
         }
     }
     
+    /**
+     * 辅助递归函数：编译时展开排序逻辑
+     * 
+     * 关键思路：
+     * - 使用 constexpr if 让编译器在编译时完全展开递归
+     * - 不存在运行时递归调用，生成的代码与手动展开完全相同
+     * - 极大简化代码，提高可维护性
+     */
+    template<int S, typename KeyT, typename IdxT>
+    static __device__ __forceinline__ void sort_recursive(
+        bool ascending, int warp_width, KeyT* keys, IdxT* indices)
+    {
+        if constexpr (S == 1) {
+            /* 
+             * 基础情况：Size == 1
+             * 在 warp 级别逐步构建 bitonic 序列
+             */
+            const int lane = laneId();
+            #pragma unroll
+            for (int width = 2; width < warp_width; width <<= 1) {
+                bool dir = bool(lane & width);
+                Bitonic<1>::merge_impl(dir, width, keys, indices);
+            }
+        } else {
+            constexpr int HalfSize = S / 2;
+            
+            /* 对前半部分按降序排序 */
+            sort_recursive<HalfSize>(false, warp_width, keys, indices);
+            
+            /* 对后半部分按升序排序 */
+            sort_recursive<HalfSize>(true, warp_width, keys + HalfSize, indices + HalfSize);
+        }
+        
+        /* 完成当前层的 merge：将两个反向序列合并成一个有序序列 */
+        Bitonic<S>::merge_impl(ascending, warp_width, keys, indices);
+    }
+    
     template<typename KeyT, typename IdxT>
     static __device__ __forceinline__ void sort_impl(
         bool ascending, int warp_width, KeyT* keys, IdxT* indices)
     {
-        /**
-         * Bitonic Sort 算法（基于 RAFT 实现）
-         * 
-         * 采用分治递归的思想：
-         * 1. 如果 Size == 1，在 warp 级别逐步构建 bitonic 序列
-         * 2. 如果 Size > 1：
-         *    - 前半部分按降序排序
-         *    - 后半部分按升序排序
-         *    - 然后合并成一个完整的 bitonic 序列并排序
-         * 
-         * 由于 CUDA 不支持递归展开，我们需要手动展开递归
-         */
-        
-        if constexpr (Size == 1) {
-            /* Size == 1: 直接在 warp 级别构建 bitonic 序列 */
-            const int lane = laneId();
-            /* 逐步构建越来越大的 bitonic 序列 */
-            for (int width = 2; width < warp_width; width <<= 1) {
-                /* 
-                 * 根据 lane 的位置决定排序方向
-                 * lane & width 为 0 表示在前半部分，为 width 表示在后半部分
-                 * 这样可以构建一个 bitonic 序列
-                 */
-                bool dir = bool(lane & width);
-                merge_impl(dir, width, keys, indices);
-            }
-        } else if constexpr (Size == 2) {
-            /* 
-             * Size == 2: 手动展开递归逻辑
-             * 
-             * RAFT 递归逻辑：
-             *   bitonic<1>::sort_impl(false, warp_width, keys);      // keys[0] 降序
-             *   bitonic<1>::sort_impl(true, warp_width, keys+1);     // keys[1] 升序
-             *   bitonic<2>::merge_impl(ascending, warp_width, keys); // 最后merge
-             * 
-             * 展开 bitonic<1>::sort_impl：
-             *   for (width...) merge_impl(lane & width, width, keys);
-             *   merge_impl(ascending, warp_width, keys);  // ← 这是关键！
-             */
-            const int lane = laneId();
-            
-            /* bitonic<1>::sort_impl(false, ..., keys[0]) */
-            for (int width = 2; width < warp_width; width <<= 1) {
-                bool dir = bool(lane & width);
-                Bitonic<1>::merge_impl(dir, width, &keys[0], &indices[0]);
-            }
-            Bitonic<1>::merge_impl(false, warp_width, &keys[0], &indices[0]);  // 降序
-            
-            /* bitonic<1>::sort_impl(true, ..., keys[1]) */
-            for (int width = 2; width < warp_width; width <<= 1) {
-                bool dir = bool(lane & width);
-                Bitonic<1>::merge_impl(dir, width, &keys[1], &indices[1]);
-            }
-            Bitonic<1>::merge_impl(true, warp_width, &keys[1], &indices[1]);  // 升序
-        } else if constexpr (Size == 4) {
-            /* 
-             * Size == 4: 手动展开递归逻辑
-             * 
-             * RAFT 递归逻辑：
-             *   bitonic<2>::sort_impl(false, warp_width, keys);      // keys[0:2] 降序
-             *   bitonic<2>::sort_impl(true, warp_width, keys+2);     // keys[2:4] 升序
-             *   bitonic<4>::merge_impl(ascending, warp_width, keys); // 最后merge
-             * 
-             * 手动展开 bitonic<2>::sort_impl：
-             * - bitonic<1>::sort_impl(..., keys) + bitonic<1>::sort_impl(..., keys+1) + merge
-             */
-            const int lane = laneId();
-            
-            /* === 第一步：对 keys[0:2] 按降序排序（展开 bitonic<2>::sort_impl(false, ...)）=== */
-            /* bitonic<1>::sort_impl(false, ..., keys[0]) */
-            for (int width = 2; width < warp_width; width <<= 1) {
-                bool dir = bool(lane & width);
-                Bitonic<1>::merge_impl(dir, width, &keys[0], &indices[0]);
-            }
-            Bitonic<1>::merge_impl(false, warp_width, &keys[0], &indices[0]);
-            
-            /* bitonic<1>::sort_impl(true, ..., keys[1]) */
-            for (int width = 2; width < warp_width; width <<= 1) {
-                bool dir = bool(lane & width);
-                Bitonic<1>::merge_impl(dir, width, &keys[1], &indices[1]);
-            }
-            Bitonic<1>::merge_impl(true, warp_width, &keys[1], &indices[1]);
-            
-            /* bitonic<2>::merge_impl(false) - 完成 bitonic<2>::sort_impl 的最后一步 */
-            Bitonic<2>::merge_impl(false, warp_width, &keys[0], &indices[0]);
-            
-            /* === 第二步：对 keys[2:4] 按升序排序（展开 bitonic<2>::sort_impl(true, ...)）=== */
-            /* bitonic<1>::sort_impl(false, ..., keys[2]) */
-            for (int width = 2; width < warp_width; width <<= 1) {
-                bool dir = bool(lane & width);
-                Bitonic<1>::merge_impl(dir, width, &keys[2], &indices[2]);
-            }
-            Bitonic<1>::merge_impl(false, warp_width, &keys[2], &indices[2]);
-            
-            /* bitonic<1>::sort_impl(true, ..., keys[3]) */
-            for (int width = 2; width < warp_width; width <<= 1) {
-                bool dir = bool(lane & width);
-                Bitonic<1>::merge_impl(dir, width, &keys[3], &indices[3]);
-            }
-            Bitonic<1>::merge_impl(true, warp_width, &keys[3], &indices[3]);
-            
-            /* bitonic<2>::merge_impl(true) - 完成 bitonic<2>::sort_impl 的最后一步 */
-            Bitonic<2>::merge_impl(true, warp_width, &keys[2], &indices[2]);
-            
-            /* === 第三步：最后的 merge，合并成完整的有序序列 === */
-            /* 注意：这里不能直接用 merge_impl(ascending, warp_width, keys, indices)
-             * 因为那会调用 Bitonic<4>::merge_impl，我们需要显式调用它 */
-        } else if constexpr (Size == 8) {
-            /* 
-             * Size == 8: 手动展开递归逻辑
-             * 
-             * RAFT 递归逻辑：
-             *   bitonic<4>::sort_impl(false, warp_width, keys);      // keys[0:4] 降序
-             *   bitonic<4>::sort_impl(true, warp_width, keys+4);     // keys[4:8] 升序
-             *   bitonic<8>::merge_impl(ascending, warp_width, keys); // 最后merge
-             * 
-             * 由于 bitonic<4>::sort_impl 本身很复杂，这里需要完整展开它
-             */
-            const int lane = laneId();
-            
-            /* === 第一步：对 keys[0:4] 按降序排序（展开 bitonic<4>::sort_impl(false, ...)）=== */
-            
-            // bitonic<2>::sort_impl(false, ..., keys[0:2])
-            for (int width = 2; width < warp_width; width <<= 1) {
-                Bitonic<1>::merge_impl(bool(lane & width), width, &keys[0], &indices[0]);
-            }
-            Bitonic<1>::merge_impl(false, warp_width, &keys[0], &indices[0]);
-            
-            for (int width = 2; width < warp_width; width <<= 1) {
-                Bitonic<1>::merge_impl(bool(lane & width), width, &keys[1], &indices[1]);
-            }
-            Bitonic<1>::merge_impl(true, warp_width, &keys[1], &indices[1]);
-            
-            Bitonic<2>::merge_impl(false, warp_width, &keys[0], &indices[0]);
-            
-            // bitonic<2>::sort_impl(true, ..., keys[2:4])
-            for (int width = 2; width < warp_width; width <<= 1) {
-                Bitonic<1>::merge_impl(bool(lane & width), width, &keys[2], &indices[2]);
-            }
-            Bitonic<1>::merge_impl(false, warp_width, &keys[2], &indices[2]);
-            
-            for (int width = 2; width < warp_width; width <<= 1) {
-                Bitonic<1>::merge_impl(bool(lane & width), width, &keys[3], &indices[3]);
-            }
-            Bitonic<1>::merge_impl(true, warp_width, &keys[3], &indices[3]);
-            
-            Bitonic<2>::merge_impl(true, warp_width, &keys[2], &indices[2]);
-            
-            // bitonic<4>::merge_impl(false) - 完成 bitonic<4>::sort_impl 的最后一步
-            Bitonic<4>::merge_impl(false, warp_width, &keys[0], &indices[0]);
-            
-            /* === 第二步：对 keys[4:8] 按升序排序（展开 bitonic<4>::sort_impl(true, ...)）=== */
-            
-            // bitonic<2>::sort_impl(false, ..., keys[4:6])
-            for (int width = 2; width < warp_width; width <<= 1) {
-                Bitonic<1>::merge_impl(bool(lane & width), width, &keys[4], &indices[4]);
-            }
-            Bitonic<1>::merge_impl(false, warp_width, &keys[4], &indices[4]);
-            
-            for (int width = 2; width < warp_width; width <<= 1) {
-                Bitonic<1>::merge_impl(bool(lane & width), width, &keys[5], &indices[5]);
-            }
-            Bitonic<1>::merge_impl(true, warp_width, &keys[5], &indices[5]);
-            
-            Bitonic<2>::merge_impl(false, warp_width, &keys[4], &indices[4]);
-            
-            // bitonic<2>::sort_impl(true, ..., keys[6:8])
-            for (int width = 2; width < warp_width; width <<= 1) {
-                Bitonic<1>::merge_impl(bool(lane & width), width, &keys[6], &indices[6]);
-            }
-            Bitonic<1>::merge_impl(false, warp_width, &keys[6], &indices[6]);
-            
-            for (int width = 2; width < warp_width; width <<= 1) {
-                Bitonic<1>::merge_impl(bool(lane & width), width, &keys[7], &indices[7]);
-            }
-            Bitonic<1>::merge_impl(true, warp_width, &keys[7], &indices[7]);
-            
-            Bitonic<2>::merge_impl(true, warp_width, &keys[6], &indices[6]);
-            
-            // bitonic<4>::merge_impl(true) - 完成 bitonic<4>::sort_impl 的最后一步
-            Bitonic<4>::merge_impl(true, warp_width, &keys[4], &indices[4]);
-        }
-        
-        /* 最后统一 merge */
-        merge_impl(ascending, warp_width, keys, indices);
+        sort_recursive<Size>(ascending, warp_width, keys, indices);
     }
     
     template<typename KeyT, typename IdxT>
