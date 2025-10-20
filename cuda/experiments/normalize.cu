@@ -3,6 +3,28 @@
 #include "pch.h"
 
 /*
+* 按模长归一化
+* Args:
+*   vectors: 原始向量组
+*   vetcor_suqared_sum: 规范化后向量组的l2 norm
+*   n_dim: 向量维数 
+*   n_batch: 一组中向量个数 
+* 归一化
+*/
+__global__ void normalize_kernel(float *vectors, float* vector_norms, int n_batch, int n_dim) {
+    int bid = blockIdx.x;
+    // int tid = threadIdx.x;
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    // int pos_idx = idx % n_dim;
+    // int vector_idx = idx / n_dim;
+
+    /*全零向量不做normalization*/
+    if(vector_norms[bid] != 0)
+        vectors[idx] /= vector_norms[bid];
+
+}
+
+/*
 * normalization接口
 * Args:
 *   vector_data_cpu: cpu上的原始向量组的指针

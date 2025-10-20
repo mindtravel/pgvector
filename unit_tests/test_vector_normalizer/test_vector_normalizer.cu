@@ -118,7 +118,7 @@ bool test_large_scale_async_stress(int n_lists, int n_batch, int n_dim) {
     COUT_ENDL("内存注册完成 ✓");
 
     long long gpu_duration_ms = 0;
-    MEASURE_MS_AND_SAVE("gpu异步操作", gpu_duration_ms,
+    MEASURE_MS_AND_SAVE("gpu异步操作：", gpu_duration_ms,
         normalize_async(
             vector_lists, 
             n_lists,

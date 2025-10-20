@@ -1,16 +1,9 @@
 /**
- * kernels.cu
- * cuda核函数
+ * l2norm.cu
+ * 求向量 l2 范数
  */
 #include "l2norm.cuh"
 #include <device_launch_parameters.h>
-// #include <thrust/device_ptr.h>
-// #include <thrust/reduce.h>
-// #include <thrust/sort.h>
-// #include <thrust/sequence.h>
-// #include <thrust/transform.h>
-// #include <thrust/functional.h>
-// #include <thrust/execution_policy.h>
 #include "pch.h"
 
 /*
@@ -61,24 +54,4 @@ __global__ void l2_norm_kernel(float *vectors, float *vector_l2_norm, int n_batc
 }
     
 
-/*
-* 按模长归一化
-* Args:
-*   vectors: 原始向量组
-*   vetcor_suqared_sum: 规范化后向量组的l2 norm
-*   n_dim: 向量维数 
-*   n_batch: 一组中向量个数 
-* 归一化
-*/
-__global__ void normalize_kernel(float *vectors, float* vector_norms, int n_batch, int n_dim) {
-    int bid = blockIdx.x;
-    // int tid = threadIdx.x;
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    // int pos_idx = idx % n_dim;
-    // int vector_idx = idx / n_dim;
 
-    /*全零向量不做normalization*/
-    if(vector_norms[bid] != 0)
-        vectors[idx] /= vector_norms[bid];
-
-}

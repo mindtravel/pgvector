@@ -5,5 +5,7 @@
 void normalize(float** vector_list, int n_batch, int n_dim);
 void normalize_async(float*** vector_list, int n_lists, int n_batch, int n_dim);
 
+__global__ void normalize_kernel(float *vector_data, float *vector_square_sum, int n_batch, int n_dim);
+
 #endif
     
