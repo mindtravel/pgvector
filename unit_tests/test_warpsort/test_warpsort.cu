@@ -269,10 +269,10 @@ int main()
     metrics.set_columns("pass rate", "batch", "len", "k", "avg_gpu_ms", "avg_cpu_ms", "avg_speedup");
     // metrics.set_num_repeats(3);
         
-    // PARAM_2D(batch, (100, 200, 500, 1000, 2000, 5000, 10000, 20000), 
-    //             k, (8, 16, 32, 50, 64, 100, 128, 200, 256))        
-    PARAM_2D(batch, (100, 200), 
-                k, (8, 16))        
+    PARAM_2D(batch, (100, 200, 500, 1000, 2000, 5000, 10000, 20000), 
+                k, (8, 16, 32, 50, 64, 100, 128, 200, 256))        
+    // PARAM_2D(batch, (100, 200), 
+    //             k, (8, 16))        
     {
         
         auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
@@ -287,7 +287,6 @@ int main()
     
     // 可选：导出为 CSV
     // metrics.export_csv("warpsort_metrics.csv");
-    // metrics.export_csv("warpsort_avg_metrics.csv");
     
     COUT_ENDL("\n所有测试:", all_pass ? "✅ PASS" : "❌ FAIL");
     

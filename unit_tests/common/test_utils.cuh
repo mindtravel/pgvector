@@ -5,8 +5,6 @@
 #include <cstdlib>
 #include <algorithm>
 #include <vector>
-#include <fstream>
-#include <sstream>
 #include <cuda_runtime.h>
 #include "output_macros.cuh"
 #include "params_macros.cuh"

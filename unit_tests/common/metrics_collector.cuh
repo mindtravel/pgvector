@@ -5,8 +5,6 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <iomanip>
-#include "output_macros.cuh"
 
 // ============================================================================
 // Metrics 收集器 (Metrics Collector)
@@ -64,11 +62,11 @@ private:
     
     /* 打印分隔线 */
     void print_separator() const {
-        COUT_VAL("+");
+        std::cout << "+";
         for (size_t i = 0; i < column_widths_.size(); i++) {
-            COUT_VAL(std::string(column_widths_[i] + 2, '-'));
+            std::cout << std::string(column_widths_[i] + 2, '-') << "+";
         }
-        COUT_ENDL();
+        std::cout << "\n";
     }
     
 public:
@@ -212,7 +210,7 @@ public:
      */
     void print_table() {
         if (!columns_set_ || column_names_.empty()) {
-            COUT_ENDL("No metrics to display.");
+            std::cout << "No metrics to display.\n";
             return;
         }
 
@@ -234,7 +232,6 @@ public:
         for (const auto& row : rows_) {
             std::cout << "|";
             for (size_t i = 0; i < row.size(); i++) {
-                /* 格式化输出数值 */
                 std::cout << " " << std::right << std::setw(column_widths_[i]) 
                           << std::fixed << std::setprecision(3) << row[i] << " |";
             }
@@ -243,10 +240,11 @@ public:
         print_separator();
         
         /* 打印统计信息 */
-        COUT_ENDL("Total rows: ", rows_.size());
+        std::cout << "Total rows: " << rows_.size();
         if (num_repeats_ > 1) {
-            COUT_ENDL(" (averaged over ", num_repeats_, " runs)");
+            std::cout << " (averaged over " << num_repeats_ << " runs)";
         }
+        std::cout << "\n";
     }
     
     /**
@@ -330,7 +328,7 @@ public:
         }
         
         file.close();
-        COUT_ENDL("Metrics exported to ", filename);
+        std::cout << "Metrics exported to " << filename << "\n";
     }
 };
 
