@@ -22,8 +22,8 @@
 #include <type_traits>
 #include <math_constants.h>
 
-#include "l2norm.cuh"
-#include "pch.h"
+#include "../l2norm.cuh"
+#include "../pch.h"
 #include "warpsort_utils.cuh"
 #include "bitonic.cuh"
 
@@ -55,7 +55,7 @@ using namespace bitonic;
 template<int Capacity, bool Ascending, typename T, typename IdxT>
 class WarpSort {
     static_assert(isPowerOf2(Capacity), "Capacity must be power of 2");
-    static_assert(Capacity <= kMaxCapacity, "Capacity exceeds maximum");
+    static_assert(Capacity/2 <= kMaxCapacity, "Capacity exceeds maximum");
     
 public:
     static constexpr int kWarpWidth = (Capacity < kWarpSize) ? Capacity : kWarpSize;

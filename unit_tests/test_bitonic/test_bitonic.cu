@@ -402,40 +402,37 @@ bool test_bitonic_sort()
     
     bool all_pass = true;
     
-    /* Test 1: Size=1, 升序 */
     COUT_ENDL("\n--- Test 1: Size=1, Ascending=true ---");
     all_pass &= test_bitonic_sort_impl<1, true>(32);
     
-    /* Test 2: Size=1, 降序 */
     COUT_ENDL("\n--- Test 2: Size=1, Ascending=false ---");
     all_pass &= test_bitonic_sort_impl<1, false>(32);
     
-    /* Test 3: Size=2, 升序 */
     COUT_ENDL("\n--- Test 3: Size=2, Ascending=true ---");
     all_pass &= test_bitonic_sort_impl<2, true>(64);
     
-    /* Test 4: Size=2, 降序 */
     COUT_ENDL("\n--- Test 4: Size=2, Ascending=false ---");
     all_pass &= test_bitonic_sort_impl<2, false>(64);
     
-    /*一个 warp 最多排序 64 个元素（一个线程才两个，怎么这么少），所以 buffer + queue 最多32个 */ 
 
-    /* Test 5: Size=4, 升序 */
     COUT_ENDL("\n--- Test 5: Size=4, Ascending=true ---");
     all_pass &= test_bitonic_sort_impl<4, true>(128);
     
-    /* Test 6: Size=4, 降序 */
     COUT_ENDL("\n--- Test 6: Size=4, Ascending=false ---");
     all_pass &= test_bitonic_sort_impl<4, false>(128);
     
-    /* Test 7: Size=8, 升序 */
     COUT_ENDL("\n--- Test 7: Size=8, Ascending=true ---");
     all_pass &= test_bitonic_sort_impl<8, true>(256);
     
-    /* Test 8: Size=8, 降序 */
     COUT_ENDL("\n--- Test 8: Size=8, Ascending=false ---");
     all_pass &= test_bitonic_sort_impl<8, false>(256);
     
+    COUT_ENDL("\n--- Test 9: Size=16, Ascending=true ---");
+    all_pass &= test_bitonic_merge_impl<16, true>(512);
+    
+    COUT_ENDL("\n--- Test 10: Size=16, Ascending=false ---");
+    all_pass &= test_bitonic_merge_impl<16, false>(512);
+    return all_pass;
     return all_pass;
 }
 
@@ -448,7 +445,6 @@ bool test_bitonic_merge()
     
     bool all_pass = true;
     
-    /* Test 1: Size=1, 升序 */
     COUT_ENDL("\n--- Test 1: Size=1, Ascending=true ---");
     all_pass &= test_bitonic_merge_impl<1, true>(32);
     
@@ -456,30 +452,29 @@ bool test_bitonic_merge()
     COUT_ENDL("\n--- Test 2: Size=1, Ascending=false ---");
     all_pass &= test_bitonic_merge_impl<1, false>(32);
     
-    /* Test 3: Size=2, 升序 */
     COUT_ENDL("\n--- Test 3: Size=2, Ascending=true ---");
     all_pass &= test_bitonic_merge_impl<2, true>(64);
     
-    /* Test 4: Size=2, 降序 */
     COUT_ENDL("\n--- Test 4: Size=2, Ascending=false ---");
     all_pass &= test_bitonic_merge_impl<2, false>(64);
     
-    /* Test 5: Size=4, 升序 */
     COUT_ENDL("\n--- Test 5: Size=4, Ascending=true ---");
     all_pass &= test_bitonic_merge_impl<4, true>(128);
     
-    /* Test 6: Size=4, 降序 */
     COUT_ENDL("\n--- Test 6: Size=4, Ascending=false ---");
     all_pass &= test_bitonic_merge_impl<4, false>(128);
     
-    /* Test 7: Size=8, 升序 */
     COUT_ENDL("\n--- Test 7: Size=8, Ascending=true ---");
     all_pass &= test_bitonic_merge_impl<8, true>(256);
     
-    /* Test 8: Size=8, 降序 */
     COUT_ENDL("\n--- Test 8: Size=8, Ascending=false ---");
     all_pass &= test_bitonic_merge_impl<8, false>(256);
     
+    COUT_ENDL("\n--- Test 9: Size=16, Ascending=true ---");
+    all_pass &= test_bitonic_merge_impl<16, true>(512);
+    
+    COUT_ENDL("\n--- Test 10: Size=16, Ascending=false ---");
+    all_pass &= test_bitonic_merge_impl<16, false>(512);
     return all_pass;
 }
 

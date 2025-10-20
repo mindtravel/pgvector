@@ -2,8 +2,8 @@
 #include <type_traits>
 #include <math_constants.h>
 
-#include "l2norm.cuh"
-#include "pch.h"
+#include "../l2norm.cuh"
+#include "../pch.h"
 #include "warpsort_utils.cuh"
 #include "warpsort.cuh"
 #include "bitonic.cuh"
@@ -102,25 +102,31 @@ cudaError_t select_k(
     
     /* 模板的非类型参数必须是常量，所以只能用这一系列分支来使用不同尺寸的函数 */
     if (select_min) {
-        if (capacity <= 32) {
+        if (capacity < 64) {
             select_k_kernel<64, true, T, IdxT><<<grid, block, 0, stream>>>(
                 input, batch_size, len, k, output_vals, output_idx);
-        } else if (capacity <= 64) {
+        } else if (capacity < 128) {
             select_k_kernel<128, true, T, IdxT><<<grid, block, 0, stream>>>(
                 input, batch_size, len, k, output_vals, output_idx);
-        } else {
+        } else if (capacity < 256){
             select_k_kernel<256, true, T, IdxT><<<grid, block, 0, stream>>>(
+                input, batch_size, len, k, output_vals, output_idx);
+        } else {
+            select_k_kernel<512, true, T, IdxT><<<grid, block, 0, stream>>>(
                 input, batch_size, len, k, output_vals, output_idx);
         }
     } else {
-        if (capacity <= 32) {
+        if (capacity < 64) {
             select_k_kernel<64, false, T, IdxT><<<grid, block, 0, stream>>>(
                 input, batch_size, len, k, output_vals, output_idx);
-        } else if (capacity <= 64) {
+        } else if (capacity < 128) {
             select_k_kernel<128, false, T, IdxT><<<grid, block, 0, stream>>>(
                 input, batch_size, len, k, output_vals, output_idx);
-        } else {
+        } else if (capacity < 256){
             select_k_kernel<256, false, T, IdxT><<<grid, block, 0, stream>>>(
+                input, batch_size, len, k, output_vals, output_idx);
+        } else {
+            select_k_kernel<512, false, T, IdxT><<<grid, block, 0, stream>>>(
                 input, batch_size, len, k, output_vals, output_idx);
         }
     }

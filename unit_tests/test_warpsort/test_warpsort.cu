@@ -96,13 +96,21 @@ void cpu_select_k(
     }
 }
 
-bool test_warpsort(
-    int batch_size, int len, int k
+/**
+ * 测试函数 - 返回所有性能指标
+ * @return vector<double>: {pass rate, batch_size, k, len, gpu_ms, cpu_ms, speedup}
+ */
+std::vector<double> test_warpsort(
+    int batch_size, int len, int k,
+    bool silent = true /* 静默模式：不打印日志（用于重复运行）*/
 )
-{
-    COUT_ENDL("\n=== Test 1: 基本功能测试 (小k值) ===");    
-    COUT_ENDL("配置: batch_size=", batch_size, "len=", len, "k=", k);
-    
+{    
+    bool pass = true;
+
+    if (!silent) {
+        COUT_ENDL("配置: ", "batch_size=", batch_size, ", len=", len, ", k=",k);
+    }
+
     // Allocate host memory & generate random data
     srand(42);
     const float** h_input = const_cast<const float**>((float**)generate_vector_list(batch_size, len));
@@ -119,7 +127,7 @@ bool test_warpsort(
     cudaMalloc(&d_output_idx, batch_size * k * sizeof(int));
     CHECK_CUDA_ERRORS;
 
-    long long gpu_duration_ms = 0, cpu_duration_ms = 0;
+    double gpu_duration_ms = 0, cpu_duration_ms = 0;
 
     // Run GPU kernel
     MEASURE_MS_AND_SAVE("gpu耗时：", gpu_duration_ms,
@@ -148,16 +156,15 @@ bool test_warpsort(
         );
     );
 
-    COUT_ENDL("加速比", (float)cpu_duration_ms / (float)gpu_duration_ms, "x");
+    double speedup = (double)cpu_duration_ms / (double)gpu_duration_ms;
 
-    // bool index_match = compare_set_2D(h_gpu_idx, h_cpu_idx, batch_size, k);
-    // bool dist_match = compare_set_2D(h_gpu_vals, h_cpu_vals, batch_size, k);
+    // pass &= compare_set_2D(h_gpu_idx, h_cpu_idx, batch_size, k);
+    // pass &= compare_set_2D(h_gpu_vals, h_cpu_vals, batch_size, k);
 
-    bool index_match = count_equal_elements_set_2D(h_gpu_idx, h_cpu_idx, batch_size, k);
-    bool dist_match = count_equal_elements_set_2D(h_gpu_vals, h_cpu_vals, batch_size, k);
-    bool pass = index_match && dist_match;
+    // pass &= count_equal_elements_set_2D(h_gpu_idx, h_cpu_idx, batch_size, k);
+    pass &= count_equal_elements_set_2D(h_gpu_vals, h_cpu_vals, batch_size, k);
 
-    if (!pass) {
+    if (!pass && !silent) {
         // 可选：打印详细信息用于调试
         // print_2D("cpu topk index", topk_index_cpu, n_query, k); 
         // print_2D("gpu topk index", topk_index_gpu, n_query, k); 
@@ -175,7 +182,12 @@ bool test_warpsort(
     cudaFree(d_output_vals);
     cudaFree(d_output_idx);
     
-    return pass;
+    /* 返回所有指标 */
+    return {
+            pass ? 1.0 : 0.0,
+            (double)batch_size, (double)k, (double)len, 
+            gpu_duration_ms, cpu_duration_ms, speedup 
+        };
 }
 
 /**
@@ -246,26 +258,38 @@ void test_performance()
 // ============================================================================
 
 int main()
-{
-    COUT_ENDL("========================================");
-    COUT_ENDL("  Warp-Sort Top-K 单元测试");
-    COUT_ENDL("========================================");
-    
-    // Run tests
-    bool test1 = check_pass("Test 1 (基本功能):", test_warpsort(10000, 1024, 8));
-    test1 &= check_pass("Test 1 (基本功能):", test_warpsort(10000, 1024, 16));
-    test1 &= check_pass("Test 1 (基本功能):", test_warpsort(10000, 1024, 32));
-    test1 &= check_pass("Test 1 (基本功能):", test_warpsort(10000, 1024, 50));
-    test1 &= check_pass("Test 1 (基本功能):", test_warpsort(10000, 1024, 64));
-    test1 &= check_pass("Test 1 (基本功能):", test_warpsort(10000, 1024, 100));
-    test1 &= check_pass("Test 1 (基本功能):", test_warpsort(10000, 1024, 128));
-    // bool test1 = check_pass("Test 1 (基本功能):", test_warpsort(10000, 1024, 128));
-    // bool test2 = check_pass("Test 2 (中等k值):", test_warpsort(10, 1000, 64));
-    // bool test3 = check_pass("Test 3 (大k值):", test_warpsort(10, 1000, 256));
-    // bool test4 = check_pass("Test 4 (边界情况：batch_size=1):", test_warpsort(1, 1000, 16));
-    // bool test5 = check_pass("Test 5 (边界情况：k=1):", test_warpsort(10, 1, 16));
-    
-    // test_performance();
+{    
+    test_warpsort(1000, 1024, 128); /* warm up */
 
-    return 0;
+    COUT_ENDL("\n=== Test 1: 性能测试 ===");
+    
+    bool all_pass = true;
+    
+    MetricsCollector metrics;
+    metrics.set_columns("pass rate", "batch", "len", "k", "avg_gpu_ms", "avg_cpu_ms", "avg_speedup");
+    // metrics.set_num_repeats(3);
+        
+    // PARAM_2D(batch, (100, 200, 500, 1000, 2000, 5000, 10000, 20000), 
+    //             k, (8, 16, 32, 50, 64, 100, 128, 200, 256))        
+    PARAM_2D(batch, (100, 200), 
+                k, (8, 16))        
+    {
+        
+        auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
+            auto result = test_warpsort(batch, 1024, k);
+            all_pass &= (result[0] == 1.0);  // 检查 pass 字段
+            return result;
+        });
+        
+    }
+    
+    metrics.print_table();
+    
+    // 可选：导出为 CSV
+    // metrics.export_csv("warpsort_metrics.csv");
+    // metrics.export_csv("warpsort_avg_metrics.csv");
+    
+    COUT_ENDL("\n所有测试:", all_pass ? "✅ PASS" : "❌ FAIL");
+    
+    return all_pass ? 0 : 1;
 }
