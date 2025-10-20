@@ -10,15 +10,17 @@
 #define DEBUG true
 
 /**
- * 用宏简化计时语法
+ * @brief 用宏简化计时语法，并将结果（毫秒）存入指定的变量。
+ * @param TESTNAME 字符串字面量，用于日志输出的测试名称。
+ * @param ... 要执行计时的代码块。
  */
 #define MEASURE_MS(TESTNAME, ...) \
     do { \
         auto __measure_start = std::chrono::high_resolution_clock::now(); \
         __VA_ARGS__; \
         auto __measure_end = std::chrono::high_resolution_clock::now(); \
-        auto __measure_dur = std::chrono::duration_cast<std::chrono::milliseconds>(__measure_end - __measure_start); \
-        COUT_VAL((TESTNAME), __measure_dur.count(), "ms"); \
+        auto __measure_dur = std::chrono::duration_cast<std::chrono::microseconds>(__measure_end - __measure_start); \
+        COUT_VAL((TESTNAME), ((double)__measure_dur.count()/1000.0) , "ms"); \
     } while(0)
 
 /**
@@ -32,13 +34,14 @@
         auto __measure_start = std::chrono::high_resolution_clock::now(); \
         __VA_ARGS__; \
         auto __measure_end = std::chrono::high_resolution_clock::now(); \
-        auto __measure_dur = std::chrono::duration_cast<std::chrono::milliseconds>(__measure_end - __measure_start); \
+        auto __measure_dur = std::chrono::duration_cast<std::chrono::microseconds>(__measure_end - __measure_start); \
         (TIMESPEND_VAR) = __measure_dur.count(); \
         /* COUT_VAL 宏用于在控制台打印日志，可以保留或移除 */ \
         /* 假设 COUT_VAL 宏的定义类似于： */ \
         /* #define COUT_VAL(name, val, unit) std::cout << (name) << ": " << (val) << " " << (unit) << std::endl */ \
-        COUT_VAL((TESTNAME), (TIMESPEND_VAR), "ms"); \
-    } while(0)
+        COUT_VAL((TESTNAME), ((double)__measure_dur.count() / 1000.0), "ms"); \
+        (TIMESPEND_VAR) /= 1000; \
+    } while(0);
 
 /**
  * 用宏简化cout语法

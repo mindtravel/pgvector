@@ -94,7 +94,7 @@ bool test_large_scale_async_stress(int n_lists, int n_batch, int n_dim) {
     bool pass = true;
 
     COUT_ENDL("=== 大规模数据压力测试 ===");
-    COUT_ENDL("测试规模: ", n_lists, " lists × ", n_batch, " vectors × ", n_dim, " dimensions");
+    COUT_ENDL("测试规模:", n_lists, "lists ×", n_batch, "vectors ×", n_dim, "dimensions");
     
     // 计算总内存使用量
     size_t total_memory_mb = (size_t)n_lists * n_batch * n_dim * sizeof(float) / (1024 * 1024);
