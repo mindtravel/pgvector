@@ -3,8 +3,8 @@
 # 源文件列表
 set(SOURCES
     test_cos_distance.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/distances.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/kernels.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/experiments/distances.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/l2norm.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/test_utils.cu
 )
 

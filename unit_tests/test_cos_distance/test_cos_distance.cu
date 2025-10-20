@@ -1,4 +1,4 @@
-#include "../cuda/distances.h"
+#include "../cuda/experiments/distances.h"
 #include "../cuda/pch.h"
 #include "../common/test_utils.cuh"
 

@@ -1,4 +1,4 @@
-#include "../cuda/normalize.h"
+#include "../cuda/experiments/normalize.h"
 #include "../common/test_utils.cuh"
 #include <iostream>
 #include <cassert>

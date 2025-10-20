@@ -1,190 +1,199 @@
+/**
+ * Warp-Sort Top-K Implementation for pgvector
+ * 
+ * Based on RAFT (RAPIDS AI) warp-sort implementation:
+ * - raft/cpp/include/raft/matrix/detail/select_warpsort.cuh
+ * - raft/cpp/include/raft/util/bitonic_sort.cuh
+ * 
+ * This implementation provides GPU-accelerated top-k selection using
+ * warp-level primitives and bitonic sorting networks.
+ * 
+ * Key features:
+ * - Support for k up to 256 (kMaxCapacity)
+ * - Warp-level parallelism using shuffle operations
+ * - Register-based storage for minimal memory overhead
+ * - Bitonic merge network for efficient sorting
+ * 
+ * Copyright (c) 2024, pgvector
+ * Adapted from RAFT (Apache 2.0 License)
+ */
+
+#include <limits>
+#include <type_traits>
+#include <math_constants.h>
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
-
-#include "kernels.h"
 
 #include "fusion_cos_topk.cuh"
 #include "../unit_tests/common/test_utils.cuh"
 #include "pch.h"
+#include "warpsortfilter/warpsort_utils.cuh"
+#include "warpsortfilter/warpsort.cuh"
 
-// 定义最大k值
-#define MAX_K 1024
-#define ENABLE_CUDA_TIMING 1 /*是否启用CUDATimer计时*/
+#define ENABLE_CUDA_TIMING 1
 
-// mutex_lock和mutex_unlock已在fusion_cos_topk.cuh中定义为inline
+namespace pgvector {
+namespace fusion_cos_topk_warpsort {
 
-__device__ void shared_heap_insert(float* heap_dist, int* heap_idx, float dist, int idx, int* heap_size, int k) {
-    /**
-     * 向共享内存堆插入新元素
-     **/ 
-    int pos = *heap_size;
-    if (pos >= k) return;  /* 堆已满 */ 
+using namespace warpsort_utils;
+using namespace warpsort;
+
+// ============================================================================
+// Public API: Top-K Selection Kernel
+// ============================================================================
+
+/**
+ * 从矩阵每一行中选取 top-k 最小或最大元素。
+ * 
+ * 每个 CUDA block 处理一行。每个 block 内的 warp 独立地使用 WarpSortFiltered 算法完成排序筛选。
+ * 
+ * @param[in] d_query_norm        输入的query L2范数内积矩阵，形状为 [n_query]
+ * @param[in] d_data_norm        输入的data L2范数内积矩阵，形状为 [n_batch]
+ * @param[in] d_inner_product        输入的内积矩阵，形状为 [n_query, n_batch]
+ * @param[in] d_index        输入的索引，形状为 [n_query, n_batch]
+ * @param[in] batch_size   行数（批大小）
+ * @param[in] len          每行的元素个数
+ * @param[in] k            选取的元素个数
+ * @param[out] output_vals 输出 top-k 值，形状为 [n_query, k]
+ * @param[out] output_idx  输出 top-k 对应的索引，形状为 [n_query, k]
+ * @param[in] select_min   若为 true 选取最小的 k 个，否则选取最大的 k 个
+ */
+template<int Capacity, bool Ascending, typename T, typename IdxT>
+__global__ void fusion_cos_topk_warpsort_kernel(
+    const T* __restrict__ d_query_norm,
+    const T* __restrict__ d_data_norm,
+    const T* __restrict__ d_inner_product,
+    const IdxT* __restrict__ d_index,
+    int batch_size,
+    int len,
+    int k,
+    T* __restrict__ output_vals,
+    IdxT* __restrict__ output_idx)
+{
+    const int row = blockIdx.x;
+    if (row >= batch_size) return;
     
-    heap_dist[pos] = dist;
-    heap_idx[pos] = idx;
-    (*heap_size)++; 
+    const int warp_id = threadIdx.x / kWarpSize;
+    const int lane = laneId();
+    const int n_warps = blockDim.x / kWarpSize; /* 一共参与WarpSort的数量（目前都是1） */
     
-    /* 自底向上调整堆 */ 
-    while (pos > 0) {
-        int parent = (pos - 1) / 2;
-        if (heap_dist[parent] >= heap_dist[pos]) break;
-        
-        /* 交换 */ 
-        float temp_dist = heap_dist[parent];
-        int temp_idx = heap_idx[parent];
-        heap_dist[parent] = heap_dist[pos];
-        heap_idx[parent] = heap_idx[pos];
-        heap_dist[pos] = temp_dist;
-        heap_idx[pos] = temp_idx;
-        
-        pos = parent;
+    /* 在一个warp中，建立一个长度为k的队列 */
+    WarpSortFiltered<Capacity, Ascending, T, IdxT> queue(k); 
+    
+    float query_norm = d_query_norm[row];
+
+    /* 按照 laneId 访问数据 */
+    const T* row_inner_product = d_inner_product + row * len;
+    const IdxT* row_index = d_index + row * len;
+    for (int i = warp_id * kWarpSize + lane; i < len; i += n_warps * kWarpSize) {
+        float data_norm = d_data_norm[i];
+        float inner_product = row_inner_product[i];
+        float index = row_inner_product[i];
+        float cos_similarity = inner_product / (query_norm * data_norm);
+        float cos_distance = 1.0f - cos_similarity;
+        queue.add(cos_distance, index);
+    }
+    
+    /* 把 buffer 中剩余数合并到 queue 中 */
+    queue.done();
+    
+    /* 将 queue 中的数存储到显存中（所有线程都要调用）*/
+    if (warp_id == 0) {
+        T* row_out_val = output_vals + row * k;
+        IdxT* row_out_idx = output_idx + row * k;
+        queue.store(row_out_val, row_out_idx);
     }
 }
 
-__device__ void shared_heap_replace_max(float* heap_dist, int* heap_idx, float dist, int idx, int k) {
-    /**
-    * 替换共享内存最大堆的根节点，并调整堆
-    **/ 
-    heap_dist[0] = dist;
-    heap_idx[0] = idx;
-    
-    /* 自顶向下调整堆 */
-    int pos = 0;
-    while (true) {
-        int left = 2 * pos + 1;
-        int right = 2 * pos + 2;
-        int largest = pos;
-
-        if (left < k && heap_dist[left] > heap_dist[largest]) {
-            largest = left;
-        }
-        if (right < k && heap_dist[right] > heap_dist[largest]) {
-            largest = right;
-        }
-        
-        if (largest == pos) break;
-        
-        /* 交换 */ 
-        float temp_dist = heap_dist[pos];
-        int temp_idx = heap_idx[pos];
-        heap_dist[pos] = heap_dist[largest];
-        heap_idx[pos] = heap_idx[largest];
-        heap_dist[largest] = temp_dist;
-        heap_idx[largest] = temp_idx;
-        
-        pos = largest;
+/**
+ * Host function to launch top-k selection.
+ * Automatically chooses appropriate capacity based on k.
+ */
+template<typename T, typename IdxT>
+cudaError_t fusion_cos_topk_warpsort(
+    const T* d_query_norm, const T* d_data_norm, const T* d_inner_product, const IdxT* d_index,
+    int batch_size, int len, int k,
+    T* output_vals, IdxT* output_idx,
+    bool select_min,
+    cudaStream_t stream = 0
+)
+{
+    if (k > kMaxCapacity) {
+        return cudaErrorInvalidValue;
     }
-}
-
-__global__ void fusion_cos_topk_heap_sharedmem_kernel(
-    float* d_query_norm, float* d_data_norm, float* d_inner_product, int* d_index,
-    int* topk_index, float* topk_dist,
-    int n_query, int n_batch, int k
-){
-    /**
-    * 余弦距离和topk融合算子
-    * 
-    * 目的：在现有查询中，每个query和n_batch个data向量两两内积，得到 d_inner_product（大小为[n_query, n_batch]）
-    * 每个query的L2范数存在d_query_norm（大小为[n_query]）
-    * 每个data的L2范数存在d_data_norm（大小为[n_batch]）
-    * 我们需要为每个query向量维护和data距离最小的topk个索引和距离
-    * 索引存在topk_index（大小为[n_query, k]）
-    * 距离存在topk_dist（大小为[n_query, k]）
-    * 
-    * 具体实现：
-    *     线程模型为<<<n_query, n_batch>>>
-    *     采用流式计算，每个block从query_norm中读取对应的范数，每个thread从data_norm中读取对应的范数，计算inner_product/sqrt(query_norm*data_norm)
-    *     topk_dist中的每一行是一个最大堆，其第一个元素是堆中最大值，也是会被替换的数
-    * 
-    *     单次规约，堆的具体功能在共享内存中实现，实现完毕后复制到HBM内存中
-    **/
     
-    int query_idx = blockIdx.x;
-    int data_idx = threadIdx.x;
-    
-    /**
-     * 共享内存中的堆数据，每个block维护一个query的topk堆 
-     **/ 
-    extern __shared__ float shared_heap_dist[];  /* 动态共享内存（需要学习具体是怎么工作的） */ 
-    __shared__ int* shared_heap_idx;  /* 指向共享内存中的索引数组 */ 
-    __shared__ int heap_mutex; /* 堆中的互斥锁 */
-    __shared__ int heap_size;  /* 当前堆中元素数量 */ 
-
-    if (query_idx >= n_query || data_idx >= n_batch) return;
-
-    /**
-     * 初始化共享内存和互斥锁（只有第一个线程执行）
-     **/ 
-    if (threadIdx.x == 0) {
-        heap_mutex = 0;
-        heap_size = 0;
-        shared_heap_idx = (int*)(shared_heap_dist + k);  /* 索引数组紧跟在距离数组后面 */ 
-    }
-    __syncthreads();
-    
-    /**
-     * 获取当前query对应的全局堆（用于最终结果）
-     **/ 
-    float* global_heap_dist = &topk_dist[query_idx * k];
-    int* global_heap_idx = &topk_index[query_idx * k];
-
-    /**
-     * HBM内存中读取计算需要的数据，访问HBM只需要这么多次数，
-     * 这方面的性能应该是不错的
-     */
-    float query_norm = d_query_norm[query_idx];
-    float data_norm = d_data_norm[data_idx];
-    float inner_product = d_inner_product[query_idx * n_batch + data_idx];
-    float index = d_index[query_idx * n_batch + data_idx];
-    
-    /**
-     * 余弦相似度 = inner_product / (query_norm * data_norm)
-     * 余弦距离 = 1 - 余弦相似度
+    /* 
+     * 选择合适的 Capacity
      * 
-     * 今后可能的调整：看将求平方根放到这一步好还是放到求范数好，
-     * 也就是说，在数值精度和计算速度间权衡
-     **/ 
-
-    float cos_similarity = inner_product / (query_norm * data_norm);
-    float cos_distance = 1.0f - cos_similarity;
-    // printf("%d %d %f\n", query_idx, data_idx, cos_distance);
-
-
-
-    /**
-     * 使用互斥锁确保线程安全地更新共享内存中的堆
-     **/ 
-    mutex_lock(&heap_mutex);
+     * WarpSortFiltered 需要 buffer 空间，因此：
+     * - Capacity 必须 > k（不能等于 k）
+     * - 最小使用 64（确保 kMaxArrLen >= 2）
+     * - 选择最小的满足 Capacity > k 的 2 的幂
+     */
+    int capacity = 32;  /* 最小使用 32 */
+    while (capacity < k) capacity <<= 1;  /* 注意：必须 > k，不能等于 */
     
-    if (heap_size < k) {
-        /* 堆未满，直接插入 */ 
-        shared_heap_insert(shared_heap_dist, shared_heap_idx, cos_distance, index, &heap_size, k);
+    dim3 block(32);  /* 使用32线程（单个warp）*/
+    dim3 grid(batch_size);
+    
+    /* 模板的非类型参数必须是常量，所以只能用这一系列分支来使用不同尺寸的函数 */
+    if (select_min) {
+        if (capacity <= 32) {
+            fusion_cos_topk_warpsort_kernel<64, true, T, IdxT><<<grid, block, 0, stream>>>(
+                d_query_norm, d_data_norm, d_inner_product, d_index, 
+                batch_size, len, k, 
+                output_vals, output_idx
+            );
+        } else if (capacity <= 64) {
+            fusion_cos_topk_warpsort_kernel<128, true, T, IdxT><<<grid, block, 0, stream>>>(
+                d_query_norm, d_data_norm, d_inner_product, d_index, 
+                batch_size, len, k, 
+                output_vals, output_idx
+            );
+        } else {
+            fusion_cos_topk_warpsort_kernel<256, true, T, IdxT><<<grid, block, 0, stream>>>(
+                d_query_norm, d_data_norm, d_inner_product, d_index, 
+                batch_size, len, k, 
+                output_vals, output_idx
+            );
+        }
     } else {
-        /* 堆已满，检查是否需要替换最大值 */ 
-        float current_max = shared_heap_dist[0];  /* 最大堆的根节点是最大值 */
-        if (cos_distance < current_max) {
-            /* 替换最大值，并且调整堆 */ 
-            shared_heap_replace_max(shared_heap_dist, shared_heap_idx, cos_distance, index, k);
+        if (capacity <= 32) {
+            fusion_cos_topk_warpsort_kernel<64, false, T, IdxT><<<grid, block, 0, stream>>>(
+                d_query_norm, d_data_norm, d_inner_product, d_index,
+                batch_size, len, k, 
+                output_vals, output_idx
+            );
+        } else if (capacity <= 64) {
+            fusion_cos_topk_warpsort_kernel<128, false, T, IdxT><<<grid, block, 0, stream>>>(
+                d_query_norm, d_data_norm, d_inner_product, d_index, 
+                batch_size, len, k, 
+                output_vals, output_idx
+            );
+        } else {
+            fusion_cos_topk_warpsort_kernel<256, false, T, IdxT><<<grid, block, 0, stream>>>(
+                d_query_norm, d_data_norm, d_inner_product, d_index, 
+                batch_size, len, k, 
+                output_vals, output_idx
+            );
         }
     }
     
-    mutex_unlock(&heap_mutex);
-    
-    __syncthreads();
-    
-    /**
-     * 将共享内存中的结果复制到全局内存（只有第一个线程执行）
-     **/ 
-    if (threadIdx.x == 0) {
-        for (int i = 0; i < heap_size && i < k; i++) {
-            global_heap_dist[i] = shared_heap_dist[i];
-            global_heap_idx[i] = shared_heap_idx[i];
-        }
-    }
+    return cudaGetLastError();
 }
 
+// Explicit instantiations
+template cudaError_t fusion_cos_topk_warpsort<float, int>(
+    const float*, const float*, const float*, const int*, int, int, int, float*, int*, bool, cudaStream_t);
 
-void cuda_cos_topk_heap_sharedmem(
+template cudaError_t fusion_cos_topk_warpsort<float, uint32_t>(
+    const float*, const float*, const float*, const uint32_t*, int, int, int, float*, uint32_t*, bool, cudaStream_t);
+
+} // namespace warpsort
+} // namespace pgvector
+
+
+void cuda_cos_topk_warpsort(
     float** h_query_vectors, float** h_data_vectors, 
     int** h_index, int** h_topk_index, float** h_topk_cos_dist,
     int n_query, int n_batch, int n_dim,
@@ -244,6 +253,7 @@ void cuda_cos_topk_heap_sharedmem(
 
     // 复制数据到设备
     {
+        // COUT_ENDL("begin data transfer");
 
         CUDATimer timer_trans1("H2D Data Transfer", ENABLE_CUDA_TIMING);
         // 复制查询向量，然后常驻
@@ -293,6 +303,10 @@ void cuda_cos_topk_heap_sharedmem(
         // cudaMemset((void*)d_topk_cos_dist, (int)0xEF, n_query * k * sizeof(float)) /*也可以投机取巧用memset，正好将数组为一个非常大的负数*/
         // table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
 
+
+        // COUT_ENDL("finish data transfer");
+
+
     }
 
     // print_cuda_2D("index matrix", d_index, n_query, n_batch);
@@ -306,6 +320,8 @@ void cuda_cos_topk_heap_sharedmem(
 
     /* 核函数执行 */
     {
+        // COUT_ENDL("begin_kernel");
+
         CUDATimer timer_compute("Kernel Execution: l2 Norm + matrix multiply", ENABLE_CUDA_TIMING);
 
         l2_norm_kernel<<<queryDim, vectorDim, n_dim * sizeof(float)>>>(
@@ -317,6 +333,7 @@ void cuda_cos_topk_heap_sharedmem(
             d_data_vectors, d_data_norm, 
             n_batch, n_dim
         );        
+        // COUT_ENDL("finish l2 norm");
 
         // table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
        
@@ -339,6 +356,7 @@ void cuda_cos_topk_heap_sharedmem(
         );    
         
         cudaDeviceSynchronize(); 
+        // COUT_ENDL("finish matrix multiply");
 
         // print_cuda_2D("inner product", d_inner_product, n_query, n_batch);
 
@@ -349,16 +367,13 @@ void cuda_cos_topk_heap_sharedmem(
     {
         CUDATimer timer_compute("Kernel Execution: cos + topk", ENABLE_CUDA_TIMING);
 
-        fusion_cos_topk_heap_sharedmem_kernel<<<queryDim, dataDim>>>(
+        pgvector::fusion_cos_topk_warpsort::fusion_cos_topk_warpsort(
             d_query_norm, d_data_norm, d_inner_product, d_index,
-            d_topk_index, d_topk_cos_dist,
-            n_query, n_batch, k
+            n_query, n_batch, k,
+            d_topk_cos_dist, d_topk_index,
+            true /* select min */
         );
 
-        // cos_distance_kernel<<<dataDim, queryDim>>>(
-            // d_query_norm, d_data_norm, d_inner_product,
-            // n_query, n_batch, n_dim
-        // );
         // table_cuda_2D("topk index", d_topk_index, n_query, k);
         // table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);
 
@@ -387,7 +402,6 @@ void cuda_cos_topk_heap_sharedmem(
         cudaFree(d_index);
         cudaFree(d_topk_cos_dist);
         cudaFree(d_topk_index);
-        
         // 销毁CUDA流
         for (int i = 0; i < NUM_STREAMS; i++) {
             cudaStreamDestroy(streams[i]);

@@ -1,4 +1,4 @@
-#include "kernels.h"
+#include "l2norm.cuh"
 #include "normalize.h"
 #include "pch.h"
 

@@ -1,7 +1,7 @@
 /**
  * Unit tests for Bitonic Sort class
  * 
- * 本测试专门测试 warpsort.cu 中的 Bitonic 类的正确性
+ * 本测试专门测试 bitonic.cu 中的 Bitonic 类的正确性
  * 测试内容包括：
  * 1. Bitonic::sort() - 完整的 bitonic 排序
  * 2. Bitonic::merge() - bitonic 合并操作
@@ -14,11 +14,11 @@
 #include <algorithm>
 #include <vector>
 
-#include "../../cuda/warpsort.cu"
-#include "../../cuda/warpsort_utils.cuh"
+#include "../../cuda/warpsortfilter/bitonic.cuh"
+// #include "../../cuda/warpsort_utils.cuh"
 #define EPSILON 1e-5f
 
-using namespace pgvector::warpsort;
+using namespace pgvector::bitonic;
 
 // ============================================================================
 // Test Kernels

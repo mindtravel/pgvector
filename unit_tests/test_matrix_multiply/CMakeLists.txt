@@ -3,8 +3,7 @@
 # 源文件列表
 set(SOURCES
     test_matrix_multiply.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/matrix-multiply.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/kernels.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/experiments/matrix-multiply.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/test_utils.cu
 )
 

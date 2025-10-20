@@ -8,9 +8,9 @@
 #include "pch.h"
 #include "../common/test_utils.cuh"
 
-// Forward declarations from wrapsort.cu
+// Forward declarations from warpsortfilter/wrapsort_topk.cu
 namespace pgvector {
-namespace warpsort {
+namespace warpsort_topk {
 
 template<typename T, typename IdxT>
 cudaError_t select_k(
@@ -128,7 +128,7 @@ bool test_warpsort(
                 cudaMemcpyHostToDevice);
         CHECK_CUDA_ERRORS;
 
-        cudaError_t err = pgvector::warpsort::select_k<float, int>(
+        cudaError_t err = pgvector::warpsort_topk::select_k<float, int>(
             d_input, batch_size, len, k, d_output_vals, d_output_idx, true, 0);
         if (err != cudaSuccess) {
             COUT_ENDL("  ❌ GPU kernel failed:", cudaGetErrorString(err));
@@ -207,7 +207,7 @@ void test_performance()
         CHECK_CUDA_ERRORS;
         
         // Warmup
-        pgvector::warpsort::select_k<float, int>(
+        pgvector::warpsort_topk::select_k<float, int>(
             d_input, batch_size, len, k, d_output_vals, d_output_idx, true, 0);
         cudaDeviceSynchronize();
         
@@ -219,7 +219,7 @@ void test_performance()
         const int n_iterations = 100;
         cudaEventRecord(start);
         for (int i = 0; i < n_iterations; i++) {
-            pgvector::warpsort::select_k<float, int>(
+            pgvector::warpsort_topk::select_k<float, int>(
                 d_input, batch_size, len, k, d_output_vals, d_output_idx, true, 0);
         }
         cudaEventRecord(stop);

@@ -1,4 +1,4 @@
-#include "../cuda/matrix-multiply.h"
+#include "../cuda/experiments/matrix-multiply.h"
 #include "../cuda/pch.h"
 #include "../common/test_utils.cuh"
 #define EPSILON 1e-2

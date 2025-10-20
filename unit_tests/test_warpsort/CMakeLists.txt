@@ -3,8 +3,7 @@
 # 源文件列表
 set(SOURCES
     test_warpsort.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/warpsort.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/kernels.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/warpsortfilter/warpsort_topk.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/test_utils.cu
 )
 

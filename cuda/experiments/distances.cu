@@ -1,16 +1,55 @@
-#include <cublas_v2.h>
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
 
-#include "kernels.h"
+#include "l2norm.cuh"
 #include "distances.h"
-
-#include "fusion_cos_topk.cuh"
-#include "../unit_tests/common/test_utils.cuh"
 #include "pch.h"
+
+#include "../unit_tests/common/test_utils.cuh"
 
 
 #define ENABLE_CUDA_TIMING 1 /*是否启用CUDATimer计时*/
+
+__global__ void cos_distance_kernel(
+    float *query_l2_norm, float *data_l2_norm, float *d_cos_dist, 
+    int n_query, int n_batch, int n_dim
+) {
+    int data_id = blockIdx.x;
+    int query_id = threadIdx.x;
+    // int idx = data_id * n_query + query_id;
+    int idx = data_id + query_id * n_batch;
+
+    // 边界检查 + 错误防护
+    if (query_id >= n_query || data_id >= n_batch || idx >= n_batch * n_query) {
+        #ifdef DEBUG
+        printf("Boundary Error: query_id=%d/%d, data_id=%d/%d\n", 
+               query_id, n_query, data_id, n_batch);
+        #endif
+        return;
+    }
+
+    // // 共享内存缓存query范数
+    // __shared__ float s_query_norm[256];
+    // if (threadIdx.y == 0 && threadIdx.x < n_query) {
+    //     s_query_norm[threadIdx.x] = query_l2_norm[threadIdx.x];
+    // }
+    // __syncthreads();
+
+    // float query_norm = s_query_norm[query_id % 256]; // 假设BLOCK_SIZE=256
+    float query_norm = query_l2_norm[query_id]; // 假设BLOCK_SIZE=256
+    float data_norm = data_l2_norm[data_id];
+
+    // 范数合法性检查
+    if (!isfinite(query_norm) || !isfinite(data_norm) || 
+        fabsf(query_norm) < 1e-6f || fabsf(data_norm) < 1e-6f) {
+        d_cos_dist[idx] = 0.0f;
+        return;
+    }
+
+    // 计算归一化余弦距离
+    d_cos_dist[idx] /= (query_norm * data_norm);
+    // d_cos_dist[idx] = (query_norm);
+}
 
 /**
  * 计算一个batch的query和待检索的list之间的余弦距离 [n_querys, n_dim] * [n_batch * n_dim].T

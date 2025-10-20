@@ -3,7 +3,7 @@
 #include <string>
 #include <map>
 
-#include "../cuda/fusion_cos_topk.cuh"
+#include "../cuda/fusion_cos_topk/fusion_cos_topk.cuh"
 #include "../cuda/pch.h"
 #include "../common/test_utils.cuh"
 

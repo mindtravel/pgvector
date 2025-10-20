@@ -3,8 +3,8 @@
 # 源文件列表
 set(SOURCES
     test_vector_normalizer.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/kernels.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/normalize.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/experiments/normalize.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/l2norm.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/test_utils.cu
 )
 
