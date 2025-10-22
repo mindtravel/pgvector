@@ -16,3 +16,4 @@ test_cuda/
 .vscode
 
 unit_tests/build/*
+unit_tests/csv_results/*

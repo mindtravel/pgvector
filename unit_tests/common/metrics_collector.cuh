@@ -33,6 +33,8 @@ private:
     int num_repeats_ = 10;        /* 默认重复 10 次 */
     int base_seed_ = 42;          /* 基础随机种子 */
     
+    std::string csv_path_ = "/root/pgvector/unit_tests/csv_results/";
+    
     /* 计算每列的最大宽度 */
     void calculate_column_widths() {
         column_widths_.resize(column_names_.size());
@@ -305,9 +307,10 @@ public:
      * 导出为 CSV 格式
      */
     void export_csv(const std::string& filename) const {
-        std::ofstream file(filename);
+        std::string file_path = csv_path_ + filename;
+        std::ofstream file(file_path);
         if (!file.is_open()) {
-            std::cerr << "Error: Cannot open file " << filename << "\n";
+            std::cerr << "Error: Cannot open file " << file_path << "\n";
             return;
         }
         
@@ -328,7 +331,7 @@ public:
         }
         
         file.close();
-        std::cout << "Metrics exported to " << filename << "\n";
+        std::cout << "Metrics exported to " << file_path << "\n";
     }
 };
 

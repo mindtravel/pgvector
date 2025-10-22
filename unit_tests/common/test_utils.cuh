@@ -10,8 +10,8 @@
 #include "params_macros.cuh"
 #include "metrics_collector.cuh"
 
-#define DEBUG true
-
+#define DEBUG false /* debug模式：用于寻找正确输出和测试函数输出的差异 */
+#define QUIET false /* 静默模式：不打印日志（用于重复运行）*/
 /**
  * @brief 用宏简化计时语法，并将结果（毫秒）存入指定的变量。
  * @param TESTNAME 字符串字面量，用于日志输出的测试名称。
@@ -89,21 +89,22 @@ bool compare_1D(T* a, T* b, int n, float epsilon = 1e-5f) {
     int err_happens = 0;
     for(int i = 0; i < n; ++i){
         if (!compare_numbers(a[i], b[i], epsilon)) {
-            if(err_happens == 0){
-                COUT_ENDL("mismatch!");
-                COUT_TABLE("i", "a[i]", "b[i]", "diff");
+            if(DEBUG){
+                if(err_happens == 0){
+                    COUT_ENDL("mismatch!");
+                    COUT_TABLE("i", "a[i]", "b[i]", "diff");
+                }
+                COUT_TABLE(i, a[i], b[i], a[i] - b[i]);
             }
 
             err_happens ++;
-            if(DEBUG == true)
-                COUT_TABLE(i, a[i], b[i], a[i] - b[i]);
         }
     }
     if(err_happens == 0){
-        COUT_ENDL("all match!");
         return true;
     }
-    COUT_ENDL(err_happens);
+    if(DEBUG)
+        COUT_ENDL(err_happens);
     return false;
 }
 
@@ -113,22 +114,23 @@ bool compare_2D(T* a, T* b, int nx, int ny, float epsilon = 1e-5f) {
     for(int i = 0; i < nx; ++i){
         for (int j = 0; j < ny; j++) {
             if (!compare_numbers(a[i][j], b[i][j], epsilon)) {
-                if(err_happens == 0){
-                    COUT_ENDL("mismatch!");
-                    COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
+                if(DEBUG){
+                    if(err_happens == 0){
+                        COUT_ENDL("mismatch!");
+                        COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
+                    }                    
+                    COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
                 }
     
                 err_happens ++;
-                if(DEBUG == true)
-                    COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
             }
         }
     }
     if(err_happens == 0){
-        COUT_ENDL("all match!");
         return true;
     }
-    COUT_ENDL(err_happens);
+    if(DEBUG)
+        COUT_ENDL(err_happens);
     return false;
 }
 
@@ -140,21 +142,22 @@ bool compare_set_1D(T** a, T** b, int n, float epsilon = 1e-5f) {
 
     for(int i = 0; i < n; ++i){
         if (!compare_numbers(a[i], b[i], epsilon)) {
-            if(err_happens == 0){
-                COUT_ENDL("mismatch!");
-                COUT_TABLE("i", "a[i]", "b[i]", "diff");
+            if(DEBUG){
+                if(err_happens == 0){
+                    COUT_ENDL("mismatch!");
+                    COUT_TABLE("i", "a[i]", "b[i]", "diff");
+                }
+                COUT_TABLE(i, a[i], b[i], a[i] - b[i]);
             }
 
             err_happens ++;
-            if(DEBUG == true)
-                COUT_TABLE(i, a[i], b[i], a[i] - b[i]);
         }
     }
     if(err_happens == 0){
-        COUT_ENDL("all match!");
         return true;
     }
-    COUT_ENDL(err_happens);
+    if(DEBUG)
+        COUT_ENDL(err_happens);
     return false;
 }
 
@@ -167,22 +170,23 @@ bool compare_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
 
         for (int j = 0; j < ny; j++) {
             if (!compare_numbers(a[i][j], b[i][j], epsilon)) {
-                if(err_happens == 0){
-                    COUT_ENDL("mismatch!");
-                    COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
+                if(DEBUG){
+                    if(err_happens == 0){
+                        COUT_ENDL("mismatch!");
+                        COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
+                    }                    
+                    COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
                 }
     
                 err_happens ++;
-                if(DEBUG == true)
-                    COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
             }
         }
     }
     if(err_happens == 0){
-        COUT_ENDL("all match!");
         return true;
     }
-    COUT_ENDL(err_happens);
+    if(DEBUG)
+        COUT_ENDL(err_happens);
     return false;
 }
 
@@ -210,7 +214,7 @@ int count_equal_elements_set_1D(T** a, T** b, int n, float epsilon = 1e-5f) {
             j++;
         }
     }
-    if (count_equal != n)
+    if (DEBUG && count_equal != n)
         COUT_ENDL("Number of inequal elements:", n - count_equal, "out of", n);
     return count_equal == n;
 }
@@ -243,7 +247,7 @@ int count_equal_elements_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e
             }
         }
     }
-    if (count_equal != nx * ny)
+    if (DEBUG && count_equal != nx * ny)
         COUT_ENDL("Number of inequal elements:", nx * ny - count_equal, "out of", nx * ny);
     return count_equal == nx * ny;
 }

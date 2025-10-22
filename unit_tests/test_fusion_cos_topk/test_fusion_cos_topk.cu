@@ -122,24 +122,23 @@ int** generate_data_index(int size_x, int size_y){
     return data_index;
 }
 
-// 通用测试函数 - 支持多种算法版本
-bool test_cos_distance_topk_with_algorithm(
+/**
+ * 测试函数 - 返回所有性能指标
+ * @return vector<double>: {pass rate, n_query, n_batch, n_dim, k, gpu_ms, cpu_ms, speedup, memery_mb}
+ */
+std::vector<double> test_cos_distance_topk_with_algorithm(
     int n_query, int n_batch, int n_dim, int k, 
-    AlgorithmVersion algo_version,
-    const char* test_name = "基本余弦k近邻测试") 
+    AlgorithmVersion algo_version
+) 
 {
     AlgorithmInfo& algo_info = algorithm_registry[algo_version];
     bool pass = true;
-
-    COUT_VAL("=== ", test_name, " [", algo_info.name, "] ===");    
-    COUT_VAL(n_query, " 个查询向量 × ", n_batch, " 个数据向量", ", 向量维度: ", n_dim, ", 找top", k);    
-    COUT_VAL("算法: ", algo_info.description);
+    double memory_mb = (double)(n_query * n_dim + n_batch * n_dim + n_query * n_batch) * sizeof(float) / (double)(1024 * 1024); /* 内存使用量 */
     
-    // 计算内存使用量
-    size_t memory_mb = (n_query * n_dim + n_batch * n_dim + n_query * n_batch) * sizeof(float) / (1024 * 1024);
-    COUT_VAL("内存使用量: ", memory_mb, " MB");    
-
-    
+    if (!QUIET) {
+        COUT_VAL("配置:", n_query, "个查询向量 ×", n_batch, "个数据向量", ", 向量维度:", n_dim, ", 找top", k, "算法: ", algo_info.description);
+    }  
+        
     // 生成测试数据
     float** h_query_vectors = generate_vector_list(n_query, n_dim);
     float** h_data_vectors = generate_vector_list(n_batch, n_dim);
@@ -159,7 +158,7 @@ bool test_cos_distance_topk_with_algorithm(
         }
     }
 
-    long long gpu_duration_ms = 0, cpu_duration_ms = 0;
+    double gpu_duration_ms = 0, cpu_duration_ms = 0;
 
     /* GPU计算 - 使用选定的算法 */ 
     MEASURE_MS_AND_SAVE("gpu耗时：", gpu_duration_ms,
@@ -179,7 +178,7 @@ bool test_cos_distance_topk_with_algorithm(
         );
     );
 
-    COUT_ENDL("加速比", (float)cpu_duration_ms / (float)gpu_duration_ms, "x");
+    double speedup = (double)cpu_duration_ms / (double)gpu_duration_ms;
 
     // 验证结果
     // pass &= compare_set_2D(topk_index_gpu, topk_index_cpu, n_query, k);
@@ -202,7 +201,11 @@ bool test_cos_distance_topk_with_algorithm(
     free_vector_list((void**)topk_dist_cpu);
     free_vector_list((void**)topk_dist_gpu);
 
-    return pass;
+    return {
+        pass ? 1.0 : 0.0,
+        (double)n_query, (double)n_batch, (double)n_dim, (double)k, 
+        gpu_duration_ms, cpu_duration_ms, speedup, (double)memory_mb
+    };
 
 }
 
@@ -213,8 +216,7 @@ void run_algorithm_comparison(int n_query, int n_batch, int n_dim, int k) {
     for (auto& pair : algorithm_registry) {
         test_cos_distance_topk_with_algorithm(
             n_query, n_batch, n_dim, k, 
-            pair.first, 
-            "算法对比测试"
+            pair.first
         );
     }   
 }
@@ -238,6 +240,12 @@ AlgorithmVersion parse_algorithm_version(const char* arg) {
 int main(int argc, char** argv) {
     srand(time(0));
     
+    bool all_pass = true;
+
+    MetricsCollector metrics;
+    metrics.set_columns("pass rate", "n_query", "n_batch", "n_dim", "k", "avg_gpu_ms", "avg_cpu_ms", "avg_speedup", "memory_mb");
+    // metrics.set_num_repeats(1);
+    
     // 解析命令行参数
     AlgorithmVersion selected_version = ALL_VERSIONS;
     selected_version = WARP_SORT;
@@ -248,24 +256,45 @@ int main(int argc, char** argv) {
     bool test = true;
     if (selected_version == GLOBAL_MEMORY || selected_version == ALL_VERSIONS) {
         COUT_ENDL("测试算法: 全局内存堆实现");
-        test &= check_pass("", test_cos_distance_topk_with_algorithm(1024, 128, 512, 100, GLOBAL_MEMORY));
+        test &= check_pass("", test_cos_distance_topk_with_algorithm(1024, 128, 512, 100, GLOBAL_MEMORY)[0]);
         // test &= check_pass("", test_cos_distance_topk_with_algorithm(1024, 1024, 1024, 100, GLOBAL_MEMORY));
-        test &= check_pass("", test_cos_distance_topk_with_algorithm(10000, 1024, 1024, 100, GLOBAL_MEMORY));
+        test &= check_pass("", test_cos_distance_topk_with_algorithm(10000, 1024, 1024, 100, GLOBAL_MEMORY)[0]);
         // test &= check_pass("", test_cos_distance_topk_with_algorithm(10000, 2048, 1024, 100, GLOBAL_MEMORY)); /* 这一步结果会出错，不知道是哪一步引起的，反正是个很慢的算法，后续便不再维护 */ 
     }
     if (selected_version == SHARED_MEMORY || selected_version == ALL_VERSIONS) {
         COUT_ENDL("测试算法: 共享内存堆实现");
-        test &= check_pass("", test_cos_distance_topk_with_algorithm(1024, 128, 512, 16, SHARED_MEMORY));
-        test &= check_pass("", test_cos_distance_topk_with_algorithm(1024, 1024, 1024, 16, SHARED_MEMORY));
-        test &= check_pass("", test_cos_distance_topk_with_algorithm(10000, 1024, 1024, 16, SHARED_MEMORY));
+        test &= check_pass("", test_cos_distance_topk_with_algorithm(1024, 128, 512, 16, SHARED_MEMORY)[0]);
+        test &= check_pass("", test_cos_distance_topk_with_algorithm(1024, 1024, 1024, 16, SHARED_MEMORY)[0]);
+        test &= check_pass("", test_cos_distance_topk_with_algorithm(10000, 1024, 1024, 16, SHARED_MEMORY)[0]);
     }
     if (selected_version == WARP_SORT || selected_version == ALL_VERSIONS) {
+        test_cos_distance_topk_with_algorithm(1024, 128, 512, 16, WARP_SORT); /*warmup*/
+
         COUT_ENDL("测试算法: 全寄存器 Topk");
-        test &= check_pass("", test_cos_distance_topk_with_algorithm(1024, 128, 512, 100, WARP_SORT)); /* warm up */
-        test &= check_pass("", test_cos_distance_topk_with_algorithm(1024, 1024, 1024, 100, WARP_SORT));
-        test &= check_pass("", test_cos_distance_topk_with_algorithm(10000, 1024, 1024, 100, WARP_SORT));
-        // test_cos_distance_topk_with_algorithm(100000, 2048, 1024, 100, WARP_SORT);
+        PARAM_3D(n_query, (8, 32, 128, 512, 2048), 
+                n_batch, (128, 512, 2048), /* n_batch < k */
+                n_dim, (512, 1024))   
+        // PARAM_3D(n_query, (8, 32), 
+        //     n_batch, (128, 512), /* n_batch < k */
+        //     n_dim, (512, 1024))           
+        {
+
+            auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
+                auto result = test_cos_distance_topk_with_algorithm(n_query, n_batch, n_dim, 100, WARP_SORT);
+                all_pass &= (result[0] == 1.0);  // 检查 pass 字段
+                return result;
+            });
+
+        }
+
+        test_cos_distance_topk_with_algorithm(2048, 2048, 1024, 100, WARP_SORT); /*warmup*/
     }
-    if(test)COUT_ENDL("all_test_passed");
+
+    metrics.print_table();
+
+    // 可选：导出为 CSV
+    metrics.export_csv("fusion_cos_topk_metrics.csv");
+    
+    COUT_ENDL("\n所有测试:", all_pass ? "✅ PASS" : "❌ FAIL");
     return 0;
 }

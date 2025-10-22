@@ -199,7 +199,7 @@ void cuda_cos_dist_topk(
     int *d_index, *d_topk_index;
     int *d_heap_mutexes, *d_heap_sizes;  /* 全局内存中的堆互斥锁和堆大小数组 */
     {
-        CUDATimer timer_manage("GPU Memory Allocation", ENABLE_CUDA_TIMING, false);
+        CUDATimer timer_manage("GPU Memory Allocation", ENABLE_CUDA_TIMING);
 
         cudaMalloc(&d_query_vectors, size_query);
         cudaMalloc(&d_data_vectors, size_data);

@@ -30,7 +30,7 @@
 #include "warpsortfilter/warpsort_utils.cuh"
 #include "warpsortfilter/warpsort.cuh"
 
-#define ENABLE_CUDA_TIMING 1
+#define ENABLE_CUDA_TIMING 0
 
 namespace pgvector {
 namespace fusion_cos_topk_warpsort {
@@ -88,7 +88,7 @@ __global__ void fusion_cos_topk_warpsort_kernel(
     for (int i = warp_id * kWarpSize + lane; i < len; i += n_warps * kWarpSize) {
         float data_norm = d_data_norm[i];
         float inner_product = row_inner_product[i];
-        float index = row_inner_product[i];
+        IdxT index = row_index[i];  /* 修复：使用正确的索引值 */
         float cos_similarity = inner_product / (query_norm * data_norm);
         float cos_distance = 1.0f - cos_similarity;
         queue.add(cos_distance, index);
@@ -232,7 +232,7 @@ void cuda_cos_topk_warpsort(
         *d_query_norm, *d_data_norm;
     int *d_index, *d_topk_index;
     {
-        CUDATimer timer_manage("GPU Memory Allocation", ENABLE_CUDA_TIMING, false);
+        CUDATimer timer_manage("GPU Memory Allocation", ENABLE_CUDA_TIMING);
 
         cudaMalloc(&d_query_vectors, size_query);
         cudaMalloc(&d_data_vectors, size_data);

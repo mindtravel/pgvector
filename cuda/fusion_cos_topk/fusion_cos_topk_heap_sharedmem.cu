@@ -222,7 +222,7 @@ void cuda_cos_topk_heap_sharedmem(
         *d_query_norm, *d_data_norm;
     int *d_index, *d_topk_index;
     {
-        CUDATimer timer_manage("GPU Memory Allocation", ENABLE_CUDA_TIMING, false);
+        CUDATimer timer_manage("GPU Memory Allocation", ENABLE_CUDA_TIMING);
 
         cudaMalloc(&d_query_vectors, size_query);
         cudaMalloc(&d_data_vectors, size_data);

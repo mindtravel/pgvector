@@ -100,6 +100,11 @@ cuda/cuda_wrapper.o: cuda/cuda_wrapper.cu
 	@echo "跳过.bc文件生成，直接使用.o文件: $<"
 	@touch $@
 
+# 特殊处理 CUDA 文件，跳过 .bc 生成
+cuda/cuda_wrapper.bc: cuda/cuda_wrapper.o
+	@echo "跳过CUDA .bc文件生成"
+	@touch $@
+
 # 或者完全禁用.bc文件
 .SUFFIXES: .o .c .cu
 .SUFFIXES: .o .c .cu
