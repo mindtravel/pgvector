@@ -1,190 +1,244 @@
-/* ivfscanbatch.c */
 #include "postgres.h"
 #include "access/relscan.h"
-#include "ivfflat.h"
-#include "scanbatch.h"
 #include "utils/memutils.h"
+#include "ivfscanbatch.h"
+#include "scanbatch.h"
+#include "ivfflat.h"
+#include "vector.h"
+
+/* 内部函数声明 */
+
+#ifdef USE_CUDA
+static void GetScanLists_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys);
+static int UploadCentersToGPU_Batch(IndexScanDesc scan);
+static int UploadProbesToGPU_Batch(IndexScanDesc scan);
+static void GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys);
+#endif
 
 /*
- * 批量扫描状态结构
- */
-typedef struct IvfflatBatchScanOpaqueData
-{
-    IvfflatScanOpaqueData base;  /* 基础扫描状态 */
-    ScanKeyBatch    batch_keys;   /* 批量查询键 */
-    int             current_key;  /* 当前处理的键索引 */
-    Tuplesortstate** sortstates;  /* 每个查询的排序状态数组 */
-    TupleTableSlot** vslots;      /* 每个查询的虚拟槽位数组 */
-    TupleTableSlot** mslots;      /* 每个查询的最小元组槽位数组 */
-} IvfflatBatchScanOpaqueData;
-
-typedef IvfflatBatchScanOpaqueData* IvfflatBatchScanOpaque;
-
-/*
- * 初始化批量扫描
+ * 批量扫描开始函数
  */
 IndexScanDesc
-ivfflatbatchbeginscan(Relation index, int nkeys, int norderbys, ScanKeyBatch batch_keys)
+ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys)
 {
     IndexScanDesc scan;
     IvfflatBatchScanOpaque so;
-    MemoryContext oldCtx;
-    int         lists, dimensions;
+    MemoryContext tmpCtx;
+
+    elog(LOG, "ivfflatbatchbeginscan: 开始批量扫描, nkeys=%d", batch_keys->nkeys);
 
     /* 创建扫描描述符 */
-    scan = RelationGetIndexScan(index, nkeys, norderbys);
-
-    /* 获取列表数和维度数 */
-    IvfflatGetMetaPageInfo(index, &lists, &dimensions);
-
-    /* 分配扫描状态 */
-    so = (IvfflatBatchScanOpaque)palloc0(sizeof(IvfflatBatchScanOpaqueData));
-
-    /* 初始化基础扫描状态 */
-    so->base.typeInfo = IvfflatGetTypeInfo(index);
-    so->base.first = true;
-    so->base.probes = ivfflat_probes;
-    so->base.maxProbes = (ivfflat_iterative_scan != IVFFLAT_ITERATIVE_SCAN_OFF) ?
-        Max(ivfflat_max_probes, ivfflat_probes) : ivfflat_probes;
-    so->base.dimensions = dimensions;
-
-    /* 设置支持函数 */
-    so->base.procinfo = index_getprocinfo(index, 1, IVFFLAT_DISTANCE_PROC);
-    so->base.normprocinfo = IvfflatOptionalProcInfo(index, IVFFLAT_NORM_PROC);
-    so->base.collation = index->rd_indcollation[0];
-
-    /* 创建内存上下文 */
-    so->base.tmpCtx = AllocSetContextCreate(CurrentMemoryContext,
+    scan = RelationGetIndexScan(index, batch_keys->nkeys, norderbys);
+    if (!scan) {
+        elog(ERROR, "ivfflatbatchbeginscan: 无法创建扫描描述符");
+    }
+    
+    /* 先创建临时内存上下文 */
+    tmpCtx = AllocSetContextCreate(CurrentMemoryContext,
         "Ivfflat batch scan temporary context",
         ALLOCSET_DEFAULT_SIZES);
-
-    oldCtx = MemoryContextSwitchTo(so->base.tmpCtx);
-
-    /* 存储批量键 */
-    so->batch_keys = batch_keys;
-    so->current_key = 0;
-
-    /* 为每个查询创建排序状态和槽位 */
-    int nbatch = batch_keys->nkeys;
-    so->sortstates = palloc(nbatch * sizeof(Tuplesortstate*));
-    so->vslots = palloc(nbatch * sizeof(TupleTableSlot*));
-    so->mslots = palloc(nbatch * sizeof(TupleTableSlot*));
-
-    /* 创建元组描述符 */
-    so->base.tupdesc = CreateTemplateTupleDesc(2);
-    TupleDescInitEntry(so->base.tupdesc, (AttrNumber)1, "distance", FLOAT8OID, -1, 0);
-    TupleDescInitEntry(so->base.tupdesc, (AttrNumber)2, "heaptid", TIDOID, -1, 0);
-
-    /* 初始化每个查询的状态 */
-    for (int i = 0; i < nbatch; i++)
-    {
-        so->sortstates[i] = InitScanSortState(so->base.tupdesc);
-        so->vslots[i] = MakeSingleTupleTableSlot(so->base.tupdesc, &TTSOpsVirtual);
-        so->mslots[i] = MakeSingleTupleTableSlot(so->base.tupdesc, &TTSOpsMinimalTuple);
+    
+    /* 在临时上下文中分配批量扫描状态 */
+    so = (IvfflatBatchScanOpaque)MemoryContextAllocZero(tmpCtx, sizeof(IvfflatBatchScanOpaqueData));
+    if (!so) {
+        MemoryContextDelete(tmpCtx);
+        elog(ERROR, "ivfflatbatchbeginscan: 无法分配批量扫描状态内存");
     }
+    
+    /* 初始化基础信息 */
+    so->typeInfo = IvfflatGetTypeInfo(index);
+    so->dimensions = 0; /* 默认维度 */
+    so->tmpCtx = tmpCtx;
+    
+    /* 设置批量查询数据 */
+    so->batch_keys = batch_keys;
+    so->current_query_index = 0;
+    so->batch_processing_complete = false;
+    so->result_buffer = NULL;
+    
+#ifdef USE_CUDA
+    /* 初始化GPU相关字段 */
+    so->centers_uploaded = false;
+    so->cuda_ctx = NULL;
+    so->gpu_batch_distances = NULL;
+    
+    /* 检查CUDA是否可用 */
+    if (!cuda_is_available()) {
+        elog(ERROR, "批量向量搜索需要GPU支持，但CUDA不可用");
+    }
+    
+    /* 初始化CUDA上下文 - 暂时禁用 */
+    so->cuda_ctx = NULL;
+#endif
 
-    /* 设置缓冲区访问策略 */
-    // so->base.bas = GetAccessStrategy(BAS_BULKREAD);
-
-    /* 初始化列表队列 */
-    so->base.listQueue = pairingheap_allocate(CompareLists, scan);
-    so->base.listPages = palloc(so->base.maxProbes * sizeof(BlockNumber));
-    so->base.listIndex = 0;
-    so->base.lists = palloc(so->base.maxProbes * sizeof(IvfflatScanList));
-
-    MemoryContextSwitchTo(oldCtx);
-
+    /* 设置scan->opaque */
     scan->opaque = so;
 
+    elog(LOG, "ivfflatbatchbeginscan: 批量扫描初始化完成");
     return scan;
 }
 
-/*
- * 批量扫描获取多个元组
- */
 bool
-ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* values, bool* isnull, int max_tuples, int* returned_tuples)
+ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* values, bool* isnull, int max_tuples, int* returned_tuples, int k)
 {
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
-    int nbatch = so->batch_keys->nkeys;
-    int count = 0;
-
-    /* 确保向前扫描 */
-    Assert(ScanDirectionIsForward(dir));
-
-    /* 初始化返回数组 */
-    for (int i = 0; i < max_tuples; i++)
-    {
-        values[i] = (Datum)0;
-        isnull[i] = true;
+    
+    if (!so->batch_processing_complete) {
+        ProcessBatchQueriesGPU(scan, so->batch_keys, k);
+        so->batch_processing_complete = true;
     }
-
-    /* 处理每个查询 */
-    for (int i = 0; i < nbatch && count < max_tuples; i++)
-    {
-        /* 获取当前查询的排序状态 */
-        Tuplesortstate* sortstate = so->sortstates[i];
-        TupleTableSlot* mslot = so->mslots[i];
-        ItemPointer heaptid;
-        bool        isnull_local;
-
-        /* 如果还没有处理这个查询，先进行处理 */
-        if (so->current_key <= i)
-        {
-            Datum value = ScanKeyBatchGetVector(so->batch_keys, i);
-
-            /* 处理当前查询 */
-            GetScanLists(scan, value);
-            GetScanItems(scan, value);
-
-            so->current_key = i + 1;
+    
+    if (so->result_buffer) {
+        // 处理所有查询的结果，而不是只处理当前查询
+        int total_results = 0;
+        int nbatch = so->batch_keys->nkeys;
+        
+        for (int query_idx = 0; query_idx < nbatch; query_idx++) {
+            int query_results = 0;
+            GetBatchResults(so->result_buffer, query_idx, k, 
+                          values + total_results * 3, 
+                          isnull + total_results * 3, 
+                          &query_results);
+            total_results += query_results;
         }
-
-        /* 从排序状态获取元组 */
-        if (tuplesort_gettupleslot(sortstate, true, false, mslot, NULL))
-        {
-            heaptid = (ItemPointer)DatumGetPointer(slot_getattr(mslot, 2, &isnull_local));
-
-            /* 存储结果 */
-            values[count] = PointerGetDatum(heaptid);
-            isnull[count] = false;
-            count++;
-        }
+        
+        *returned_tuples = total_results;
+        return total_results > 0;
     }
-
-    *returned_tuples = count;
-    return (count > 0);
+    
+    return false;
 }
 
-/*
- * 结束批量扫描
- */
 void
 ivfflatbatchendscan(IndexScanDesc scan)
 {
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
-    int nbatch = so->batch_keys->nkeys;
 
-    /* 释放每个查询的排序状态和槽位 */
-    for (int i = 0; i < nbatch; i++)
-    {
-        tuplesort_end(so->sortstates[i]);
-        ExecDropSingleTupleTableSlot(so->vslots[i]);
-        ExecDropSingleTupleTableSlot(so->mslots[i]);
+#ifdef USE_CUDA
+    /* 清理CUDA资源（如果使用了） */
+    if (so->cuda_ctx) {
+        cuda_center_search_cleanup((CudaCenterSearchContext*)so->cuda_ctx);
     }
-
-    /* 释放数组 */
-    pfree(so->sortstates);
-    pfree(so->vslots);
-    pfree(so->mslots);
-
-    /* 释放基础资源 */
-    pairingheap_free(so->base.listQueue);
-    pfree(so->base.listPages);
-    pfree(so->base.lists);
-
-    MemoryContextDelete(so->base.tmpCtx);
-
-    pfree(so);
-    scan->opaque = NULL;
+#endif
+    
+    /* 删除临时内存上下文，自动清理所有在tmpCtx中分配的内存 */
+    if (so->tmpCtx) {
+        MemoryContextDelete(so->tmpCtx);
+    }
+    
+    /* 注意：so、batch_ctx、result_buffer 等都在 tmpCtx 中分配，
+     * 删除 tmpCtx 时会自动清理，无需手动释放 */
 }
+
+void
+ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
+{
+    IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
+    int nbatch = batch_keys->nkeys;
+    int i, j;
+    
+    /* 创建结果缓冲区 */
+    if (so->result_buffer == NULL) {
+        so->result_buffer = CreateBatchBuffer(nbatch, k, so->tmpCtx);
+    }
+    
+    /* 生成假结果 - 按列存储 */
+    for (i = 0; i < nbatch; i++) {
+        for (j = 0; j < k; j++) {
+            int idx = i * k + j;
+            
+            /* 按列存储：所有query_id连续，所有vector_id连续，所有distance连续 */
+            so->result_buffer->query_ids[idx] = i;
+            so->result_buffer->vector_ids[idx] = j;
+            so->result_buffer->distances[idx] = 0.1f + (float)idx * 0.1f;
+        }
+    }
+    
+    elog(LOG, "ProcessBatchQueriesGPU: 生成了 %d 个假结果", so->result_buffer->total_results);
+}
+
+void
+GetBatchResults(BatchBuffer* buffer, int query_index, int k, Datum* values, bool* isnull, int* returned_count)
+{
+    int i;
+    int count = 0;
+    
+    elog(LOG, "GetBatchResults: buffer=%p, query_index=%d, k=%d, total_results=%d", 
+         buffer, query_index, k, buffer ? buffer->total_results : 0);
+    
+    if (buffer == NULL || buffer->total_results == 0) {
+        *returned_count = 0;
+        return;
+    }
+    
+    /* 直接从按列存储的数组中获取结果 */
+    for (i = 0; i < buffer->total_results && count < k; i++) {
+        /* 检查是否是当前查询的结果 */
+        if (buffer->query_ids[i] == query_index) {
+            /* 边界检查 */
+            if (count >= k) {
+                break;
+            }
+            
+            /* 设置返回值：query_id, vector_id, distance */
+            values[count * 3 + 0] = Int32GetDatum(buffer->query_ids[i]); /* query_id */
+            values[count * 3 + 1] = Int32GetDatum(buffer->vector_ids[i]); /* vector_id */
+            values[count * 3 + 2] = Float8GetDatum(buffer->distances[i]); /* distance */
+            
+            /* 设置非空标志 */
+            isnull[count * 3 + 0] = false;
+            isnull[count * 3 + 1] = false;
+            isnull[count * 3 + 2] = false;
+            
+            count++;
+        }
+    }
+    
+    *returned_count = count;
+}
+
+
+BatchBuffer*
+CreateBatchBuffer(int n_queries, int k, MemoryContext ctx)
+{
+    BatchBuffer* buffer = MemoryContextAllocZero(ctx, sizeof(BatchBuffer));
+    int total_results = n_queries * k;
+    
+    /* 分配内存 - 按列存储，在指定上下文中分配 */
+    buffer->query_data = MemoryContextAlloc(ctx, n_queries * 128 * sizeof(float)); /* 假设128维 */
+    buffer->query_ids = MemoryContextAlloc(ctx, total_results * sizeof(int));
+    buffer->vector_ids = MemoryContextAlloc(ctx, total_results * sizeof(int));
+    buffer->distances = MemoryContextAlloc(ctx, total_results * sizeof(float));
+    
+    buffer->n_queries = n_queries;
+    buffer->k = k;
+    buffer->total_results = total_results;
+    buffer->mem_ctx = ctx;
+    
+    return buffer;
+}
+
+
+#ifdef USE_CUDA
+void
+GetScanLists_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
+{
+}
+
+void
+GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
+{
+}
+
+static int
+UploadCentersToGPU_Batch(IndexScanDesc scan)
+{
+        return 0;
+    }
+    
+static int
+UploadProbesToGPU_Batch(IndexScanDesc scan)
+{
+        return 0;
+    }
+#endif

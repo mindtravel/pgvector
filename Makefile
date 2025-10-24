@@ -21,18 +21,21 @@ OBJS = \
 	src/ivfinsert.o \
 	src/ivfkmeans.o \
 	src/ivfscan.o \
+	src/ivfscanbatch.o \
+	src/scanbatch.o \
 	src/ivfutils.o \
 	src/ivfvacuum.o \
 	src/sparsevec.o \
 	src/vector.o \
-	src/ivfjl.o \
-	src/vector_batch.o
+	src/vector_batch.o \
 	
 HEADERS = \
 	src/halfvec.h \
 	src/sparsevec.h \
 	src/vector.h \
-	src/vector_batch.h
+	src/vector_batch.h \
+	src/ivfscanbatch.h \
+	src/scanbatch.h
 
 TESTS = $(wildcard test/sql/*.sql)
 REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))

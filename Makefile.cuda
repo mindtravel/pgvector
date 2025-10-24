@@ -30,19 +30,21 @@ OBJS = \
 	src/ivfinsert.o \
 	src/ivfkmeans.o \
 	src/ivfscan.o \
+	src/ivfscanbatch.o \
 	src/ivfutils.o \
 	src/ivfvacuum.o \
 	src/sparsevec.o \
 	src/vector.o \
-	src/ivfjl.o \
-	src/vector_batch.o
+	src/vector_batch.o \
+	src/scanbatch.o
 
 # 头文件
 HEADERS = \
-src/halfvec.h \
-src/sparsevec.h \
-src/vector.h \
-src/vector_batch.h
+	src/halfvec.h \
+	src/sparsevec.h \
+	src/vector.h \
+	src/vector_batch.h \
+	src/ivfscanbatch.h
 
 # 测试
 TESTS = $(wildcard test/sql/*.sql)

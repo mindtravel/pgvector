@@ -1,3 +1,5 @@
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -7,6 +9,11 @@ extern int cuda_hello_world(void);
 * 测试cuda是否可用
 */ 
 extern bool cuda_is_available(void);
+
+/*
+* CUDA基本功能测试
+*/
+extern bool cuda_basic_test(void);
 
 /*
 * GPU向量搜索相关接口
@@ -41,6 +48,65 @@ extern int gpu_ivf_search_cosine_batch(
     int* indices,                  // 输出索引
     int k                          // 返回前k个结果
 );
+
+// GPU聚类中心距离计算相关结构体和函数
+typedef struct {
+    float* d_centers;        // GPU上的聚类中心数据
+    float* d_query_vector;   // GPU上的查询向量
+    float* d_batch_queries;  // GPU上的批量查询向量
+    float* d_distances;      // GPU上的距离结果
+    float* d_batch_distances; // GPU上的批量距离结果
+    float* h_centers_pinned; // 页锁定主机内存（零拷贝用）
+    
+    // Probes列表数据相关字段
+    float* d_probes_data;    // GPU上的probes列表向量数据
+    int* d_probes_offsets;   // GPU上的probes列表偏移量
+    int* d_probes_counts;    // GPU上的probes列表计数
+    int num_probes_lists;    // probes列表数量
+    int total_probes_vectors; // 总probes向量数量
+    bool probes_uploaded;    // probes数据是否已上传
+    
+    int num_centers;         // 聚类中心数量
+    int dimensions;          // 向量维度
+    int max_batch_size;      // 最大批量大小
+    bool initialized;        // 是否已初始化
+    bool use_zero_copy;      // 是否使用零拷贝
+    bool batch_support;      // 是否支持批量处理
+} CudaCenterSearchContext;
+
+// 函数声明
+extern CudaCenterSearchContext* cuda_center_search_init(int num_centers, int dimensions, bool use_zero_copy);
+extern void cuda_center_search_cleanup(CudaCenterSearchContext* ctx);
+extern int cuda_compute_center_distances(CudaCenterSearchContext* ctx, 
+                                        const float* query_vector, 
+                                        float* distances);
+extern int cuda_compute_batch_center_distances(CudaCenterSearchContext* ctx,
+                                             const float* batch_query_vectors,
+                                             int num_queries,
+                                             float* batch_distances);
+extern int cuda_compute_batch_cosine_distances(CudaCenterSearchContext* ctx,
+                                             const float* batch_query_vectors,
+                                             int num_queries,
+                                             float* batch_distances);
+extern int cuda_upload_centers(CudaCenterSearchContext* ctx, 
+                              const float* centers_data);
+extern int cuda_upload_centers_zero_copy(CudaCenterSearchContext* ctx, 
+                                        const float* centers_data);
+extern int cuda_set_zero_copy_mode(CudaCenterSearchContext* ctx, bool enable);
+
+// Probes列表数据上传和处理相关函数
+extern int cuda_upload_probes_data(CudaCenterSearchContext* ctx,
+                                  const float* probes_data,
+                                  const int* probes_offsets,
+                                  const int* probes_counts,
+                                  int num_probes_lists,
+                                  int total_probes_vectors,
+                                  int dimensions);
+extern int cuda_compute_batch_probes_distances(CudaCenterSearchContext* ctx,
+                                             const float* batch_query_vectors,
+                                             int num_queries,
+                                             float* batch_distances);
+
 #ifdef __cplusplus
 }
 #endif

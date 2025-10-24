@@ -58,6 +58,5 @@ Datum batch_vector_negative_inner_product(PG_FUNCTION_ARGS);
 
 Datum batch_knn_search(PG_FUNCTION_ARGS);
 Datum batch_range_search(PG_FUNCTION_ARGS);
-Datum batch_knn_operator(PG_FUNCTION_ARGS);  /* 新增：批量KNN操作符函数 */
 
 #endif /* VECTOR_BATCH_H */

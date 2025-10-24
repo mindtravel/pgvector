@@ -1302,3 +1302,18 @@ sparsevec_to_vector(PG_FUNCTION_ARGS)
 
 	PG_RETURN_POINTER(result);
 }
+
+/*
+ * CUDA可用性检查函数 - 调用cuda_wrapper.cu中的cuda_is_available()
+ */
+FUNCTION_PREFIX PG_FUNCTION_INFO_V1(cuda_is_available_sql);
+Datum
+cuda_is_available_sql(PG_FUNCTION_ARGS)
+{
+#ifdef USE_CUDA
+	extern bool cuda_is_available(void);
+	PG_RETURN_BOOL(cuda_is_available());
+#else
+	PG_RETURN_BOOL(false);
+#endif
+}

@@ -14,6 +14,20 @@
 #include "vector.h"
 #include "vector_batch.h"
 
+
+#ifdef USE_CUDA
+#include "cuda/cuda_wrapper.h"
+#endif
+
+/* 批量扫描结果结构 */
+typedef struct BatchScanResult
+{
+    int query_id;      /* 查询ID */
+    int row_id;        /* 行ID */
+    float8 distance;   /* 距离 */
+    Datum embedding;   /* 向量数据 */
+} BatchScanResult;
+
 /* declare I/O functions from vector.c so we can use DirectFunctionCall */
 extern Datum vector_in(PG_FUNCTION_ARGS);
 extern Datum vector_out(PG_FUNCTION_ARGS);
@@ -110,14 +124,10 @@ VectorBatchGetVectorCopy(VectorBatch *arr, int idx)
 Datum
 vector_batch_in(PG_FUNCTION_ARGS)
 {
-
 	char	   *str = PG_GETARG_CSTRING(0);
-	Oid			typioparam = PG_GETARG_OID(1);
-	int32		typmod = PG_GETARG_INT32(2);
 	VectorBatch *result;
 	int			count = 0, dim = 0;
 	char	   *ptr;
-	char	   *token;
 	Vector	   *vec;
 	int			i;
 
@@ -312,6 +322,13 @@ vector_batch_from_array(PG_FUNCTION_ARGS)
 	bool	   *nulls;
 	int			nelems;
 	int			i;
+	
+	/* 获取第一个向量的维度 */
+	Vector *first_vec;
+	int dim;
+	Vector *vec;
+
+	elog(LOG, "vector_batch_from_array: 开始执行");
 
 	if (ARR_NDIM(array) != 1)
 		ereport(ERROR,
@@ -326,9 +343,9 @@ vector_batch_from_array(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("vector array cannot be empty")));
 
-	/* 获取第一个向量的维度 */
-	Vector *first_vec = DatumGetVector(elems[0]);
-	int dim = first_vec->dim;
+
+	first_vec = DatumGetVector(elems[0]);
+	dim = first_vec->dim;
 
 	result = InitVectorBatch(nelems, dim);
 
@@ -339,7 +356,7 @@ vector_batch_from_array(PG_FUNCTION_ARGS)
 					(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 					 errmsg("vector array cannot contain null values")));
 
-		Vector *vec = DatumGetVector(elems[i]);
+		vec = DatumGetVector(elems[i]);
 		VectorBatchSetVector(result, i, vec);
 	}
 
@@ -361,15 +378,100 @@ batch_l2_distance(PG_FUNCTION_ARGS)
 	Datum	   *distances;
 	int			i;
 
-	// /* 调试输出：显示接收到的向量个数和维度 */
-	// elog(LOG, "DEBUG: batch_l2_distance: 接收到 %d 个查询向量，每个向量 %d 维",
-	// 	queries->count, queries->dim);
+	/* 调试输出：显示接收到的向量个数和维度 */
+	elog(LOG, "batch_l2_distance: 开始执行，查询向量数量=%d，维度=%d", 
+		 queries->count, queries->dim);
 
 	if (queries->dim != target->dim)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_EXCEPTION),
 				 errmsg("different vector dimensions %d and %d", queries->dim, target->dim)));
 
+#ifdef USE_CUDA
+	/* 尝试使用GPU批量计算 */
+	elog(LOG, "batch_l2_distance: 尝试使用GPU批量计算");
+	
+	/* 检查CUDA是否可用 */
+	if (cuda_is_available()) {		
+		/* 准备批量查询数据 */
+		float *batch_query_data;
+		float *target_data;
+		float *gpu_distances;
+		Vector *query;
+		CudaCenterSearchContext* ctx;
+		
+		elog(LOG, "batch_l2_distance: CUDA可用，开始GPU批量计算");
+
+		batch_query_data = (float *) palloc(queries->count * queries->dim * sizeof(float));
+		target_data = (float *) palloc(queries->dim * sizeof(float));
+		gpu_distances = (float *) palloc(queries->count * sizeof(float));
+		
+		/* 复制查询向量数据 */
+		for (i = 0; i < queries->count; i++) {
+			query = VectorBatchGetVector(queries, i);
+			memcpy(&batch_query_data[i * queries->dim], query->x, queries->dim * sizeof(float));
+		}
+		
+		/* 复制目标向量数据 */
+		memcpy(target_data, target->x, queries->dim * sizeof(float));
+		
+		elog(LOG, "batch_l2_distance: 数据准备完成，开始GPU批量计算");
+		
+		/* 创建GPU上下文 - 使用批量支持 */
+		ctx = cuda_center_search_init(queries->count, queries->dim, false);
+		if (ctx) {
+			elog(LOG, "batch_l2_distance: GPU上下文创建成功");
+			
+			/* 上传查询向量数据到GPU */
+			if (cuda_upload_centers(ctx, batch_query_data) == 0) {
+				elog(LOG, "batch_l2_distance: 查询向量数据上传成功");
+				
+				/* 使用CUDA Wrapper中的批量距离计算函数 */
+				if (cuda_compute_batch_center_distances(ctx, target_data, 1, gpu_distances) == 0) {
+					elog(LOG, "batch_l2_distance: GPU批量距离计算成功");
+					
+					/* 转换结果 */
+					distances = palloc(sizeof(Datum) * queries->count);
+					for (i = 0; i < queries->count; i++) {
+						distances[i] = Float8GetDatum(gpu_distances[i]);
+					}
+					
+					result = construct_array(distances, queries->count, FLOAT8OID,
+											 sizeof(float8), FLOAT8PASSBYVAL, 'd');
+					
+					/* 清理GPU资源 */
+					cuda_center_search_cleanup(ctx);
+					pfree(batch_query_data);
+					pfree(target_data);
+					pfree(gpu_distances);
+					pfree(distances);
+					
+					elog(LOG, "batch_l2_distance: GPU批量计算完成，返回结果");
+					PG_RETURN_ARRAYTYPE_P(result);
+				} else {
+					elog(WARNING, "batch_l2_distance: GPU批量距离计算失败，回退到CPU计算");
+				}
+			} else {
+				elog(WARNING, "batch_l2_distance: 查询向量数据上传失败，回退到CPU计算");
+			}
+			
+			cuda_center_search_cleanup(ctx);
+		} else {
+			elog(WARNING, "batch_l2_distance: GPU上下文创建失败，回退到CPU计算");
+		}
+		
+		pfree(batch_query_data);
+		pfree(target_data);
+		pfree(gpu_distances);
+	} else {
+		elog(LOG, "batch_l2_distance: CUDA不可用，使用CPU计算");
+	}
+#else
+	elog(LOG, "batch_l2_distance: 未编译CUDA支持，使用CPU计算");
+#endif
+
+	/* CPU计算（回退方案） */
+	elog(LOG, "batch_l2_distance: 开始CPU计算");
 	distances = palloc(sizeof(Datum) * queries->count);
 
 	for (i = 0; i < queries->count; i++)
@@ -391,6 +493,7 @@ batch_l2_distance(PG_FUNCTION_ARGS)
 							 sizeof(float8), FLOAT8PASSBYVAL, 'd');
 
 	pfree(distances);
+	elog(LOG, "batch_l2_distance: CPU计算完成，返回结果");
 	PG_RETURN_ARRAYTYPE_P(result);
 }
 
@@ -510,90 +613,6 @@ batch_knn_search(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-/*
- * 批量KNN操作符 <<->> 
- * 输入：vector_batch 和 vector
- * 输出：SETOF record (query_id, embedding_id, distance)
- * 行为：对每个查询向量，计算与目标向量的距离，返回所有结果
- */
-Datum
-batch_knn_operator(PG_FUNCTION_ARGS)
-{
-	VectorBatch *queries = (VectorBatch *) PG_GETARG_POINTER(0);
-	Vector	   *target = PG_GETARG_VECTOR_P(1);
-	FuncCallContext *funcctx;
-	BatchQueryResult *result;
-	
-	/* 第一次调用时初始化 */
-	if (SRF_IS_FIRSTCALL())
-	{
-		MemoryContext oldcontext;
-		TupleDesc tupdesc;
-		
-		/* 创建函数上下文 */
-		funcctx = SRF_FIRSTCALL_INIT();
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-		
-		/* 创建元组描述符 */
-		tupdesc = CreateTemplateTupleDesc(3);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "query_id", INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "embedding_id", INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "distance", FLOAT8OID, -1, 0);
-		
-		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
-		
-		/* 分配结果数组 */
-		funcctx->max_calls = queries->count;
-		funcctx->user_fctx = palloc(sizeof(BatchQueryResult) * queries->count);
-		
-		/* 计算所有距离并存储结果 */
-		result = (BatchQueryResult *) funcctx->user_fctx;
-		for (int i = 0; i < queries->count; i++)
-		{
-			Vector *query = VectorBatchGetVector(queries, i);
-			float8 distance = 0.0;
-			
-			/* 计算L2距离 */
-			for (int j = 0; j < query->dim; j++)
-			{
-				float8 diff = query->x[j] - target->x[j];
-				distance += diff * diff;
-			}
-			distance = sqrt(distance);
-			
-			/* 存储结果 */
-			result[i].query_id = i;
-			result[i].heap_tid = NULL; /* 这里暂时设为NULL，实际使用时应该传递真实的TID */
-			result[i].distance = distance;
-		}
-		
-		MemoryContextSwitchTo(oldcontext);
-	}
-	
-	/* 后续调用时返回结果 */
-	funcctx = SRF_PERCALL_SETUP();
-	result = (BatchQueryResult *) funcctx->user_fctx;
-	
-	if (funcctx->call_cntr < funcctx->max_calls)
-	{
-		Datum values[3];
-		bool nulls[3];
-		HeapTuple tuple;
-		
-		/* 构建元组 */
-		MemSet(nulls, 0, sizeof(nulls));
-		values[0] = Int32GetDatum(result[funcctx->call_cntr].query_id);
-		values[1] = Int32GetDatum(funcctx->call_cntr); /* 临时使用call_cntr作为embedding_id */
-		values[2] = Float8GetDatum(result[funcctx->call_cntr].distance);
-		
-		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
-		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
-	}
-	else
-	{
-		SRF_RETURN_DONE(funcctx);
-	}
-}
 
 /*
  * 批量范围查询 - 占位实现，防止扩展加载失败
@@ -608,3 +627,4 @@ batch_range_search(PG_FUNCTION_ARGS)
 
 	PG_RETURN_NULL();
 }
+

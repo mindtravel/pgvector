@@ -19,7 +19,7 @@
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "vector.h"
-#include "ivfjl.h"	
+// #include "ivfjl.h"	
 
 #if PG_VERSION_NUM >= 140000
 #include "utils/backend_progress.h"
@@ -38,12 +38,12 @@
 #define PARALLEL_KEY_QUERY_TEXT			UINT64CONST(0xA000000000000004)
 
 /* Forward declarations for IVFJL functions */
-static void IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
-                           IvfjlBuildState * buildstate, ForkNumber forkNum);
-static void IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo);
-static void IvfjlComputeCenters(IvfjlBuildState * buildstate);
-static void IvfjlCreateMetaPage(Relation index, int dimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
-static void IvfjlFreeBuildState(IvfjlBuildState * buildstate);
+// static void IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
+//                            IvfjlBuildState * buildstate, ForkNumber forkNum);
+// static void IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo);
+// static void IvfjlComputeCenters(IvfjlBuildState * buildstate);
+// static void IvfjlCreateMetaPage(Relation index, int dimensions, int lists, ForkNumber forkNum, JLProjection *jlproj);
+// static void IvfjlFreeBuildState(IvfjlBuildState * buildstate);
 
 /*
  * Add sample
@@ -1054,174 +1054,174 @@ ivfflatbuildempty(Relation index)
 }
 
 
-IndexBuildResult *ivfjlbuild(Relation heap, Relation index, IndexInfo *indexInfo) {
-    IndexBuildResult *result;
-    IvfjlBuildState buildstate;
+// IndexBuildResult *ivfjlbuild(Relation heap, Relation index, IndexInfo *indexInfo) {
+//     IndexBuildResult *result;
+//     IvfjlBuildState buildstate;
 
-    IvfjlBuildIndex(heap, index, indexInfo, &buildstate, MAIN_FORKNUM);
+//     IvfjlBuildIndex(heap, index, indexInfo, &buildstate, MAIN_FORKNUM);
 
-    result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
-    result->heap_tuples = buildstate.base.reltuples;
-    result->index_tuples = buildstate.base.indtuples;
+//     result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
+//     result->heap_tuples = buildstate.base.reltuples;
+//     result->index_tuples = buildstate.base.indtuples;
 
-    return result;
-}
-
-/*
- * Build the index for an unlogged table with IVFJL
- */
-void
-ivfjlbuildempty(Relation index)
-{
-    IndexInfo  *indexInfo = BuildIndexInfo(index);
-    IvfjlBuildState buildstate;
-
-    IvfjlBuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
-}
-
-/*
- * Build the IVFJL index
- */
-static void
-IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
-               IvfjlBuildState * buildstate, ForkNumber forkNum)
-{
-    IvfjlInitBuildState(buildstate, heap, index, indexInfo);
-
-    IvfjlComputeCenters(buildstate);
-
-    /* Create pages */
-    IvfjlCreateMetaPage(index, buildstate->base.dimensions, buildstate->base.lists, forkNum, &buildstate->jlproj);
-    CreateListPages(index, buildstate->base.centers, buildstate->base.dimensions, buildstate->base.lists, forkNum, &buildstate->base.listInfo);
-    CreateEntryPages(&buildstate->base, forkNum);
-
-    /* Write WAL for initialization fork since GenericXLog functions do not */
-    if (forkNum == INIT_FORKNUM)
-        log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocksInFork(index, forkNum), true);
-
-    IvfjlFreeBuildState(buildstate);
-}
-
-/*
- * Initialize the IVFJL build state
- */
-static void
-IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo)
-{
-    /* Initialize the base ivfflat build state */
-    InitBuildState(&buildstate->base, heap, index, indexInfo);
-    
-    /* Initialize JL projection - set to zero initially */
-    memset(&buildstate->jlproj, 0, sizeof(JLProjection));
-}
-
-/*
- * Compute centers for IVFJL with JL projection
- */
-static void
-IvfjlComputeCenters(IvfjlBuildState * buildstate)
-{
-    int numSamples;
-
-    pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_IVFFLAT_PHASE_KMEANS);
-
-    /* Target 50 samples per list, with at least 10000 samples */
-    numSamples = buildstate->base.lists * 50;
-    if (numSamples < 10000)
-        numSamples = 10000;
-
-    /* Skip samples for unlogged table */
-    if (buildstate->base.heap == NULL)
-        numSamples = 1;
-
-    /* Sample rows with original dimensions first */
-    buildstate->base.samples = VectorArrayInit(numSamples, buildstate->base.dimensions, buildstate->base.centers->itemsize);
-    if (buildstate->base.heap != NULL)
-    {
-        SampleRows(&buildstate->base);
-
-        if (buildstate->base.samples->length < buildstate->base.lists)
-        {
-            ereport(NOTICE,
-                    (errmsg("ivfjl index created with little data"),
-                     errdetail("This will result in poor performance."),
-                     errhint("Consider increasing the number of sample rows.")));
-        }
-    }
-
-    /* Generate JL projection matrix with original dimensions */
-    GenerateJLProjection(&buildstate->jlproj, buildstate->base.dimensions, IVFJL_REDUCED_DIM, CurrentMemoryContext);
-
-    /* Apply JL projection to samples */
-    for (int i = 0; i < buildstate->base.samples->length; i++)
-    {
-        Vector *vec = (Vector *)VectorArrayGet(buildstate->base.samples, i);
-        float *dst = (float *)palloc(sizeof(float) * IVFJL_REDUCED_DIM);
-        
-        /* Project the vector */
-        JLProjectVector(&buildstate->jlproj, vec->x, dst);
-        
-        /* Replace original vector data with projected data */
-        memcpy(vec->x, dst, sizeof(float) * IVFJL_REDUCED_DIM);
-        vec->dim = IVFJL_REDUCED_DIM;
-        
-        pfree(dst);
-    }
-
-    /* Update dimensions to reduced dimensions */
-    buildstate->base.dimensions = IVFJL_REDUCED_DIM;
-    
-    /* Reinitialize centers array with reduced dimensions */
-    VectorArrayFree(buildstate->base.centers);
-    buildstate->base.centers = VectorArrayInit(buildstate->base.lists, IVFJL_REDUCED_DIM, 
-                                              buildstate->base.typeInfo->itemSize(IVFJL_REDUCED_DIM));
-
-    /* Perform k-means clustering on projected samples */
-    IvfflatBench("k-means", IvfflatKmeans(buildstate->base.index, buildstate->base.samples, buildstate->base.centers, buildstate->base.typeInfo));
-
-    /* Free samples */
-    VectorArrayFree(buildstate->base.samples);
-    buildstate->base.samples = NULL;
-}
-
-// /*
-//  * Create meta page for IVFJL with JL projection data
-//  */
-// static void
-// IvfjlCreateMetaPage(Relation index, int dimensions, int lists, ForkNumber forkNum, JLProjection *jlproj)
-// {
-//     Buffer buf;
-//     Page page;
-//     GenericXLogState *state;
-//     IvfflatMetaPage metap;
-
-//     buf = IvfflatNewBuffer(index, forkNum);
-//     IvfflatInitRegisterPage(index, &buf, &page, &state);
-
-//     /* Initialize meta page */
-//     metap = IvfflatPageGetMeta(page);
-//     metap->magicNumber = IVFFLAT_MAGIC_NUMBER;
-//     metap->version = IVFFLAT_VERSION;
-//     metap->dimensions = dimensions;
-//     metap->lists = lists;
-//     metap->lastUsedOffset = 
-//         ((char *) metap + sizeof(IvfflatMetaPageData)) - (char *) page;
-
-//     /* Write JL projection data to meta page */
-//     WriteJLToMetaPage(page, jlproj);
-
-//     IvfflatCommitBuffer(buf, state);
+//     return result;
 // }
 
 // /*
-//  * Free resources for IVFJL build state
+//  * Build the index for an unlogged table with IVFJL
+//  */
+// void
+// ivfjlbuildempty(Relation index)
+// {
+//     IndexInfo  *indexInfo = BuildIndexInfo(index);
+//     IvfjlBuildState buildstate;
+
+//     IvfjlBuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
+// }
+
+// /*
+//  * Build the IVFJL index
 //  */
 // static void
-// IvfjlFreeBuildState(IvfjlBuildState * buildstate)
+// IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
+//                IvfjlBuildState * buildstate, ForkNumber forkNum)
 // {
-//     /* Free JL projection */
-//     FreeJLProjection(&buildstate->jlproj);
-    
-//     /* Free base build state */
-//     FreeBuildState(&buildstate->base);
+//     IvfjlInitBuildState(buildstate, heap, index, indexInfo);
+
+//     IvfjlComputeCenters(buildstate);
+
+//     /* Create pages */
+//     IvfjlCreateMetaPage(index, buildstate->base.dimensions, buildstate->base.lists, forkNum, &buildstate->jlproj);
+//     CreateListPages(index, buildstate->base.centers, buildstate->base.dimensions, buildstate->base.lists, forkNum, &buildstate->base.listInfo);
+//     CreateEntryPages(&buildstate->base, forkNum);
+
+//     /* Write WAL for initialization fork since GenericXLog functions do not */
+//     if (forkNum == INIT_FORKNUM)
+//         log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocksInFork(index, forkNum), true);
+
+//     IvfjlFreeBuildState(buildstate);
 // }
+
+// /*
+//  * Initialize the IVFJL build state
+//  */
+// static void
+// IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo)
+// {
+//     /* Initialize the base ivfflat build state */
+//     InitBuildState(&buildstate->base, heap, index, indexInfo);
+    
+//     /* Initialize JL projection - set to zero initially */
+//     memset(&buildstate->jlproj, 0, sizeof(JLProjection));
+// }
+
+// /*
+//  * Compute centers for IVFJL with JL projection
+//  */
+// static void
+// IvfjlComputeCenters(IvfjlBuildState * buildstate)
+// {
+//     int numSamples;
+
+//     pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_IVFFLAT_PHASE_KMEANS);
+
+//     /* Target 50 samples per list, with at least 10000 samples */
+//     numSamples = buildstate->base.lists * 50;
+//     if (numSamples < 10000)
+//         numSamples = 10000;
+
+//     /* Skip samples for unlogged table */
+//     if (buildstate->base.heap == NULL)
+//         numSamples = 1;
+
+//     /* Sample rows with original dimensions first */
+//     buildstate->base.samples = VectorArrayInit(numSamples, buildstate->base.dimensions, buildstate->base.centers->itemsize);
+//     if (buildstate->base.heap != NULL)
+//     {
+//         SampleRows(&buildstate->base);
+
+//         if (buildstate->base.samples->length < buildstate->base.lists)
+//         {
+//             ereport(NOTICE,
+//                     (errmsg("ivfjl index created with little data"),
+//                      errdetail("This will result in poor performance."),
+//                      errhint("Consider increasing the number of sample rows.")));
+//         }
+//     }
+
+//     /* Generate JL projection matrix with original dimensions */
+//     GenerateJLProjection(&buildstate->jlproj, buildstate->base.dimensions, IVFJL_REDUCED_DIM, CurrentMemoryContext);
+
+//     /* Apply JL projection to samples */
+//     for (int i = 0; i < buildstate->base.samples->length; i++)
+//     {
+//         Vector *vec = (Vector *)VectorArrayGet(buildstate->base.samples, i);
+//         float *dst = (float *)palloc(sizeof(float) * IVFJL_REDUCED_DIM);
+        
+//         /* Project the vector */
+//         JLProjectVector(&buildstate->jlproj, vec->x, dst);
+        
+//         /* Replace original vector data with projected data */
+//         memcpy(vec->x, dst, sizeof(float) * IVFJL_REDUCED_DIM);
+//         vec->dim = IVFJL_REDUCED_DIM;
+        
+//         pfree(dst);
+//     }
+
+//     /* Update dimensions to reduced dimensions */
+//     buildstate->base.dimensions = IVFJL_REDUCED_DIM;
+    
+//     /* Reinitialize centers array with reduced dimensions */
+//     VectorArrayFree(buildstate->base.centers);
+//     buildstate->base.centers = VectorArrayInit(buildstate->base.lists, IVFJL_REDUCED_DIM, 
+//                                               buildstate->base.typeInfo->itemSize(IVFJL_REDUCED_DIM));
+
+//     /* Perform k-means clustering on projected samples */
+//     IvfflatBench("k-means", IvfflatKmeans(buildstate->base.index, buildstate->base.samples, buildstate->base.centers, buildstate->base.typeInfo));
+
+//     /* Free samples */
+//     VectorArrayFree(buildstate->base.samples);
+//     buildstate->base.samples = NULL;
+// }
+
+// // /*
+// //  * Create meta page for IVFJL with JL projection data
+// //  */
+// // static void
+// // IvfjlCreateMetaPage(Relation index, int dimensions, int lists, ForkNumber forkNum, JLProjection *jlproj)
+// // {
+// //     Buffer buf;
+// //     Page page;
+// //     GenericXLogState *state;
+// //     IvfflatMetaPage metap;
+
+// //     buf = IvfflatNewBuffer(index, forkNum);
+// //     IvfflatInitRegisterPage(index, &buf, &page, &state);
+
+// //     /* Initialize meta page */
+// //     metap = IvfflatPageGetMeta(page);
+// //     metap->magicNumber = IVFFLAT_MAGIC_NUMBER;
+// //     metap->version = IVFFLAT_VERSION;
+// //     metap->dimensions = dimensions;
+// //     metap->lists = lists;
+// //     metap->lastUsedOffset = 
+// //         ((char *) metap + sizeof(IvfflatMetaPageData)) - (char *) page;
+
+// //     /* Write JL projection data to meta page */
+// //     WriteJLToMetaPage(page, jlproj);
+
+// //     IvfflatCommitBuffer(buf, state);
+// // }
+
+// // /*
+// //  * Free resources for IVFJL build state
+// //  */
+// // static void
+// // IvfjlFreeBuildState(IvfjlBuildState * buildstate)
+// // {
+// //     /* Free JL projection */
+// //     FreeJLProjection(&buildstate->jlproj);
+    
+// //     /* Free base build state */
+// //     FreeBuildState(&buildstate->base);
+// // }
