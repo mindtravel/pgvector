@@ -42,8 +42,11 @@ echo "运行测试..."
 # echo "运行 fusion_cos_topk 测试..."
 # ./test_fusion_cos_topk/test_fusion_cos_topk $1
 # echo "=================================="
-echo "运行 warp sort 测试..."
-./test_warpsort/test_warpsort
+# echo "运行 warp sort 测试..."
+# ./test_warpsort/test_warpsort
+# echo "=================================="
+echo "运行 stream pass data 测试..."
+./test_stream_pass_data/test_stream_pass_data
 echo "=================================="
 # echo "运行 warp sort 测试..."
 # ./test_bitonic/test_bitonic

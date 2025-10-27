@@ -40,6 +40,7 @@ add_subdirectory(test_cos_distance)
 add_subdirectory(test_fusion_cos_topk)
 add_subdirectory(test_warpsort)
 add_subdirectory(test_bitonic)
+add_subdirectory(test_stream_pass_data)
 
 # 统一测试目标
 add_custom_target(run_all_tests
@@ -52,5 +53,6 @@ add_custom_target(run_all_tests
         test_fusion_cos_topk
         test_warpsort
         test_bitonic
+        test_stream_pass_data
     COMMENT "运行所有单元测试"
 )
