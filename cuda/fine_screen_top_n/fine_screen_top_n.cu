@@ -132,14 +132,14 @@ __global__ void cluster_l2_distance_kernel(
         int query_idx = query_start + q;
         
         // 为当前query维护局部topk
-        float query_local_topk_dist[n_topn];
-        int query_local_topk_idx[n_topn];
+        // float query_local_topk_dist[n_topn];
+        // int query_local_topk_idx[n_topn];
         
-        // 初始化当前query的局部topk
-        for (int i = 0; i < n_topn; i++) {
-            query_local_topk_dist[i] = FLT_MAX;
-            query_local_topk_idx[i] = -1;
-        }
+        // // 初始化当前query的局部topk
+        // for (int i = 0; i < n_topn; i++) {
+        //     query_local_topk_dist[i] = FLT_MAX;
+        //     query_local_topk_idx[i] = -1;
+        // }
         
         // 计算当前query与cluster中向量的L2距离
         for (int vec_idx = start_vec; vec_idx < end_vec; vec_idx++) {
@@ -239,7 +239,7 @@ void fine_screen_top_n(
     cudaMalloc(&d_query_cluster_group, size_query_cluster_group);
     cudaMalloc(&d_cluster_query_offset, size_cluster_query_offset);
     cudaMalloc(&d_cluster_query_data, size_cluster_query_data);
-    //cudaMalloc(&d_cluster_map, size_cluster_map);
+    cudaMalloc(&d_cluster_map, size_cluster_map);
     cudaMalloc(&d_cluster_vector_index, size_cluster_vector_index);
     cudaMalloc(&d_cluster_vector_num, size_cluster_vector_num);
     cudaMalloc(&d_cluster_vector, size_cluster_vector);
@@ -323,7 +323,7 @@ void fine_screen_top_n(
     cudaFree(d_query_cluster_group);
     cudaFree(d_cluster_query_offset);
     cudaFree(d_cluster_query_data);
-    //cudaFree(d_cluster_map);
+    cudaFree(d_cluster_map);
     cudaFree(d_cluster_vector_index);
     cudaFree(d_cluster_vector_num);
     cudaFree(d_cluster_vector);
