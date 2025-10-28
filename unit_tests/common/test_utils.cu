@@ -184,9 +184,9 @@ void* generate_cluster_query_data(int* query_cluster_group, int n_query, int k, 
             int query_count = it->second.size();
             
             // 获取向量数量（不实际分配内存）
-            float** dummy_ptr = nullptr;
+            float* dummy_ptr = nullptr;
             int vector_num = 0;
-            get_cluster_vector(cluster_id, dummy_ptr, &vector_num);
+            get_cluster_vector(cluster_id, &dummy_ptr, &vector_num);
             
             total_queries_in_batch += query_count;
             total_vectors_in_batch += vector_num;
@@ -221,7 +221,7 @@ void* generate_cluster_query_data(int* query_cluster_group, int n_query, int k, 
             }
             
             // 获取向量数据
-            float** cluster_vector_ptr = nullptr;
+            float* cluster_vector_ptr = nullptr;
             int vector_num = 0;
             get_cluster_vector(cluster_id, &cluster_vector_ptr, &vector_num);
             
@@ -241,25 +241,21 @@ void* generate_cluster_query_data(int* query_cluster_group, int n_query, int k, 
     return (void*)cluster_query_data_array;
 }
 
-void get_cluster_vector(int cluster_id, float*** cluster_vector, int* vector_num) {
+void get_cluster_vector(int cluster_id, float** cluster_vector, int* vector_num) {
     // 空方法，从索引里面获取原始向量
-    // 这里需要根据实际的向量存储方式来实现
-    // 示例实现：
+    // 简化版本：直接返回一个连续的向量数组
     
     // 假设每个cluster有随机数量的向量（50-200个）
     *vector_num = 50 + (rand() % 151);
     
-    // 分配向量数据内存
-    *cluster_vector = (float**)malloc(*vector_num * sizeof(float*));
-    
-    // 为每个向量分配内存（假设向量维度为128）
+    // 分配连续内存：所有向量连续存储
     int vector_dim = 128;
+    *cluster_vector = (float*)malloc(*vector_num * vector_dim * sizeof(float));
+    
+    // 填充随机向量数据
     for (int i = 0; i < *vector_num; i++) {
-        (*cluster_vector)[i] = (float*)malloc(vector_dim * sizeof(float));
-        
-        // 填充随机向量数据
         for (int j = 0; j < vector_dim; j++) {
-            (*cluster_vector)[i][j] = (float)rand() / RAND_MAX * 2.0f - 1.0f; // [-1, 1]
+            (*cluster_vector)[i * vector_dim + j] = (float)rand() / RAND_MAX * 2.0f - 1.0f;
         }
     }
 }
