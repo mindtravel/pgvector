@@ -6,8 +6,8 @@
 #include <algorithm>
 #include <set>
 
-#include "../../cuda/fine_screen_top_n/fine_screen_top_n.cuh"
-#include "../../cuda/pch.h"
+#include "../cuda/fine_screen_top_n/fine_screen_top_n.cuh"
+#include "../cuda/pch.h"
 #include "../common/test_utils.cuh"
 
 #define EPSILON 1e-2

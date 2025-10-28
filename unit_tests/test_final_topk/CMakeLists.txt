@@ -20,7 +20,7 @@ set(SOURCES
 )
 
 # 创建可执行文件
-cuda_add_executable(test_final_topk ${SOURCES})
+add_executable(test_final_topk ${SOURCES})
 
 # 链接CUDA库
 target_link_libraries(test_final_topk 
@@ -32,4 +32,5 @@ target_link_libraries(test_final_topk
 # 编译选项
 set_target_properties(test_final_topk PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
