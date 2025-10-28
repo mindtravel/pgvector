@@ -18,11 +18,103 @@ void cpu_fine_screen_top_n(
     int* cluster_map,
     int* h_cluster_vector_index, int* h_cluster_vector_num, float** h_cluster_vector,
     int n_query, int n_cluster, int distinct_cluster_count, int n_dim, int n_topn, int max_cluster_id, int tol_vector,
+    int max_cluster_vector_count,  // 新增：最大聚类向量数量
     int* h_query_topn_index, float* h_query_topn_dist
 ) {
-    // TODO: 实现CPU版本的精筛逻辑
-    // 暂时用空实现，等GPU逻辑完成后补充
-    printf("CPU版本精筛topn计算 - 暂时空实现\n");
+    // 计算query向量的L2范数
+    float* query_norm = (float*)malloc(n_query * sizeof(float));
+    for (int q = 0; q < n_query; q++) {
+        float norm_squared = 0.0f;
+        for (int d = 0; d < n_dim; d++) {
+            float val = h_query_group[q * n_dim + d];
+            norm_squared += val * val;
+        }
+        query_norm[q] = sqrtf(norm_squared);
+    }
+    
+    // 计算cluster向量的L2范数
+    float* cluster_vector_norm = (float*)malloc(tol_vector * sizeof(float));
+    for (int v = 0; v < tol_vector; v++) {
+        float norm_squared = 0.0f;
+        for (int d = 0; d < n_dim; d++) {
+            float val = h_cluster_vector[v][d];
+            norm_squared += val * val;
+        }
+        cluster_vector_norm[v] = sqrtf(norm_squared);
+    }
+    
+    // 初始化top-k结果
+    for (int q = 0; q < n_query; q++) {
+        for (int k = 0; k < n_topn; k++) {
+            h_query_topn_index[q * n_topn + k] = -1;
+            h_query_topn_dist[q * n_topn + k] = FLT_MAX;
+        }
+    }
+    
+    // 对每个cluster进行处理
+    for (int cluster_idx = 0; cluster_idx < distinct_cluster_count; cluster_idx++) {
+        // 获取当前cluster的query范围
+        int query_start = h_cluster_query_offset[cluster_idx];
+        int query_count;
+        if (cluster_idx + 1 >= distinct_cluster_count) {
+            query_count = n_query - query_start;
+        } else {
+            query_count = h_cluster_query_offset[cluster_idx + 1] - query_start;
+        }
+        
+        // 边界检查
+        if (query_start >= n_query || query_start + query_count > n_query || query_count <= 0) {
+            continue;
+        }
+        
+        // 获取当前cluster的向量信息
+        int vector_start_idx = h_cluster_vector_index[cluster_idx];
+        int vector_count = h_cluster_vector_num[cluster_idx];
+        
+        // 对每个query计算与当前cluster中向量的距离
+        for (int q = 0; q < query_count; q++) {
+            int query_idx = query_start + q;
+            
+            // 计算当前query与cluster中所有向量的L2距离
+            for (int vec_idx = 0; vec_idx < vector_count; vec_idx++) {
+                int global_vec_idx = vector_start_idx + vec_idx;
+                
+                // 计算L2距离的平方（使用L2范数优化）
+                float dot_product = 0.0f;
+                for (int dim = 0; dim < n_dim; dim++) {
+                    dot_product += h_query_group[query_idx * n_dim + dim] * 
+                                  h_cluster_vector[global_vec_idx][dim];
+                }
+                
+                // L2距离平方 = ||q||^2 + ||v||^2 - 2*q·v
+                float distance_squared = query_norm[query_idx] * query_norm[query_idx] + 
+                                       cluster_vector_norm[global_vec_idx] * cluster_vector_norm[global_vec_idx] - 
+                                       2.0f * dot_product;
+                
+                // 取平方根得到实际距离
+                float distance = sqrtf(fmaxf(0.0f, distance_squared));
+                
+                // 插入到当前query的topk中
+                for (int k = 0; k < n_topn; k++) {
+                    if (distance < h_query_topn_dist[query_idx * n_topn + k]) {
+                        // 向后移动元素
+                        for (int m = n_topn - 1; m > k; m--) {
+                            h_query_topn_dist[query_idx * n_topn + m] = h_query_topn_dist[query_idx * n_topn + m-1];
+                            h_query_topn_index[query_idx * n_topn + m] = h_query_topn_index[query_idx * n_topn + m-1];
+                        }
+                        // 插入新元素
+                        h_query_topn_dist[query_idx * n_topn + k] = distance;
+                        h_query_topn_index[query_idx * n_topn + k] = global_vec_idx;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    // 释放临时内存
+    free(query_norm);
+    free(cluster_vector_norm);
 }
 
 // GPU版本的精筛topn计算（暂时空实现）
@@ -31,6 +123,7 @@ void gpu_fine_screen_top_n(
     int* cluster_map,
     int* h_cluster_vector_index, int* h_cluster_vector_num, float** h_cluster_vector,
     int n_query, int n_cluster, int distinct_cluster_count, int n_dim, int n_topn, int max_cluster_id, int tol_vector,
+    int max_cluster_vector_count,  // 新增：最大聚类向量数量
     int* h_query_topn_index, float* h_query_topn_dist
 ) {
     // 直接调用fine_screen_top_n函数
@@ -39,6 +132,7 @@ void gpu_fine_screen_top_n(
         cluster_map,
         h_cluster_vector_index, h_cluster_vector_num, h_cluster_vector,
         n_query, n_cluster, distinct_cluster_count, n_dim, n_topn, max_cluster_id, tol_vector,
+        max_cluster_vector_count,  // 新增：最大聚类向量数量
         h_query_topn_index, h_query_topn_dist
     );
 }
@@ -283,6 +377,12 @@ std::vector<double> test_fine_screen_top_n(
     initialize_output_arrays(n_query, n_topn, &h_query_topn_index, &h_query_topn_dist);
     initialize_output_arrays(n_query, n_topn, &h_query_topn_index_cpu, &h_query_topn_dist_cpu);
     
+    // 计算最大cluster向量数量
+    int max_cluster_vector_count = 0;
+    for (int i = 0; i < query_cluster_data.distinct_cluster_count; i++) {
+        max_cluster_vector_count = std::max(max_cluster_vector_count, h_cluster_vector_num[i]);
+    }
+    
     // CPU测试
     double cpu_duration_ms = 0;
     MEASURE_MS_AND_SAVE("CPU Fine Screen TopN", cpu_duration_ms,
@@ -291,6 +391,7 @@ std::vector<double> test_fine_screen_top_n(
             cluster_map,
             h_cluster_vector_index, h_cluster_vector_num, h_cluster_vector,
             n_query, n_cluster, query_cluster_data.distinct_cluster_count, n_dim, n_topn, max_cluster_id, tol_vector,
+            max_cluster_vector_count,  // 新增：最大聚类向量数量
             h_query_topn_index_cpu, h_query_topn_dist_cpu
         );
     );
@@ -303,6 +404,7 @@ std::vector<double> test_fine_screen_top_n(
             cluster_map,
             h_cluster_vector_index, h_cluster_vector_num, h_cluster_vector,
             n_query, n_cluster, query_cluster_data.distinct_cluster_count, n_dim, n_topn, max_cluster_id, tol_vector,
+            max_cluster_vector_count,  // 新增：最大聚类向量数量
             h_query_topn_index, h_query_topn_dist
         );
     );
@@ -334,7 +436,7 @@ int main(int argc, char** argv) {
     
     MetricsCollector metrics;
     metrics.set_columns("pass rate", "n_query", "n_cluster", "n_dim", "n_topn", "tol_vector", "gpu_ms", "cpu_ms", "speedup", "memory_mb");
-    metrics.set_num_repeats(1);  // 只运行一次，不重复
+    metrics.set_num_repeats(1); 
     
     COUT_ENDL("测试精筛TopN算法");
     

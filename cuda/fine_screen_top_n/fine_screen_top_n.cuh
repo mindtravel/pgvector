@@ -21,6 +21,7 @@ void fine_screen_top_n(
     int* cluster_map,
     int* h_cluster_vector_index, int* h_cluster_vector_num, float** h_cluster_vector,
     int n_query, int n_cluster, int distinct_cluster_count, int n_dim, int n_topn, int max_cluster_id, int tol_vector,
+    int max_cluster_vector_count,  // 新增：最大聚类向量数量
     int* h_query_topn_index, float* h_query_topn_dist
 );
 
