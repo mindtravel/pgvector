@@ -45,14 +45,14 @@ echo "运行测试..."
 # echo "运行 warp sort 测试..."
 # ./test_warpsort/test_warpsort
 # echo "=================================="
-# echo "运行 stream pass data 测试..."
-# ./test_stream_pass_data/test_stream_pass_data
-# echo "=================================="
+echo "运行 stream pass data 测试..."
+./test_stream_pass_data/test_stream_pass_data
+echo "=================================="
 # echo "运行 warp sort 测试..."
 # ./test_bitonic/test_bitonic
-echo "=================================="
-echo "运行 final_topk 测试..."
-./test_final_topk/test_final_topk
-echo "=================================="
+# echo "=================================="
+# echo "运行 final_topk 测试..."
+# ./test_final_topk/test_final_topk
+# echo "=================================="
 
 echo "所有测试完成！"

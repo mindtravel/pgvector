@@ -69,6 +69,7 @@ __global__ void cluster_l2_distance_kernel(
     int cluster_idx = blockIdx.x;
     int thread_idx = threadIdx.x;
     if (cluster_idx >= distinct_cluster_count || thread_idx >= d_cluster_vector_num[cluster_idx]) return;
+    if (thread_idx >= blockDim.x) return;
     // 共享内存：缓存L2范数和cluster向量数据
     extern __shared__ float shared_mem[];
     float* s_query_norm = shared_mem;
@@ -98,6 +99,15 @@ __global__ void cluster_l2_distance_kernel(
         }
     }
     if (query_count == 0) return;
+
+    // 获取当前cluster的向量信息
+    int vector_start_idx = d_cluster_vector_index[cluster_idx];
+    int vector_count = d_cluster_vector_num[cluster_idx];
+    
+    // 修复：添加边界检查，确保向量索引有效
+    if (vector_start_idx < 0 || vector_count <= 0 || vector_start_idx + vector_count > tol_vector) {
+        return;
+    }
     __syncthreads();
     
     
@@ -106,13 +116,15 @@ __global__ void cluster_l2_distance_kernel(
         s_query_norm[thread_idx] = d_query_norm[thread_idx];
     }
     if (thread_idx < max_cluster_vector_count) {
-        s_cluster_norm[thread_idx] = d_cluster_vector_norm[thread_idx];
+        s_cluster_norm[thread_idx] = d_cluster_vector_norm[vector_start_idx + thread_idx];
     }
     __syncthreads();
     
-    // 获取当前cluster的向量信息
-    int vector_start_idx = d_cluster_vector_index[cluster_idx];
-    int vector_count = d_cluster_vector_num[cluster_idx];
+    
+    // 修复：添加边界检查，确保向量索引有效
+    if (vector_start_idx < 0 || vector_count <= 0 || vector_start_idx + vector_count > tol_vector) {
+        return;
+    }
     
     // 每个线程处理cluster中的部分向量
     int vectors_per_thread = (vector_count + blockDim.x - 1) / blockDim.x;
@@ -128,6 +140,11 @@ __global__ void cluster_l2_distance_kernel(
         // 计算当前query与cluster中向量的L2距离
         for (int vec_idx = start_vec; vec_idx < end_vec; vec_idx++) {
             int global_vec_idx = vector_start_idx + vec_idx;
+            
+            // 修复：添加边界检查，确保全局向量索引有效
+            if (global_vec_idx < 0 || global_vec_idx >= tol_vector) {
+                continue;
+            }
             
             // 计算L2距离的平方（使用L2范数优化）    todo 其实这里也可以提前计算出来 后续看哪个性能更好一点吧
             float dot_product = 0.0f;
