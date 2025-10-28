@@ -186,7 +186,7 @@ __global__ void cluster_l2_distance_kernel(
     
     for (int q = start_query; q < end_query; q++) {
         int query_idx = query_start + q;
-        
+        if (query_idx >= n_query) continue;
         // 使用原子操作获取锁
         while (atomicCAS(&d_query_mutex[query_idx], 0, 1) != 0) {
             // 自旋等待
@@ -194,16 +194,16 @@ __global__ void cluster_l2_distance_kernel(
         
         // 合并局部topk到全局topk
         // 修复：添加边界检查，确保索引不越界
-        // for (int k = 0; k < n_topn && k < vector_count; k++) {
-        //     int global_vec_idx = vector_start_idx + k;
-        //     // 确保全局向量索引在有效范围内
+        for (int k = 0; k < n_topn && k < vector_count; k++) {
+            int global_vec_idx = vector_start_idx + k;
+            // 确保全局向量索引在有效范围内
             
-        //     d_topn_index[query_idx * n_topn + k] = global_vec_idx;
-        //     // TODO: 这里应该使用实际计算的距离值，而不是临时值
-        //     // 需要实现真正的top-k选择逻辑来获取正确的距离
-        //     d_topn_dist[query_idx * n_topn + k] = 0.0f; // 临时值，需要替换为实际距离
+            d_topn_index[query_idx * n_topn + k] = global_vec_idx;
+            // TODO: 这里应该使用实际计算的距离值，而不是临时值
+            // 需要实现真正的top-k选择逻辑来获取正确的距离
+            d_topn_dist[query_idx * n_topn + k] = 0.0f; // 临时值，需要替换为实际距离
             
-        // }
+        }
         
         // 释放锁
         atomicExch(&d_query_mutex[query_idx], 0);
