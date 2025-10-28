@@ -98,31 +98,31 @@ __global__ void cluster_l2_distance_kernel(
             }
         }
     }
-    // if (query_count == 0) return;
+    if (query_count == 0) return;
 
-    // // 获取当前cluster的向量信息
-    // int vector_start_idx = d_cluster_vector_index[cluster_idx];
-    // int vector_count = d_cluster_vector_num[cluster_idx];
+    // 获取当前cluster的向量信息
+    int vector_start_idx = d_cluster_vector_index[cluster_idx];
+    int vector_count = d_cluster_vector_num[cluster_idx];
     
-    // // 修复：添加边界检查，确保向量索引有效
-    // if (vector_start_idx < 0 || vector_count <= 0 || vector_start_idx + vector_count > tol_vector) {
-    //     return;
-    // }
-    // __syncthreads();
+    // 修复：添加边界检查，确保向量索引有效
+    if (vector_start_idx < 0 || vector_count <= 0 || vector_start_idx + vector_count > tol_vector) {
+        return;
+    }
+    __syncthreads();
     
     
-    // // 加载L2范数到共享内存
-    // if (thread_idx < n_query) {
-    //     s_query_norm[thread_idx] = d_query_norm[thread_idx];
-    // }
-    // // 修复：加载当前cluster的向量L2范数，添加边界检查
-    // if (thread_idx < vector_count && thread_idx < max_cluster_vector_count) {
-    //     int global_vec_idx = vector_start_idx + thread_idx;
-    //     if (global_vec_idx < tol_vector) {
-    //         s_cluster_norm[thread_idx] = d_cluster_vector_norm[global_vec_idx];
-    //     }
-    // }
-    // __syncthreads();
+    // 加载L2范数到共享内存
+    if (thread_idx < n_query) {
+        s_query_norm[thread_idx] = d_query_norm[thread_idx];
+    }
+    // 修复：加载当前cluster的向量L2范数，添加边界检查
+    if (thread_idx < vector_count && thread_idx < max_cluster_vector_count) {
+        int global_vec_idx = vector_start_idx + thread_idx;
+        if (global_vec_idx < tol_vector) {
+            s_cluster_norm[thread_idx] = d_cluster_vector_norm[global_vec_idx];
+        }
+    }
+    __syncthreads();
     
     // // 每个线程处理cluster中的部分向量
     // int vectors_per_thread = (vector_count + blockDim.x - 1) / blockDim.x;
