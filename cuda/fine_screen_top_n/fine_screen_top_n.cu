@@ -98,110 +98,110 @@ __global__ void cluster_l2_distance_kernel(
             }
         }
     }
-    if (query_count == 0) return;
+    // if (query_count == 0) return;
 
-    // 获取当前cluster的向量信息
-    int vector_start_idx = d_cluster_vector_index[cluster_idx];
-    int vector_count = d_cluster_vector_num[cluster_idx];
+    // // 获取当前cluster的向量信息
+    // int vector_start_idx = d_cluster_vector_index[cluster_idx];
+    // int vector_count = d_cluster_vector_num[cluster_idx];
     
-    // 修复：添加边界检查，确保向量索引有效
-    if (vector_start_idx < 0 || vector_count <= 0 || vector_start_idx + vector_count > tol_vector) {
-        return;
-    }
-    __syncthreads();
+    // // 修复：添加边界检查，确保向量索引有效
+    // if (vector_start_idx < 0 || vector_count <= 0 || vector_start_idx + vector_count > tol_vector) {
+    //     return;
+    // }
+    // __syncthreads();
     
     
-    // 加载L2范数到共享内存
-    if (thread_idx < n_query) {
-        s_query_norm[thread_idx] = d_query_norm[thread_idx];
-    }
-    // 修复：加载当前cluster的向量L2范数，添加边界检查
-    if (thread_idx < vector_count && thread_idx < max_cluster_vector_count) {
-        int global_vec_idx = vector_start_idx + thread_idx;
-        if (global_vec_idx < tol_vector) {
-            s_cluster_norm[thread_idx] = d_cluster_vector_norm[global_vec_idx];
-        }
-    }
-    __syncthreads();
+    // // 加载L2范数到共享内存
+    // if (thread_idx < n_query) {
+    //     s_query_norm[thread_idx] = d_query_norm[thread_idx];
+    // }
+    // // 修复：加载当前cluster的向量L2范数，添加边界检查
+    // if (thread_idx < vector_count && thread_idx < max_cluster_vector_count) {
+    //     int global_vec_idx = vector_start_idx + thread_idx;
+    //     if (global_vec_idx < tol_vector) {
+    //         s_cluster_norm[thread_idx] = d_cluster_vector_norm[global_vec_idx];
+    //     }
+    // }
+    // __syncthreads();
     
-    // 每个线程处理cluster中的部分向量
-    int vectors_per_thread = (vector_count + blockDim.x - 1) / blockDim.x;
-    int start_vec = thread_idx * vectors_per_thread;
-    int end_vec = min(start_vec + vectors_per_thread, vector_count);
+    // // 每个线程处理cluster中的部分向量
+    // int vectors_per_thread = (vector_count + blockDim.x - 1) / blockDim.x;
+    // int start_vec = thread_idx * vectors_per_thread;
+    // int end_vec = min(start_vec + vectors_per_thread, vector_count);
     
-    // 为每个query计算L2距离并维护局部topk
-    for (int q = 0; q < query_count; q++) {
-        int query_idx = query_start + q;
+    // // 为每个query计算L2距离并维护局部topk
+    // for (int q = 0; q < query_count; q++) {
+    //     int query_idx = query_start + q;
         
         
         
-        // 计算当前query与cluster中向量的L2距离
-        for (int vec_idx = start_vec; vec_idx < end_vec; vec_idx++) {
-            int global_vec_idx = vector_start_idx + vec_idx;
+    //     // 计算当前query与cluster中向量的L2距离
+    //     for (int vec_idx = start_vec; vec_idx < end_vec; vec_idx++) {
+    //         int global_vec_idx = vector_start_idx + vec_idx;
             
-            // 修复：添加边界检查，确保全局向量索引有效
-            if (global_vec_idx < 0 || global_vec_idx >= tol_vector) {
-                continue;
-            }
+    //         // 修复：添加边界检查，确保全局向量索引有效
+    //         if (global_vec_idx < 0 || global_vec_idx >= tol_vector) {
+    //             continue;
+    //         }
             
-            // 计算L2距离的平方（使用L2范数优化）    todo 其实这里也可以提前计算出来 后续看哪个性能更好一点吧
-            float dot_product = 0.0f;
-            for (int dim = 0; dim < n_dim; dim++) {
-                dot_product += d_query_group[query_idx * n_dim + dim] * 
-                              d_cluster_vector[global_vec_idx * n_dim + dim];
-            }
+    //         // 计算L2距离的平方（使用L2范数优化）    todo 其实这里也可以提前计算出来 后续看哪个性能更好一点吧
+    //         float dot_product = 0.0f;
+    //         for (int dim = 0; dim < n_dim; dim++) {
+    //             dot_product += d_query_group[query_idx * n_dim + dim] * 
+    //                           d_cluster_vector[global_vec_idx * n_dim + dim];
+    //         }
             
-            // L2距离平方 = ||q||^2 + ||v||^2 - 2*q·v
-            float distance_squared = s_query_norm[query_idx] + s_cluster_norm[vec_idx] - 2.0f * dot_product;
+    //         // L2距离平方 = ||q||^2 + ||v||^2 - 2*q·v
+    //         float distance_squared = s_query_norm[query_idx] + s_cluster_norm[vec_idx] - 2.0f * dot_product;
             
-            // 取平方根得到实际距离
-            float distance = sqrtf(fmaxf(0.0f, distance_squared));
+    //         // 取平方根得到实际距离
+    //         float distance = sqrtf(fmaxf(0.0f, distance_squared));
             
-            // // 插入到当前query的局部topk中
-            // for (int k = 0; k < n_topn; k++) {
-            //     if (distance < query_local_topk_dist[k]) {
-            //         // 向后移动元素
-            //         for (int m = n_topn - 1; m > k; m--) {
-            //             query_local_topk_dist[m] = query_local_topk_dist[m-1];
-            //             query_local_topk_idx[m] = query_local_topk_idx[m-1];
-            //         }
-            //         // 插入新元素
-            //         query_local_topk_dist[k] = distance;
-            //         query_local_topk_idx[k] = global_vec_idx;
-            //         break;
-            //     }
-            // }
-        }
+    //         // // 插入到当前query的局部topk中
+    //         // for (int k = 0; k < n_topn; k++) {
+    //         //     if (distance < query_local_topk_dist[k]) {
+    //         //         // 向后移动元素
+    //         //         for (int m = n_topn - 1; m > k; m--) {
+    //         //             query_local_topk_dist[m] = query_local_topk_dist[m-1];
+    //         //             query_local_topk_idx[m] = query_local_topk_idx[m-1];
+    //         //         }
+    //         //         // 插入新元素
+    //         //         query_local_topk_dist[k] = distance;
+    //         //         query_local_topk_idx[k] = global_vec_idx;
+    //         //         break;
+    //         //     }
+    //         // }
+    //     }
         
-    }
+    // }
     
-    __syncthreads();
+    // __syncthreads();
     
-    // 写入显存对应位置 - 使用原子操作加锁
-    // 每个线程处理自己负责的query范围
+    // // 写入显存对应位置 - 使用原子操作加锁
+    // // 每个线程处理自己负责的query范围
     
-    int queries_per_thread = (query_count + blockDim.x - 1) / blockDim.x;
-    int start_query = thread_idx * queries_per_thread;
-    int end_query = min(start_query + queries_per_thread, query_count);
+    // int queries_per_thread = (query_count + blockDim.x - 1) / blockDim.x;
+    // int start_query = thread_idx * queries_per_thread;
+    // int end_query = min(start_query + queries_per_thread, query_count);
     
-    for (int q = start_query; q < end_query; q++) {
-        int query_idx = query_start + q;
+    // for (int q = start_query; q < end_query; q++) {
+    //     int query_idx = query_start + q;
         
-        // 使用原子操作获取锁
-        while (atomicCAS(&d_query_mutex[query_idx], 0, 1) != 0) {
-            // 自旋等待
-        }
+    //     // 使用原子操作获取锁
+    //     while (atomicCAS(&d_query_mutex[query_idx], 0, 1) != 0) {
+    //         // 自旋等待
+    //     }
         
-        // 合并局部topk到全局topk
-        // 合入方式待定，先简单的暴力写入当前cluster vector的前n个验证正确性
-        for (int k = 0; k < n_topn; k++) {
-            d_topn_index[query_idx * n_topn + k] = vector_start_idx + k;
-            d_topn_dist[query_idx * n_topn + k] = 0.0f; // 临时值，实际应该从距离计算中获取
-        }
+    //     // 合并局部topk到全局topk
+    //     // 合入方式待定，先简单的暴力写入当前cluster vector的前n个验证正确性
+    //     for (int k = 0; k < n_topn; k++) {
+    //         d_topn_index[query_idx * n_topn + k] = vector_start_idx + k;
+    //         d_topn_dist[query_idx * n_topn + k] = 0.0f; // 临时值，实际应该从距离计算中获取
+    //     }
         
-        // 释放锁
-        atomicExch(&d_query_mutex[query_idx], 0);
-    }
+    //     // 释放锁
+    //     atomicExch(&d_query_mutex[query_idx], 0);
+    // }
 
 }
 
@@ -302,13 +302,13 @@ void fine_screen_top_n(
         dim3 grid(distinct_cluster_count);
         dim3 block(max_cluster_vector_count);
         
-        // cluster_l2_distance_kernel<<<grid, block, shared_mem_size>>>(
-        //     d_query_group, d_query_norm, d_cluster_vector, d_cluster_vector_norm,
-        //     d_query_cluster_group, d_cluster_query_offset, d_cluster_query_data,
-        //     d_cluster_map, d_cluster_vector_index, d_cluster_vector_num,
-        //     n_query, n_cluster, n_dim, n_topn, max_cluster_vector_count, distinct_cluster_count, tol_vector,
-        //     d_query_mutex, d_topn_index, d_topn_dist
-        // );
+        cluster_l2_distance_kernel<<<grid, block, shared_mem_size>>>(
+            d_query_group, d_query_norm, d_cluster_vector, d_cluster_vector_norm,
+            d_query_cluster_group, d_cluster_query_offset, d_cluster_query_data,
+            d_cluster_map, d_cluster_vector_index, d_cluster_vector_num,
+            n_query, n_cluster, n_dim, n_topn, max_cluster_vector_count, distinct_cluster_count, tol_vector,
+            d_query_mutex, d_topn_index, d_topn_dist
+        );
         
         cudaDeviceSynchronize();
     }
