@@ -200,7 +200,7 @@ __global__ void cluster_l2_distance_kernel(
         }
         
         // 释放锁
-        atomicExch(&d_query_mutex[query_idx], 0);
+        // atomicExch(&d_query_mutex[query_idx], 0);
     }
 
 }
