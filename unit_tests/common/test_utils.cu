@@ -6,6 +6,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <algorithm>
+#include <map>
+#include <set>
+
+struct ClusterQueryData {
+    int* cluster_map; //cluster_idx -> cluster_id
+    int* cluster_query_data; //cluster_id -> query_ids
+    int* cluster_query_offset; //cluster_id -> query_offset
+    int* cluster_query_data_size; //cluster_id -> query_count
+    int  cluster_size;
+    int* cluster_vector_index; //cluster_id -> vector_index
+    float** cluster_vector; //cluster_id -> vectors
+    int* cluster_vector_num; //cluster_id -> vector_num
+    int  tol_vector; 
+};
 
 void _check_cuda_last_error(const char *file, int line)
 {
@@ -231,16 +245,4 @@ void get_cluster_vector(int cluster_id, float** cluster_vector, int* vector_num)
     // 空方法，从索引里面获取原始向量
     
 }
-
-struct ClusterQueryData {
-    int* cluster_map; //cluster_idx -> cluster_id
-    int* cluster_query_data; //cluster_id -> query_ids
-    int* cluster_query_offset; //cluster_id -> query_offset
-    int* cluster_query_data_size; //cluster_id -> query_count
-    int  cluster_size;
-    int* cluster_vector_index; //cluster_id -> vector_index
-    float** cluster_vector; //cluster_id -> vectors
-    int* cluster_vector_num; //cluster_id -> vector_num
-    int  tol_vector; 
-};
 
