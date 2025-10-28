@@ -197,7 +197,7 @@ __global__ void cluster_l2_distance_kernel(
         for (int k = 0; k < n_topn && k < vector_count; k++) {
             int global_vec_idx = vector_start_idx + k;
             // 确保全局向量索引在有效范围内
-            
+            if (global_vec_idx >= tol_vector) continue;
             d_topn_index[query_idx * n_topn + k] = global_vec_idx;
             // TODO: 这里应该使用实际计算的距离值，而不是临时值
             // 需要实现真正的top-k选择逻辑来获取正确的距离
