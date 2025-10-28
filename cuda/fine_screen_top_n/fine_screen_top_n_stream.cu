@@ -9,9 +9,12 @@
  * 流2：计算处理
  */
 void simple_dual_stream_pipeline(
-    ClusterQueryData* cluster_data_array, int num_batches, int batch_size,
+    void* cluster_data_array_ptr, int num_batches, int batch_size,
     float* h_query_group, int n_query, int n_dim, int n_topn,
     int* h_query_topn_index, float* h_query_topn_dist) {
+    
+    // 转换指针类型
+    ClusterQueryData* cluster_data_array = (ClusterQueryData*)cluster_data_array_ptr;
     
     // 创建两个CUDA流
     cudaStream_t upload_stream, compute_stream;

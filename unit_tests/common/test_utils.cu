@@ -115,7 +115,7 @@ float*** generate_large_scale_vectors(int n_lists, int n_batch, int n_dim) {
 
 
 //把原始的聚类中心topk数据转为cluster-query倒排数据
-ClusterQueryData* generate_cluster_query_data(int* query_cluster_group, int n_query, int k, int batch_size) {
+void* generate_cluster_query_data(int* query_cluster_group, int n_query, int k, int batch_size) {
     // 第一步：将query-cluster映射转换为cluster-query倒排映射
     std::map<int, std::set<int>> cluster_query_map;
     for (int i = 0; i < n_query; i++) {
@@ -224,7 +224,7 @@ ClusterQueryData* generate_cluster_query_data(int* query_cluster_group, int n_qu
         current_batch.tol_vector = total_vectors_in_batch;
     }
     
-    return cluster_query_data_array;
+    return (void*)cluster_query_data_array;
 }
 
 void get_cluster_vector(int cluster_id, float** cluster_vector, int* vector_num) {
@@ -236,6 +236,7 @@ struct ClusterQueryData {
     int* cluster_map; //cluster_idx -> cluster_id
     int* cluster_query_data; //cluster_id -> query_ids
     int* cluster_query_offset; //cluster_id -> query_offset
+    int* cluster_query_data_size; //cluster_id -> query_count
     int  cluster_size;
     int* cluster_vector_index; //cluster_id -> vector_index
     float** cluster_vector; //cluster_id -> vectors

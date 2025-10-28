@@ -6,7 +6,7 @@
 
 /**
  * 简单的双流流水线处理cluster数据
- * @param cluster_data_array cluster数据数组
+ * @param cluster_data_array_ptr cluster数据数组指针
  * @param num_batches batch数量
  * @param batch_size batch大小
  * @param h_query_group query向量数据
@@ -17,7 +17,7 @@
  * @param h_query_topn_dist 输出距离
  */
 void simple_dual_stream_pipeline(
-    ClusterQueryData* cluster_data_array, int num_batches, int batch_size,
+    void* cluster_data_array_ptr, int num_batches, int batch_size,
     float* h_query_group, int n_query, int n_dim, int n_topn,
     int* h_query_topn_index, float* h_query_topn_dist);
 
