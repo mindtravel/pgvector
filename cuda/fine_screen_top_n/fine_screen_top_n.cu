@@ -130,10 +130,10 @@ __global__ void cluster_l2_distance_kernel(
             
             // 计算L2距离的平方（使用L2范数优化）    todo 其实这里也可以提前计算出来 后续看哪个性能更好一点吧
             float dot_product = 0.0f;
-            // for (int dim = 0; dim < n_dim; dim++) {
-            //     dot_product += d_query_group[query_idx * n_dim + dim] * 
-            //                   d_cluster_vector[global_vec_idx * n_dim + dim];
-            // }
+            for (int dim = 0; dim < n_dim; dim++) {
+                dot_product += d_query_group[query_idx * n_dim + dim] * 
+                              d_cluster_vector[global_vec_idx * n_dim + dim];
+            }
             
             // L2距离平方 = ||q||^2 + ||v||^2 - 2*q·v
             float distance_squared = s_query_norm[query_idx] + s_cluster_norm[vec_idx] - 2.0f * dot_product;
@@ -180,7 +180,7 @@ __global__ void cluster_l2_distance_kernel(
         // 合入方式待定，先简单的暴力写入当前cluster vector的前n个验证正确性
         for (int k = 0; k < n_topn; k++) {
             d_topn_index[query_idx * n_topn + k] = vector_start_idx + k;
-            d_topn_dist[query_idx * n_topn + k] = d_cluster_vector[vector_start_idx + k];
+            d_topn_dist[query_idx * n_topn + k] = 0.0f; // 临时值，实际应该从距离计算中获取
         }
         
         // 释放锁

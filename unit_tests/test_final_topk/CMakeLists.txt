@@ -19,6 +19,7 @@ set(SOURCES
     test_final_topk.cu
     ../common/test_utils.cu
     ../../cuda/fine_screen_top_n/fine_screen_top_n.cu
+    ../../cuda/l2norm.cu
 )
 
 # 创建可执行文件
