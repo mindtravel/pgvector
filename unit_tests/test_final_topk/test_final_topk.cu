@@ -458,7 +458,6 @@ int main(int argc, char** argv) {
     }
     
     metrics.print_table();
-    metrics.export_csv("fine_screen_topk_metrics.csv");
     
     COUT_ENDL("\n所有测试:", all_pass ? "✅ PASS" : "❌ FAIL");
     return 0;

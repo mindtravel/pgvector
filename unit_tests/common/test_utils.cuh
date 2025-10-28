@@ -258,4 +258,11 @@ float*** generate_large_scale_vectors(int n_lists, int n_batch, int n_dim);
 void** malloc_vector_list(size_t n_batch, size_t n_dim, size_t elem_size);
 void free_vector_list(void** vector_list);
 
+// 前向声明
+struct ClusterQueryData;
+
+// 函数声明
+ClusterQueryData* generate_cluster_query_data(int* query_cluster_group, int n_query, int k, int batch_size);
+void get_cluster_vector(int cluster_id, float**& cluster_vector, int* vector_num);
+
 #endif

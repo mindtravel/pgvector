@@ -188,9 +188,9 @@ __global__ void cluster_l2_distance_kernel(
         int query_idx = query_start + q;
         if (query_idx >= n_query) continue;
         // 使用原子操作获取锁
-        // while (atomicCAS(&d_query_mutex[query_idx], 0, 1) != 0) {
-        //     // 自旋等待
-        // }
+        while (atomicCAS(&d_query_mutex[query_idx], 0, 1) != 0) {
+            // 自旋等待
+        }
         
         // 合并局部topk到全局topk
         // 修复：添加边界检查，确保索引不越界
@@ -205,7 +205,7 @@ __global__ void cluster_l2_distance_kernel(
         }
         
         // 释放锁
-        //atomicExch(&d_query_mutex[query_idx], 0);
+        atomicExch(&d_query_mutex[query_idx], 0);
     }
 
 }
