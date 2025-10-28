@@ -61,7 +61,7 @@ __global__ void cluster_l2_distance_kernel(
     const int* __restrict__ d_cluster_vector_index,
     const int* __restrict__ d_cluster_vector_num,
     int n_query, int n_cluster, int n_dim, int n_topn,
-    int max_cluster_vector_count, int distinct_cluster_count,
+    int max_cluster_vector_count, int distinct_cluster_count, int tol_vector,
     int* __restrict__ d_query_mutex,
     int* __restrict__ d_topn_index,
     float* __restrict__ d_topn_dist
@@ -115,16 +115,14 @@ __global__ void cluster_l2_distance_kernel(
     if (thread_idx < n_query) {
         s_query_norm[thread_idx] = d_query_norm[thread_idx];
     }
-    if (thread_idx < max_cluster_vector_count) {
-        s_cluster_norm[thread_idx] = d_cluster_vector_norm[vector_start_idx + thread_idx];
+    // 修复：加载当前cluster的向量L2范数，添加边界检查
+    if (thread_idx < vector_count && thread_idx < max_cluster_vector_count) {
+        int global_vec_idx = vector_start_idx + thread_idx;
+        if (global_vec_idx < tol_vector) {
+            s_cluster_norm[thread_idx] = d_cluster_vector_norm[global_vec_idx];
+        }
     }
     __syncthreads();
-    
-    
-    // 修复：添加边界检查，确保向量索引有效
-    if (vector_start_idx < 0 || vector_count <= 0 || vector_start_idx + vector_count > tol_vector) {
-        return;
-    }
     
     // 每个线程处理cluster中的部分向量
     int vectors_per_thread = (vector_count + blockDim.x - 1) / blockDim.x;
@@ -308,7 +306,7 @@ void fine_screen_top_n(
             d_query_group, d_query_norm, d_cluster_vector, d_cluster_vector_norm,
             d_query_cluster_group, d_cluster_query_offset, d_cluster_query_data,
             d_cluster_map, d_cluster_vector_index, d_cluster_vector_num,
-            n_query, n_cluster, n_dim, n_topn, max_cluster_vector_count, distinct_cluster_count,
+            n_query, n_cluster, n_dim, n_topn, max_cluster_vector_count, distinct_cluster_count, tol_vector,
             d_query_mutex, d_topn_index, d_topn_dist
         );
         
