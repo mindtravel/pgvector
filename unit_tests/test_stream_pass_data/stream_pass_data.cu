@@ -10,6 +10,8 @@ __global__ void empty_kernel(float* data, int size) {
         // 后续可以替换为实际的业务逻辑
         data[idx] = data[idx]; // 简单的数据传递
     }
+    // 确保所有线程都完成
+    __syncthreads();
 }
 
 // 流式处理实现

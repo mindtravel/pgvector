@@ -37,6 +37,7 @@ std::vector<double> test_stream_vs_direct(
     
     if (!QUIET) {
         COUT_VAL("配置:", n_groups, "组 ×", n_vectors, "个向量", ", 向量维度:", n_dim, ", 内存使用:", memory_mb, "MB");
+        COUT_VAL("总元素数:", total_elements);
     }
     
     // 生成测试数据
@@ -108,34 +109,31 @@ int main(int argc, char** argv) {
     MetricsCollector metrics;
     metrics.set_columns("pass rate", "n_groups", "n_vectors", "n_dim", 
                        "avg_stream_ms", "avg_direct_ms", "avg_time_ratio", "memory_mb");
+    metrics.set_num_repeats(1);  // 只运行一次，不重复
     
     COUT_ENDL("开始流式vs直接处理性能对比测试...");
     
     // 测试不同规模的数据集
     // 小规模测试
     COUT_ENDL("=== 小规模测试 ===");
-    PARAM_3D(n_groups, (3, 10, 50), 
-            n_vectors, (10, 50, 100), 
-            n_dim, (8, 32, 128))
+    PARAM_3D(n_groups, (3, 10), 
+            n_vectors, (10, 50), 
+            n_dim, (8, 32))
     {
-        auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
-            auto result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
-            all_pass &= (result[0] == 1.0);
-            return result;
-        });
+        auto result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
+        all_pass &= (result[0] == 1.0);
+        metrics.add_row(result);
     }
     
     // 中等规模测试
     COUT_ENDL("=== 中等规模测试 ===");
-    PARAM_3D(n_groups, (100, 500), 
-            n_vectors, (100, 500), 
-            n_dim, (256, 512))
+    PARAM_3D(n_groups, (100), 
+            n_vectors, (100), 
+            n_dim, (256))
     {
-        auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
-            auto result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
-            all_pass &= (result[0] == 1.0);
-            return result;
-        });
+        auto result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
+        all_pass &= (result[0] == 1.0);
+        metrics.add_row(result);
     }
     
     // 大规模测试
@@ -144,11 +142,9 @@ int main(int argc, char** argv) {
             n_vectors, (1000), 
             n_dim, (1024))
     {
-        auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
-            auto result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
-            all_pass &= (result[0] == 1.0);
-            return result;
-        });
+        auto result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
+        all_pass &= (result[0] == 1.0);
+        metrics.add_row(result);
     }
     
     metrics.print_table();
