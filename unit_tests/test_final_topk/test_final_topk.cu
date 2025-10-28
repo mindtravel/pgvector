@@ -5,6 +5,7 @@
 #include <vector>
 #include <algorithm>
 #include <set>
+#include <float.h>
 
 #include "../cuda/fine_screen_top_n/fine_screen_top_n.cuh"
 #include "../cuda/pch.h"

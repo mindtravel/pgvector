@@ -117,29 +117,12 @@ __global__ void cluster_l2_distance_kernel(
     int vectors_per_thread = (vector_count + blockDim.x - 1) / blockDim.x;
     int start_vec = thread_idx * vectors_per_thread;
     int end_vec = min(start_vec + vectors_per_thread, vector_count);
-    // 每个线程维护局部topk结果
-    float local_topk_dist[n_topn];
-    int local_topk_idx[n_topn];
-    
-    // 初始化局部topk为最大值
-    for (int i = 0; i < n_topn; i++) {
-        local_topk_dist[i] = FLT_MAX;
-        local_topk_idx[i] = -1;
-    }
     
     // 为每个query计算L2距离并维护局部topk
     for (int q = 0; q < query_count; q++) {
         int query_idx = query_start + q;
         
-        // 为当前query维护局部topk
-        // float query_local_topk_dist[n_topn];
-        // int query_local_topk_idx[n_topn];
         
-        // // 初始化当前query的局部topk
-        // for (int i = 0; i < n_topn; i++) {
-        //     query_local_topk_dist[i] = FLT_MAX;
-        //     query_local_topk_idx[i] = -1;
-        // }
         
         // 计算当前query与cluster中向量的L2距离
         for (int vec_idx = start_vec; vec_idx < end_vec; vec_idx++) {
@@ -194,10 +177,10 @@ __global__ void cluster_l2_distance_kernel(
         }
         
         // 合并局部topk到全局topk
-        // 合入方式待定，先简单的暴力写入当前cluster vector的前n个 + 1验证正确性
+        // 合入方式待定，先简单的暴力写入当前cluster vector的前n个验证正确性
         for (int k = 0; k < n_topn; k++) {
             d_topn_index[query_idx * n_topn + k] = vector_start_idx + k;
-            d_topn_dist[query_idx * n_topn + k] = local_topk_dist[k];
+            d_topn_dist[query_idx * n_topn + k] = size_cluster_vector[vector_start_idx + k];
         }
         
         // 释放锁
