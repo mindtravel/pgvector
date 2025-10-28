@@ -180,7 +180,7 @@ __global__ void cluster_l2_distance_kernel(
         // 合入方式待定，先简单的暴力写入当前cluster vector的前n个验证正确性
         for (int k = 0; k < n_topn; k++) {
             d_topn_index[query_idx * n_topn + k] = vector_start_idx + k;
-            d_topn_dist[query_idx * n_topn + k] = size_cluster_vector[vector_start_idx + k];
+            d_topn_dist[query_idx * n_topn + k] = d_cluster_vector[vector_start_idx + k];
         }
         
         // 释放锁
