@@ -302,13 +302,13 @@ void fine_screen_top_n(
         dim3 grid(distinct_cluster_count);
         dim3 block(max_cluster_vector_count);
         
-        cluster_l2_distance_kernel<<<grid, block, shared_mem_size>>>(
-            d_query_group, d_query_norm, d_cluster_vector, d_cluster_vector_norm,
-            d_query_cluster_group, d_cluster_query_offset, d_cluster_query_data,
-            d_cluster_map, d_cluster_vector_index, d_cluster_vector_num,
-            n_query, n_cluster, n_dim, n_topn, max_cluster_vector_count, distinct_cluster_count, tol_vector,
-            d_query_mutex, d_topn_index, d_topn_dist
-        );
+        // cluster_l2_distance_kernel<<<grid, block, shared_mem_size>>>(
+        //     d_query_group, d_query_norm, d_cluster_vector, d_cluster_vector_norm,
+        //     d_query_cluster_group, d_cluster_query_offset, d_cluster_query_data,
+        //     d_cluster_map, d_cluster_vector_index, d_cluster_vector_num,
+        //     n_query, n_cluster, n_dim, n_topn, max_cluster_vector_count, distinct_cluster_count, tol_vector,
+        //     d_query_mutex, d_topn_index, d_topn_dist
+        // );
         
         cudaDeviceSynchronize();
     }
