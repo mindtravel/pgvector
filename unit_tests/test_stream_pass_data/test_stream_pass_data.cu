@@ -120,9 +120,11 @@ int main(int argc, char** argv) {
             n_vectors, (10, 50), 
             n_dim, (8, 32))
     {
-        auto result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
-        all_pass &= (result[0] == 1.0);
-        metrics.add_row(result);
+        auto result = metrics.add_row_averaged([&]() -> std::vector<double> {
+            auto test_result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
+            all_pass &= (test_result[0] == 1.0);
+            return test_result;
+        });
     }
     
     // 中等规模测试
@@ -131,9 +133,11 @@ int main(int argc, char** argv) {
             n_vectors, (100), 
             n_dim, (256))
     {
-        auto result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
-        all_pass &= (result[0] == 1.0);
-        metrics.add_row(result);
+        auto result = metrics.add_row_averaged([&]() -> std::vector<double> {
+            auto test_result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
+            all_pass &= (test_result[0] == 1.0);
+            return test_result;
+        });
     }
     
     // 大规模测试
@@ -142,9 +146,11 @@ int main(int argc, char** argv) {
             n_vectors, (1000), 
             n_dim, (1024))
     {
-        auto result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
-        all_pass &= (result[0] == 1.0);
-        metrics.add_row(result);
+        auto result = metrics.add_row_averaged([&]() -> std::vector<double> {
+            auto test_result = test_stream_vs_direct(n_groups, n_vectors, n_dim);
+            all_pass &= (test_result[0] == 1.0);
+            return test_result;
+        });
     }
     
     metrics.print_table();

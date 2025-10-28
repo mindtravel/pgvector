@@ -23,3 +23,5 @@ void fine_screen_top_n(
     int n_query, int n_cluster, int distinct_cluster_count, int n_dim, int n_topn, int max_cluster_id, int tol_vector,
     int* h_query_topn_index, float* h_query_topn_dist
 );
+
+#endif // FINE_SCREEN_TOP_N

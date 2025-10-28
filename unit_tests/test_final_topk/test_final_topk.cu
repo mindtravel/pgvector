@@ -284,26 +284,28 @@ std::vector<double> test_fine_screen_top_n(
     initialize_output_arrays(n_query, n_topn, &h_query_topn_index_cpu, &h_query_topn_dist_cpu);
     
     // CPU测试
-    CUDATimer timer_cpu("CPU Fine Screen TopN", true);
-    cpu_fine_screen_top_n(
-        h_query_group, query_cluster_data.h_query_cluster_group, h_cluster_query_offset, h_cluster_query_data,
-        cluster_map,
-        h_cluster_vector_index, h_cluster_vector_num, h_cluster_vector,
-        n_query, n_cluster, query_cluster_data.distinct_cluster_count, n_dim, n_topn, max_cluster_id, tol_vector,
-        h_query_topn_index_cpu, h_query_topn_dist_cpu
+    double cpu_duration_ms = 0;
+    MEASURE_MS_AND_SAVE("CPU Fine Screen TopN", cpu_duration_ms,
+        cpu_fine_screen_top_n(
+            h_query_group, query_cluster_data.h_query_cluster_group, h_cluster_query_offset, h_cluster_query_data,
+            cluster_map,
+            h_cluster_vector_index, h_cluster_vector_num, h_cluster_vector,
+            n_query, n_cluster, query_cluster_data.distinct_cluster_count, n_dim, n_topn, max_cluster_id, tol_vector,
+            h_query_topn_index_cpu, h_query_topn_dist_cpu
+        );
     );
-    double cpu_duration_ms = timer_cpu.get_duration_ms();
     
     // GPU测试
-    CUDATimer timer_gpu("GPU Fine Screen TopN", true);
-    gpu_fine_screen_top_n(
-        h_query_group, query_cluster_data.h_query_cluster_group, h_cluster_query_offset, h_cluster_query_data,
-        cluster_map,
-        h_cluster_vector_index, h_cluster_vector_num, h_cluster_vector,
-        n_query, n_cluster, query_cluster_data.distinct_cluster_count, n_dim, n_topn, max_cluster_id, tol_vector,
-        h_query_topn_index, h_query_topn_dist
+    double gpu_duration_ms = 0;
+    MEASURE_MS_AND_SAVE("GPU Fine Screen TopN", gpu_duration_ms,
+        gpu_fine_screen_top_n(
+            h_query_group, query_cluster_data.h_query_cluster_group, h_cluster_query_offset, h_cluster_query_data,
+            cluster_map,
+            h_cluster_vector_index, h_cluster_vector_num, h_cluster_vector,
+            n_query, n_cluster, query_cluster_data.distinct_cluster_count, n_dim, n_topn, max_cluster_id, tol_vector,
+            h_query_topn_index, h_query_topn_dist
+        );
     );
-    double gpu_duration_ms = timer_gpu.get_duration_ms();
     
     // 计算加速比
     double speedup = (cpu_duration_ms > 0) ? cpu_duration_ms / gpu_duration_ms : 0.0;
@@ -332,6 +334,7 @@ int main(int argc, char** argv) {
     
     MetricsCollector metrics;
     metrics.set_columns("pass rate", "n_query", "n_cluster", "n_dim", "n_topn", "tol_vector", "gpu_ms", "cpu_ms", "speedup", "memory_mb");
+    metrics.set_num_repeats(1);  // 只运行一次，不重复
     
     COUT_ENDL("测试精筛TopN算法");
     
@@ -344,9 +347,11 @@ int main(int argc, char** argv) {
         int max_cluster_id = n_cluster * 3; // 稀疏的cluster ID
         int tol_vector = n_cluster * 50; // 每个cluster平均50个向量
         
-        auto result = test_fine_screen_top_n(n_query, n_cluster, n_dim, n_topn, max_cluster_id, tol_vector);
-        all_pass &= (result[0] == 1.0);
-        metrics.add_row(result);
+        auto result = metrics.add_row_averaged([&]() -> std::vector<double> {
+            auto test_result = test_fine_screen_top_n(n_query, n_cluster, n_dim, n_topn, max_cluster_id, tol_vector);
+            all_pass &= (test_result[0] == 1.0);
+            return test_result;
+        });
     }
     
     metrics.print_table();
