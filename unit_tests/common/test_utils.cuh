@@ -260,6 +260,6 @@ void free_vector_list(void** vector_list);
 
 // 函数声明
 void* generate_cluster_query_data(int* query_cluster_group, int n_query, int k, int batch_size);
-void get_cluster_vector(int cluster_id, float** cluster_vector, int* vector_num);
+void get_cluster_vector(int cluster_id, float*** cluster_vector, int* vector_num);
 
 #endif
