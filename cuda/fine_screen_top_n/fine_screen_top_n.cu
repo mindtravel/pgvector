@@ -4,6 +4,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
 #include <limits.h>
+#include <float.h>
 
 #define ENABLE_CUDA_TIMING 0
 
