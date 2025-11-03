@@ -4,7 +4,7 @@
 // #include ".h"
 
 #include "fusion_cos_topk.cuh"
-#include "l2norm.cuh"
+#include "../l2norm/l2norm.cuh"
 #include "../unit_tests/common/test_utils.cuh"
 #include "pch.h"
 

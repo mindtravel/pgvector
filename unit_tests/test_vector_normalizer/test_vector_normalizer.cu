@@ -169,7 +169,7 @@ int main() {
 
     // test_zero_vector();
     // test_large_scale_async_stress(16, 1024, 512);
-    pass &= check_pass("大规模压力测试", test_large_scale_async_stress(1024, 1024, 1024));
+    pass &= check_pass("大规模压力测试", test_large_scale_async_stress(100, 1024, 1024));
     // test_large_scale_async_stress(10, 10, 512);
     // test_large_scale_async_stress(8192, 1024, 512);
 

@@ -98,8 +98,8 @@ bool test_basic_matrix_multiply(int M, int N, int K) {
     // 生成测试数据
     float** h_A = generate_vector_list(M, K);
     float** h_B = generate_vector_list(N, K);
-    float** h_C_gpu = (float**)malloc_vector_list(M, N, sizeof(float));
-    float** h_C_cpu = (float**)malloc_vector_list(M, N, sizeof(float));
+    float** h_C_gpu = malloc_vector_list<float>(M, N);
+    float** h_C_cpu = malloc_vector_list<float>(M, N);
     
     if (DEBUG){
         // std::cout << "A" << std::endl;
@@ -240,8 +240,8 @@ void test_large_scale_stress(int M, int N, int K) {
     // 生成测试数据
     float** h_A = generate_vector_list(M, K);
     float** h_B = generate_vector_list(N, K);
-    float** h_C_gpu = (float**)malloc_vector_list(M, N, sizeof(float));
-    float** h_C_cpu = (float**)malloc_vector_list(M, N, sizeof(float));
+    float** h_C_gpu = malloc_vector_list<float>(M, N);
+    float** h_C_cpu = malloc_vector_list<float>(M, N);
 
 
     /* GPU 计算 */

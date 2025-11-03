@@ -113,10 +113,10 @@ std::vector<double> test_warpsort(
     // Allocate host memory & generate random data
     srand(42);
     const float** h_input = const_cast<const float**>((float**)generate_vector_list(batch_size, len));
-    float** h_gpu_vals = (float**)malloc_vector_list(batch_size, k, sizeof(float));
-    float** h_cpu_vals = (float**)malloc_vector_list(batch_size, k, sizeof(float));
-    int** h_gpu_idx = (int**)malloc_vector_list(batch_size, k, sizeof(int));
-    int** h_cpu_idx = (int**)malloc_vector_list(batch_size, k, sizeof(int));
+    float** h_gpu_vals = malloc_vector_list<float>(batch_size, k);
+    float** h_cpu_vals = malloc_vector_list<float>(batch_size, k);
+    int** h_gpu_idx = malloc_vector_list<int>(batch_size, k);
+    int** h_cpu_idx = malloc_vector_list<int>(batch_size, k);
 
     // Allocate device memory
     float *d_input, *d_output_vals;

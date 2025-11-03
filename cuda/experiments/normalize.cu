@@ -1,6 +1,8 @@
-#include "l2norm.cuh"
+#include "../l2norm/l2norm.cuh"
 #include "normalize.h"
 #include "pch.h"
+
+#define ENABLE_CUDA_TIMING 1 /*是否启用CUDATimer计时*/
 
 /*
 * 按模长归一化
@@ -33,7 +35,6 @@ __global__ void normalize_kernel(float *vectors, float* vector_norms, int n_batc
 */ 
 void normalize(float** h_vector_list, int n_batch, int n_dim) {
     assert(h_vector_list != nullptr && n_dim > 0 && n_batch > 0);
-    #define ENABLE_CUDA_TIMING 0 /*是否启用CUDATimer计时*/
 
     float *d_vector_list, *d_vector_l2_norm;
     dim3 gridDim(n_batch);

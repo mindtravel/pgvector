@@ -1,5 +1,5 @@
 #include "fine_screen_top_n.cuh"
-#include "../l2norm.cuh"
+#include "../l2norm/l2norm.cuh"
 #include "../unit_tests/common/test_utils.cuh"
 #include <cuda_runtime.h>
 

@@ -1,7 +1,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
 
-#include "kernels.h"
+#include "../l2norm/l2norm.cuh"
 // #include "select_topk.cuh"
 
 #include "fusion_cos_topk.cuh"

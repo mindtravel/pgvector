@@ -1,7 +1,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
 
-#include "l2norm.cuh"
+#include "../l2norm/l2norm.cuh"
 #include "distances.h"
 #include "pch.h"
 
@@ -125,7 +125,7 @@ void cuda_cosine_dist(float** h_query_vectors, float** h_data_vectors, float** h
 
     /* 核函数执行 */
     {
-        CUDATimer timer_compute("Kernel Execution", ENABLE_CUDA_TIMING);
+        CUDATimer timer_compute("Kernel Execution:l2norm", ENABLE_CUDA_TIMING);
 
         l2_norm_kernel<<<queryDim, vectorDim, n_dim * sizeof(float)>>>(
             d_query_vectors, d_query_norm, 
@@ -136,7 +136,20 @@ void cuda_cosine_dist(float** h_query_vectors, float** h_data_vectors, float** h
             d_data_vectors, d_data_norm, 
             n_batch, n_dim
         );        
-        
+
+        // l2_norm_kernel_basic<<<queryDim, vectorDim, n_dim * sizeof(float)>>>(
+        //     d_query_vectors, d_query_norm, 
+        //     n_query, n_dim
+        // );
+
+        // l2_norm_kernel_basic<<<dataDim, vectorDim, n_dim * sizeof(float)>>>(
+        //     d_data_vectors, d_data_norm, 
+        //     n_batch, n_dim
+        // );        
+    }
+    
+    {
+        CUDATimer timer_compute("Kernel Execution:gemm", ENABLE_CUDA_TIMING);
         // 调试信息：打印GPU内存指针地址（不要访问内容）
         // std::cout << "GPU memory pointers: " << d_query_norm << " " << d_data_norm << " " << d_cos_dist << std::endl;
 

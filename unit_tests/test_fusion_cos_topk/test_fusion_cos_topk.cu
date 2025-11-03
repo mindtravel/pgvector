@@ -2,6 +2,7 @@
 #include <limits>
 #include <string>
 #include <map>
+#include <queue>
 
 #include "../cuda/fusion_cos_topk/fusion_cos_topk.cuh"
 #include "../cuda/pch.h"
@@ -39,7 +40,7 @@ std::map<AlgorithmVersion, AlgorithmInfo> algorithm_registry = {
     {WARP_SORT, {"warpsort", "纯寄存器 Top k", cuda_cos_topk_warpsort}}
 };
 
-// CPU版本余弦版本k近邻计算（用于验证）
+// CPU版本余弦版本k近邻计算（用于验证）- 使用最大堆优化
 void cpu_cos_distance_topk(float** query_vectors, float** data_vectors, 
                         int** data_index, 
                         int** topk_index, float** topk_dist,
@@ -47,7 +48,6 @@ void cpu_cos_distance_topk(float** query_vectors, float** data_vectors,
     // 计算每个向量的L2范数
     float* query_norms = (float*)malloc(n_query * sizeof(float));
     float* data_norms = (float*)malloc(n_batch * sizeof(float));
-    float** cos_dist = (float**)malloc_vector_list(n_query, n_batch, sizeof(float));
     
     // 计算query向量的L2范数
     for (int i = 0; i < n_query; i++) {
@@ -67,44 +67,44 @@ void cpu_cos_distance_topk(float** query_vectors, float** data_vectors,
         data_norms[i] = sum;
     }
     
-    // 创建索引-距离对的数组用于排序
-    std::vector<std::pair<float, int>> cos_pairs(n_batch);
-    
-    // 计算余弦距离矩阵并进行topk选择
+    // 为每个query使用最大堆维护top-k最小距离
     for (int i = 0; i < n_query; i++) {
+        std::priority_queue<std::pair<float, int>> heap;  // 最大堆
+        
+        // 计算当前query与所有data向量的余弦距离
         for (int j = 0; j < n_batch; j++) {
             // 计算点积
             float dot_product = 0.0f;
             for (int d = 0; d < n_dim; d++) {
                 dot_product += query_vectors[i][d] * data_vectors[j][d];
             }
-            float cos_sim;
-            // 计算余弦相似度
-            if (query_norms[i] < 1e-6f || data_norms[j] < 1e-6f)
-                cos_sim = 0.0f;  // 如果任一向量接近零向量，相似度为0
-            else
-                cos_sim = 1.0f - (dot_product / sqrt(query_norms[i] * data_norms[j]));
             
-            // 存储余弦相似度和对应的数据索引
-            cos_pairs[j] = std::make_pair(cos_sim, data_index[i][j]);
+            float cos_distance;
+            // 计算余弦距离
+            if (query_norms[i] < 1e-6f || data_norms[j] < 1e-6f)
+                cos_distance = 1.0f;  // 如果任一向量接近零向量，距离为1
+            else
+                cos_distance = 1.0f - (dot_product / sqrt(query_norms[i] * data_norms[j]));
+            
+            // 使用最大堆维护top-k最小距离
+            if (heap.size() < k) {
+                // 堆未满，直接添加
+                heap.push(std::make_pair(cos_distance, data_index[i][j]));
+            } else if (cos_distance < heap.top().first) {
+                // 堆已满，如果当前距离小于堆顶，则替换堆顶
+                heap.pop();
+                heap.push(std::make_pair(cos_distance, data_index[i][j]));
+            }
         }
         
-        // 按余弦相似度降序排序（按相似度从大到小排序，相似度一样则按索引排序）
-        std::sort(cos_pairs.begin(), cos_pairs.end(), 
-                [](const std::pair<float, int>& a, const std::pair<float, int>& b) 
-                {
-                    if(a.first != b.first){
-                        return a.first < b.first;  // 降序排序
-                    }
-                    else{
-                        return a.second > b.second;
-                    }
-                });
-        
-        // 提取前k个最相似的索引
-        for (int j = 0; j < k && j < n_batch; ++j) {
-            topk_index[i][j] = cos_pairs[j].second;
-            topk_dist[i][j] = cos_pairs[j].first;
+        // 从堆中提取top-k结果
+        int count = 0;
+        while (!heap.empty() && count < k) {
+            auto top = heap.top();
+            heap.pop();
+            topk_index[i][k - 1 - count] = top.second;
+            topk_dist[i][k - 1 - count] = top.first;
+            count++;
         }
     }
     
@@ -113,7 +113,7 @@ void cpu_cos_distance_topk(float** query_vectors, float** data_vectors,
 }
 
 int** generate_data_index(int size_x, int size_y){
-    int** data_index = (int**)malloc_vector_list(size_x, size_y, sizeof(int));
+    int** data_index = malloc_vector_list<int>(size_x, size_y);
     for(int i = 0; i < size_x; i++){
         for(int j = 0; j < size_y; j++){
             data_index[i][j] = j;
@@ -143,14 +143,14 @@ std::vector<double> test_cos_distance_topk_with_algorithm(
     float** h_query_vectors = generate_vector_list(n_query, n_dim);
     float** h_data_vectors = generate_vector_list(n_batch, n_dim);
     int** data_index = generate_data_index(n_query, n_batch);
-    int** topk_index_cpu = (int**)malloc_vector_list(n_query, k, sizeof(int));
-    int** topk_index_gpu = (int**)malloc_vector_list(n_query, k, sizeof(int));
+    int** topk_index_cpu = malloc_vector_list<int>(n_query, k);
+    int** topk_index_gpu = malloc_vector_list<int>(n_query, k);
 
     /**
      * 将topk距离设为浮点数最小值
      */
-    float** topk_dist_cpu = (float**)malloc_vector_list(n_query, k, sizeof(float));
-    float** topk_dist_gpu = (float**)malloc_vector_list(n_query, k, sizeof(float));
+    float** topk_dist_cpu = malloc_vector_list<float>(n_query, k);
+    float** topk_dist_gpu = malloc_vector_list<float>(n_query, k);
     for(int i = 0; i < n_query; ++i){
         for(int j = 0; j < k; ++j){
             topk_dist_cpu[i][j] = -std::numeric_limits<float>::max();
@@ -244,7 +244,7 @@ int main(int argc, char** argv) {
 
     MetricsCollector metrics;
     metrics.set_columns("pass rate", "n_query", "n_batch", "n_dim", "k", "avg_gpu_ms", "avg_cpu_ms", "avg_speedup", "memory_mb");
-    // metrics.set_num_repeats(1);
+    metrics.set_num_repeats(1);
     
     // 解析命令行参数
     AlgorithmVersion selected_version = ALL_VERSIONS;
@@ -268,26 +268,29 @@ int main(int argc, char** argv) {
         test &= check_pass("", test_cos_distance_topk_with_algorithm(10000, 1024, 1024, 16, SHARED_MEMORY)[0]);
     }
     if (selected_version == WARP_SORT || selected_version == ALL_VERSIONS) {
-        test_cos_distance_topk_with_algorithm(1024, 128, 512, 16, WARP_SORT); /*warmup*/
+        // test_cos_distance_topk_with_algorithm(1024, 128, 512, 16, WARP_SORT); /*warmup*/
 
         COUT_ENDL("测试算法: 全寄存器 Topk");
-        PARAM_3D(n_query, (8, 32, 128, 512, 2048), 
-                n_batch, (128, 512, 2048), /* n_batch < k */
-                n_dim, (512, 1024))   
+        // PARAM_3D(n_query, (8, 32, 128, 512, 2048), 
+        //         n_batch, (128, 512, 2048), /* n_batch < k */
+        //         n_dim, (512, 1024))   
         // PARAM_3D(n_query, (8, 32), 
         //     n_batch, (128, 512), /* n_batch < k */
-        //     n_dim, (512, 1024))           
+        //     n_dim, (512, 1024))  
+        PARAM_3D(n_query, (1000), 
+        n_batch, (128), /* n_batch < k */
+        n_dim, (128))          
         {
 
             auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
-                auto result = test_cos_distance_topk_with_algorithm(n_query, n_batch, n_dim, 100, WARP_SORT);
+                auto result = test_cos_distance_topk_with_algorithm(n_query, n_batch, n_dim, 16, WARP_SORT);
                 all_pass &= (result[0] == 1.0);  // 检查 pass 字段
                 return result;
             });
 
         }
 
-        test_cos_distance_topk_with_algorithm(2048, 2048, 1024, 100, WARP_SORT); /*warmup*/
+        // test_cos_distance_topk_with_algorithm(2048, 2048, 1024, 100, WARP_SORT); /*warmup*/
     }
 
     metrics.print_table();

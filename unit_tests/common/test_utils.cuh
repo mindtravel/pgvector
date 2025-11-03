@@ -5,13 +5,15 @@
 #include <cstdlib>
 #include <algorithm>
 #include <vector>
+#include <cmath>
+#include <limits>
 #include <cuda_runtime.h>
 #include "output_macros.cuh"
 #include "params_macros.cuh"
 #include "metrics_collector.cuh"
 
-#define DEBUG false /* debug模式：用于寻找正确输出和测试函数输出的差异 */
-#define QUIET false /* 静默模式：不打印日志（用于重复运行）*/
+#define DEBUG true /* debug模式：用于寻找正确输出和测试函数输出的差异 */
+#define QUIET true /* 静默模式：不打印日志（用于重复运行）*/
 /**
  * @brief 用宏简化计时语法，并将结果（毫秒）存入指定的变量。
  * @param TESTNAME 字符串字面量，用于日志输出的测试名称。
@@ -74,6 +76,20 @@ template<typename T>
 bool compare_numbers(T a, T b, float epsilon = 1e-5) {
     if constexpr (std::is_floating_point_v<T>) {
         /* 浮点数 */
+        // 特殊处理 inf 和 -inf
+        if (std::isinf(a) && std::isinf(b)) {
+            // 两个都是 inf，检查符号是否相同
+            return (a > 0 && b > 0) || (a < 0 && b < 0);
+        }
+        // 如果一个 is inf 另一个不是，则不相等
+        if (std::isinf(a) || std::isinf(b)) {
+            return false;
+        }
+        // 特殊处理 nan
+        if (std::isnan(a) || std::isnan(b)) {
+            // nan 永远不等于任何值（包括另一个 nan）
+            return false;
+        }
         return std::abs(a - b) < epsilon;
     } else {
         /* 整数 */
@@ -255,8 +271,40 @@ int count_equal_elements_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e
 float** generate_vector_list(int n_batch, int n_dim);
 float*** generate_large_scale_vectors(int n_lists, int n_batch, int n_dim);
 
-void** malloc_vector_list(size_t n_batch, size_t n_dim, size_t elem_size);
-void free_vector_list(void** vector_list);
+/**
+ * 分配向量组的空间
+ */
+template<typename T>
+T** malloc_vector_list(size_t n_batch, size_t n_dim) {
+    // 分配连续的数据内存块
+    T* data = (T*)malloc(n_batch * n_dim * sizeof(T));
+    if (data == NULL) return NULL;
+    
+    // 分配行指针数组
+    T** vector_list = (T**)malloc(n_batch * sizeof(T*));
+    if (vector_list == NULL) {
+        free(data);
+        return NULL;
+    }
+    
+    // 设置每个指针指向对应的行起始位置
+    for (size_t i = 0; i < n_batch; i++) {
+        vector_list[i] = data + i * n_dim;
+    }
+    
+    return vector_list;
+}
+
+/**
+ * 释放向量组的空间
+ */
+template<typename T>
+void free_vector_list(T** vector_list) {
+    if (vector_list != NULL) {
+        free(vector_list[0]);
+        free(vector_list);
+    }
+}
 
 // 函数声明
 void* generate_cluster_query_data(int* query_cluster_group, int n_query, int k, int batch_size);
