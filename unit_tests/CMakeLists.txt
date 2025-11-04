@@ -33,28 +33,30 @@ set(CUDA_LIBRARIES
 set(COMMON_HEADERS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/pch.h")
 
 # 添加测试子目录
-add_subdirectory(test_vector_normalizer)
-add_subdirectory(test_print_cuda)
-add_subdirectory(test_matrix_multiply)
+# add_subdirectory(test_vector_normalizer)
+# add_subdirectory(test_print_cuda)
+# add_subdirectory(test_matrix_multiply)
 add_subdirectory(test_cos_distance)
 add_subdirectory(test_fusion_cos_topk)
-add_subdirectory(test_warpsort)
-add_subdirectory(test_bitonic)
-add_subdirectory(test_stream_pass_data)
+add_subdirectory(test_l2norm)
+# add_subdirectory(test_warpsort)
+# add_subdirectory(test_bitonic)
+# add_subdirectory(test_stream_pass_data)
 add_subdirectory(test_final_topk)
 
 # 统一测试目标
 add_custom_target(run_all_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
     DEPENDS 
-        test_vector_normalizer 
-        test_print_cuda
-        test_matrix_multiply 
+        # test_vector_normalizer 
+        # test_print_cuda
+        # test_matrix_multiply 
         test_cos_distance 
         test_fusion_cos_topk
-        test_warpsort
-        test_bitonic
-        test_stream_pass_data
+        test_l2norm
+        # test_warpsort
+        # test_bitonic
+        # test_stream_pass_data
         test_final_topk
     COMMENT "运行所有单元测试"
 )

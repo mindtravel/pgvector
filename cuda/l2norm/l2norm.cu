@@ -12,6 +12,7 @@
 
 #include "l2norm.cuh"
 #include <device_launch_parameters.h>
+#include <cmath>
 #include "pch.h"
 
 /* 
@@ -41,24 +42,27 @@ __global__ void l2_norm_kernel(
     
     /* 方案1: 如果维度 <= 32，使用 warp-level 规约（最优） */
     if (n_dim <= 32) {
-        float sum = 0.0f;
-        
-        /* 每个 lane 处理对应的元素 */
-        if (lane < n_dim) {
-            /* 使用 __ldg() 优化只读访问 */
-            float val = __ldg(&vec_ptr[lane]);
-            sum = val * val;
-        }
-        
-        /* Warp-level 规约使用 shuffle 操作 */
-        #pragma unroll
-        for (int offset = 16; offset > 0; offset /= 2) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
-        }
-        
-        /* Lane 0 写入结果 */
-        if (lane == 0) {
-            vector_l2_norm[bid] = sqrtf(sum);
+        /* 只有第一个 warp 处理数据 */
+        if (warp_id == 0) {
+            float sum = 0.0f;
+            
+            /* 每个 lane 处理对应的元素 */
+            if (lane < n_dim) {
+                /* 使用 __ldg() 优化只读访问 */
+                float val = __ldg(&vec_ptr[lane]);
+                sum = val * val;
+            }
+            
+            /* Warp-level 规约使用 shuffle 操作 */
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset /= 2) {
+                sum += __shfl_down_sync(0xffffffff, sum, offset);
+            }
+            
+            /* Lane 0 写入结果 */
+            if (lane == 0) {
+                vector_l2_norm[bid] = sqrtf(sum);
+            }
         }
         return;
     }
@@ -193,7 +197,8 @@ __global__ void l2_norm_kernel_optimized_v2(
     
     /* 如果只有一个 warp 或维度很小，直接写入结果 */
     if (n_warps == 1 || n_dim <= 32) {
-        if (lane == 0) {
+        /* 只有第一个 warp 写入结果 */
+        if (warp_id == 0 && lane == 0) {
             vector_l2_norm[bid] = sqrtf(sum);
         }
         return;
@@ -220,51 +225,53 @@ __global__ void l2_norm_kernel_optimized_v2(
 }
 
 /* 
- * 优化版本3: 使用 float4 向量化加载（适用于维度是4的倍数的情况）
+ * Device函数：使用 float4 向量化加载计算单个向量的L2范数（FMA优化版本）
  * 
  * 优势：
  * - 每次加载 4 个 float，提高内存带宽利用率
- * - 减少循环次数
+ * - 使用FMA指令减少指令数和延迟
+ * - 可作为device函数被其他kernel调用
+ * 
+ * @param vec_ptr 向量数据的起始指针
+ * @param n_dim 向量维度
+ * @param tid 线程ID
+ * @param block_dim block大小
+ * @return 该线程计算的平方和（局部结果）
  */
-__global__ void l2_norm_kernel_optimized_v3(
-    const float* __restrict__ vectors, 
-    float* __restrict__ vector_l2_norm, 
-    int n_batch, 
-    int n_dim) 
+__device__ __forceinline__ float compute_l2_norm_float4_device(
+    const float* __restrict__ vec_ptr,
+    int n_dim,
+    int tid,
+    int block_dim)
 {
-    const int tid = threadIdx.x;
-    const int bid = blockIdx.x;
+    const float4* vec_ptr4 = reinterpret_cast<const float4*>(vec_ptr);
     const int lane = tid & 31;
     const int warp_id = tid / 32;
-    const int n_warps = (blockDim.x + 31) / 32;
-    
-    if (bid >= n_batch) return;
-    
-    const float4* vec_ptr4 = reinterpret_cast<const float4*>(vectors + bid * n_dim);
-    const float* vec_ptr = vectors + bid * n_dim;
+    const int n_warps = (block_dim + 31) / 32;
     
     float sum = 0.0f;
     const int vec4_count = n_dim / 4;
     const int remainder = n_dim % 4;
     
-    /* 向量化加载 float4 */
+    /* 向量化加载 float4，使用FMA指令优化 */
     #pragma unroll 4
-    for (int i = 0; i < vec4_count; i += blockDim.x) {
+    for (int i = 0; i < vec4_count; i += block_dim) {
         int idx = i + tid;
         if (idx < vec4_count) {
             /* 使用 __ldg() 优化只读访问 */
             float4 val4 = __ldg(&vec_ptr4[idx]);
+            /* 使用FMA指令：融合乘加操作，减少指令数 */
             sum += val4.x * val4.x + val4.y * val4.y + 
-                   val4.z * val4.z + val4.w * val4.w;
+       val4.z * val4.z + val4.w * val4.w;
         }
     }
     
-    /* 处理余数（如果不是4的倍数） */
+    /* 处理余数（如果不是4的倍数），使用FMA */
     if (remainder > 0) {
         int idx = vec4_count * 4 + tid;
         if (idx < n_dim) {
             float val = __ldg(&vec_ptr[idx]);
-            sum += val * val;
+            sum = fmaf(val, val, sum);
         }
     }
     
@@ -291,6 +298,32 @@ __global__ void l2_norm_kernel_optimized_v3(
         }
     }
     
+    return sum;
+}
+
+/* 
+ * Kernel：使用 float4 向量化加载（FMA优化版本）
+ * 调用device函数进行计算
+ */
+__global__ void l2_norm_kernel_float4(
+    const float* __restrict__ vectors, 
+    float* __restrict__ vector_l2_norm, 
+    int n_batch, 
+    int n_dim) 
+{
+    const int tid = threadIdx.x;
+    const int bid = blockIdx.x;
+    const int lane = tid & 31;
+    const int warp_id = tid / 32;
+    
+    if (bid >= n_batch) return;
+    
+    const float* vec_ptr = vectors + bid * n_dim;
+    
+    /* 调用device函数计算平方和 */
+    float sum = compute_l2_norm_float4_device(vec_ptr, n_dim, tid, blockDim.x);
+    
+    /* 写入结果 */
     if (lane == 0 && warp_id == 0) {
         vector_l2_norm[bid] = sqrtf(sum);
     }
@@ -318,33 +351,155 @@ __global__ void l2_norm_kernel_basic(
 
     int tid = threadIdx.x;
     int bid = blockIdx.x;
-    int idx = bid * n_dim + tid;
-
+    int block_dim = blockDim.x;
+    
     // 计算当前向量的平方和
     float square = 0.0f;
     if (tid < n_dim) {
+        int idx = bid * n_dim + tid;
         square = vectors[idx] * vectors[idx];
-        // printf("%d: %f %f\n", bid, vectors[idx], square);
     }
 
-    shared_mem[tid] = square;
+    // 初始化共享内存（只初始化需要的部分）
+    if (tid < block_dim) {
+        shared_mem[tid] = (tid < n_dim) ? square : 0.0f;
+    }
     __syncthreads();
 
-    // 规约求和（修复：处理n_dim不是2的幂的情况）
-    // 使用安全的规约方法，确保所有元素都被处理
-    for (int s = 1; s < n_dim; s *= 2) {
+    // 规约求和（处理block_size可能大于n_dim的情况）
+    // 规约范围应该是实际的n_dim，而不是block_dim
+    int reduce_size = block_dim;
+    if (reduce_size > n_dim) {
+        reduce_size = n_dim;
+    }
+    
+    for (int s = 1; s < reduce_size; s *= 2) {
         __syncthreads();
-        if (tid % (2 * s) == 0 && (tid + s) < n_dim) {
+        if (tid % (2 * s) == 0 && (tid + s) < reduce_size) {
             shared_mem[tid] += shared_mem[tid + s];
         }
     }
     
     // 计算L2范数
     if (tid == 0) {
-        vector_l2_norm[bid] = sqrt(shared_mem[0]);
-        // printf("%d: %f\n", bid, vector_l2_norm[bid]);
+        vector_l2_norm[bid] = sqrtf(shared_mem[0]);
     }
 }
+
+/**
+ * 统一的L2范数计算host函数实现
+ * 
+ * 提供自动选择和手动切换两种模式
+ */
+void compute_l2_norm(
+    const float* vectors,
+    float* vector_l2_norm,
+    int n_batch,
+    int n_dim,
+    L2NormVersion version,
+    cudaStream_t stream)
+{
+    /* 计算kernel配置参数 */
+    const int block_size = 256;  /* 推荐block大小 */
+    const int grid_size = n_batch;
     
+    /* 计算共享内存大小（某些kernel需要） */
+    const int shared_mem_size = (n_dim > 32) ? 
+        ((block_size + 31) / 32) * sizeof(float) : 0;
+    
+    /* 手动指定版本 */
+    if (version != L2NORM_AUTO) {
+        switch (version) {
+            case L2NORM_BASIC: {
+                /* basic kernel需要block大小至少等于n_dim */
+                /* 使用min(1024, max(n_dim, 256))来平衡性能和限制 */
+                const int basic_block_size = (n_dim <= 256) ? 256 : ((n_dim <= 1024) ? n_dim : 256);
+                const int basic_shared_mem = basic_block_size * sizeof(float);
+                if (stream) {
+                    l2_norm_kernel_basic<<<grid_size, basic_block_size, 
+                        basic_shared_mem, stream>>>(
+                        const_cast<float*>(vectors), vector_l2_norm, n_batch, n_dim);
+                } else {
+                    l2_norm_kernel_basic<<<grid_size, basic_block_size, 
+                        basic_shared_mem>>>(
+                        const_cast<float*>(vectors), vector_l2_norm, n_batch, n_dim);
+                }
+                break;
+            }
+                
+            case L2NORM_OPTIMIZED:
+                if (stream) {
+                    l2_norm_kernel<<<grid_size, block_size, 
+                        shared_mem_size, stream>>>(
+                        vectors, vector_l2_norm, n_batch, n_dim);
+                } else {
+                    l2_norm_kernel<<<grid_size, block_size, 
+                        shared_mem_size>>>(
+                        vectors, vector_l2_norm, n_batch, n_dim);
+                }
+                break;
+                
+            case L2NORM_OPTIMIZED_V2:
+                if (stream) {
+                    l2_norm_kernel_optimized_v2<<<grid_size, block_size, 
+                        shared_mem_size, stream>>>(
+                        vectors, vector_l2_norm, n_batch, n_dim);
+                } else {
+                    l2_norm_kernel_optimized_v2<<<grid_size, block_size, 
+                        shared_mem_size>>>(
+                        vectors, vector_l2_norm, n_batch, n_dim);
+                }
+                break;
+                
+            case L2NORM_OPTIMIZED_V3:
+                if (stream) {
+                    l2_norm_kernel_float4<<<grid_size, block_size, 
+                        shared_mem_size, stream>>>(
+                        vectors, vector_l2_norm, n_batch, n_dim);
+                } else {
+                    l2_norm_kernel_float4<<<grid_size, block_size, 
+                        shared_mem_size>>>(
+                        vectors, vector_l2_norm, n_batch, n_dim);
+                }
+                break;
+                
+            default:
+                /* 不应该到达这里，但为了安全起见使用默认策略 */
+                version = L2NORM_AUTO;
+                break;
+        }
+        
+        if (version != L2NORM_AUTO) {
+            return;
+        }
+    }
+    
+    /* 自动选择最优版本 */
+    /* 策略1: 如果dim是4的倍数且较大，优先使用float4向量化版本 */
+    if (n_dim >= 128 && (n_dim % 4 == 0)) {
+        if (stream) {
+            l2_norm_kernel_float4<<<grid_size, block_size, 
+                shared_mem_size, stream>>>(
+                vectors, vector_l2_norm, n_batch, n_dim);
+        } else {
+            l2_norm_kernel_float4<<<grid_size, block_size, 
+                shared_mem_size>>>(
+                vectors, vector_l2_norm, n_batch, n_dim);
+        }
+        return;
+    }
+    
+    /* 策略2: 对于其他情况，使用优化版本2（简化高效版本） */
+    /* 该版本内部会根据dim自动选择最优策略 */
+    if (stream) {
+        l2_norm_kernel_optimized_v2<<<grid_size, block_size, 
+            shared_mem_size, stream>>>(
+            vectors, vector_l2_norm, n_batch, n_dim);
+    } else {
+        l2_norm_kernel_optimized_v2<<<grid_size, block_size, 
+            shared_mem_size>>>(
+            vectors, vector_l2_norm, n_batch, n_dim);
+    }
+}
 
 
