@@ -32,7 +32,7 @@ typedef struct {
     
     /* 结果数据 - 按列存储以提高缓存效率 */
     int* query_ids;                  /* 所有查询ID连续存储 */
-    int* vector_ids;                 /* 所有向量ID连续存储 */
+    ItemPointerData* vector_ids;     /* 所有向量TID连续存储（ItemPointer） */
     float* distances;                /* 所有距离连续存储 */
     
     int n_queries;                  /* 查询数量 */
@@ -67,6 +67,14 @@ typedef struct IvfflatBatchScanOpaqueData
     CudaCenterSearchContext* cuda_ctx;  /* CUDA上下文 */
     bool centers_uploaded;              /* 聚类中心是否已上传 */
     float* gpu_batch_distances;         /* GPU批量距离结果 */
+    
+    /* Lists相关字段（用于probe选择） */
+    pairingheap *listQueue;          /* 列表优先级队列 */
+    BlockNumber *listPages;          /* 每个查询选定的列表页面 */
+    IvfflatScanList *lists;          /* 扫描列表数组 */
+    int maxProbes;                   /* 最大probe数量 */
+    int probes;                      /* 实际probe数量 */
+    int listIndex;                   /* 当前列表索引 */
 #endif
 } IvfflatBatchScanOpaqueData;
 
@@ -78,7 +86,7 @@ extern bool ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* v
 extern void ivfflatbatchendscan(IndexScanDesc scan);
 
 /* 批量处理函数声明 */
-extern BatchBuffer* CreateBatchBuffer(int n_queries, int k, MemoryContext mem_ctx);
+extern BatchBuffer* CreateBatchBuffer(int n_queries, int k, int dimensions, MemoryContext mem_ctx);
 extern void ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k);
 extern void GetBatchResults(BatchBuffer* buffer, int query_index, int k, Datum* values, bool* isnull, int* returned_count);
 

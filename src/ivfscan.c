@@ -500,6 +500,75 @@ GetScanItems_GPU(IndexScanDesc scan, Datum value)
 }
 
 /*
+ * Get items (non-GPU version)
+ */
+static void
+GetScanItems(IndexScanDesc scan, Datum value)
+{
+	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
+	TupleDesc	tupdesc = RelationGetDescr(scan->indexRelation);
+	TupleTableSlot *slot = so->vslot;
+	int			batchProbes = 0;
+
+	tuplesort_reset(so->sortstate);
+
+	/* Search closest probes lists */
+	while (so->listIndex < so->maxProbes && (++batchProbes) <= so->probes)
+	{
+		BlockNumber searchPage = so->listPages[so->listIndex++];
+
+		/* Search all entry pages for list */
+		while (BlockNumberIsValid(searchPage))
+		{
+			Buffer		buf;
+			Page		page;
+			OffsetNumber maxoffno;
+
+			buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, searchPage, RBM_NORMAL, so->bas);
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			page = BufferGetPage(buf);
+			maxoffno = PageGetMaxOffsetNumber(page);
+
+			for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno))
+			{
+				IndexTuple	itup;
+				Datum		datum;
+				bool		isnull;
+				ItemId		itemid = PageGetItemId(page, offno);
+
+				itup = (IndexTuple) PageGetItem(page, itemid);
+				datum = index_getattr(itup, 1, tupdesc, &isnull);
+
+				/*
+				 * Add virtual tuple
+				 *
+				 * Use procinfo from the index instead of scan key for
+				 * performance
+				 */
+				ExecClearTuple(slot);
+				slot->tts_values[0] = so->distfunc(so->procinfo, so->collation, datum, value);
+				slot->tts_isnull[0] = false;
+				slot->tts_values[1] = PointerGetDatum(&itup->t_tid);
+				slot->tts_isnull[1] = false;
+				ExecStoreVirtualTuple(slot);
+
+				tuplesort_puttupleslot(so->sortstate, slot);
+			}
+
+			searchPage = IvfflatPageGetOpaque(page)->nextblkno;
+
+			UnlockReleaseBuffer(buf);
+		}
+	}
+
+	tuplesort_performsort(so->sortstate);
+
+#if defined(IVFFLAT_MEMORY)
+	elog(INFO, "memory: %zu MB", MemoryContextMemAllocated(CurrentMemoryContext, true) / (1024 * 1024));
+#endif
+}
+
+/*
  * Zero distance
  */
 static Datum

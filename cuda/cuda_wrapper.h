@@ -1,10 +1,10 @@
 #include <stdbool.h>
+#include <stddef.h>  // for size_t
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-extern int cuda_hello_world(void);
 /*
 * 测试cuda是否可用
 */ 
@@ -15,40 +15,6 @@ extern bool cuda_is_available(void);
 */
 extern bool cuda_basic_test(void);
 
-/*
-* GPU向量搜索相关接口
-*/ 
-extern bool gpu_ivf_search_init(void);
-extern void gpu_ivf_search_cleanup(void);
-/*
-* gpu 批查询函数，先保留
-*/
-extern int gpu_ivf_search_l2_batch(
-    float* query_vector,           // 查询向量
-    float* list_vectors,           // 列表向量数据
-    int* list_offsets,             // 每个列表的偏移量
-    int* list_counts,              // 每个列表的向量数量
-    int num_lists,                 // 列表数量
-    int vector_dim,                // 向量维度
-    float* distances,              // 输出距离
-    int* indices,                  // 输出索引
-    int k                          // 返回前k个结果
-);
-/*
-* gpu 批余弦距离查询函数
-*/
-extern int gpu_ivf_search_cosine_batch(
-    float* query_vector,           // 查询向量
-    float* list_vectors,           // 列表向量数据
-    int* list_offsets,             // 每个列表的偏移量
-    int* list_counts,              // 每个列表的向量数量
-    int num_lists,                 // 列表数量
-    int vector_dim,                // 向量维度
-    float* distances,              // 输出距离
-    int* indices,                  // 输出索引
-    int k                          // 返回前k个结果
-);
-
 // GPU聚类中心距离计算相关结构体和函数
 typedef struct {
     float* d_centers;        // GPU上的聚类中心数据
@@ -58,13 +24,19 @@ typedef struct {
     float* d_batch_distances; // GPU上的批量距离结果
     float* h_centers_pinned; // 页锁定主机内存（零拷贝用）
     
-    // Probes列表数据相关字段
-    float* d_probes_data;    // GPU上的probes列表向量数据
-    int* d_probes_offsets;   // GPU上的probes列表偏移量
-    int* d_probes_counts;    // GPU上的probes列表计数
-    int num_probes_lists;    // probes列表数量
-    int total_probes_vectors; // 总probes向量数量
-    bool probes_uploaded;    // probes数据是否已上传
+    // IndexTuple存储（与CPU端存储方式完全一致）
+    // IndexTuple包含：t_info + t_tid + Vector数据
+    char* d_probe_index_tuples; // GPU上的完整IndexTuple数据（按CPU方式存储）
+    size_t index_tuple_size;    // 每个IndexTuple的大小（包括对齐），0表示变长
+    int* d_probe_tuple_offsets; // 每个IndexTuple在连续内存中的偏移量（用于变长元组）
+    int* d_probe_query_map;     // GPU上的查询映射（每个向量属于哪个查询）
+    float* d_probe_distances;   // GPU上的距离数组
+    int num_probe_candidates;   // 候选数量
+    bool probes_uploaded;       // probes数据是否已上传
+    
+    // GPU TopK排序用的临时缓冲区
+    int* d_topk_indices;        // GPU上的TopK索引
+    float* d_topk_distances;    // GPU上的TopK距离
     
     int num_centers;         // 聚类中心数量
     int dimensions;          // 向量维度
@@ -84,28 +56,36 @@ extern int cuda_compute_batch_center_distances(CudaCenterSearchContext* ctx,
                                              const float* batch_query_vectors,
                                              int num_queries,
                                              float* batch_distances);
-extern int cuda_compute_batch_cosine_distances(CudaCenterSearchContext* ctx,
-                                             const float* batch_query_vectors,
-                                             int num_queries,
-                                             float* batch_distances);
 extern int cuda_upload_centers(CudaCenterSearchContext* ctx, 
                               const float* centers_data);
 extern int cuda_upload_centers_zero_copy(CudaCenterSearchContext* ctx, 
                                         const float* centers_data);
 extern int cuda_set_zero_copy_mode(CudaCenterSearchContext* ctx, bool enable);
 
-// Probes列表数据上传和处理相关函数
-extern int cuda_upload_probes_data(CudaCenterSearchContext* ctx,
-                                  const float* probes_data,
-                                  const int* probes_offsets,
-                                  const int* probes_counts,
-                                  int num_probes_lists,
-                                  int total_probes_vectors,
-                                  int dimensions);
-extern int cuda_compute_batch_probes_distances(CudaCenterSearchContext* ctx,
+// Probe候选数据上传和处理相关函数（IndexTuple模式，与CPU端存储方式完全一致）
+// 上传完整的IndexTuple数据到GPU（包含t_info + t_tid + Vector数据）
+// index_tuples: 指向IndexTuple数组的指针（每个IndexTuple大小可能不同）
+// tuple_sizes: 每个IndexTuple的大小数组（用于变长元组），如果为NULL且fixed_tuple_size>0则使用固定大小
+// tuple_offsets: 每个IndexTuple在连续内存中的偏移量（可选），如果为NULL则假设连续
+// fixed_tuple_size: 固定大小的IndexTuple大小，如果为0则使用tuple_sizes
+extern int cuda_upload_probe_vectors(CudaCenterSearchContext* ctx,
+                                     const char* index_tuples,
+                                     const int* query_ids,
+                                     const size_t* tuple_sizes,
+                                     const int* tuple_offsets,
+                                     int num_candidates,
+                                     int dimensions,
+                                     size_t fixed_tuple_size);
+extern int cuda_compute_batch_probe_distances(CudaCenterSearchContext* ctx,
                                              const float* batch_query_vectors,
-                                             int num_queries,
-                                             float* batch_distances);
+                                             int num_queries);
+extern int cuda_topk_probe_candidates(CudaCenterSearchContext* ctx,
+                                      int k,
+                                      int num_queries,
+                                      int* topk_query_ids,
+                                      void* topk_vector_ids,  /* ItemPointerData数组 */
+                                      float* topk_distances,
+                                      int* topk_counts);
 
 #ifdef __cplusplus
 }

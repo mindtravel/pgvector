@@ -8,12 +8,16 @@
 #include "funcapi.h"
 #include "utils/array.h"
 #include "catalog/pg_type.h"
+#include "catalog/index.h"
+#include "catalog/pg_attribute.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "access/htup_details.h"
 #include "access/htup.h"
 #include "access/heapam.h"
 #include "access/tableam.h"
+#include "access/table.h"
+#include "storage/bufmgr.h"
 #include "utils/snapmgr.h"
 #include "scanbatch.h"
 #include "vector.h"
@@ -173,6 +177,38 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         state->index = index;
         state->batch_keys = batch_keys;
         
+        // 获取堆表 Relation（从索引中获取）
+        // 标记是否由我们打开（需要关闭）
+        state->heap_rel_opened_by_us = false;
+        if (scan->heapRelation) {
+            // 使用索引扫描中的 heapRelation（不需要我们关闭）
+            state->heap_rel = scan->heapRelation;
+        } else {
+            // 如果 scan 中没有 heapRelation，从索引元数据中获取
+            Oid heap_oid = IndexGetRelation(index_oid, false);
+            if (!OidIsValid(heap_oid)) {
+                elog(ERROR, "batch_vector_search_c: 无法获取堆表 OID");
+            }
+            state->heap_rel = table_open(heap_oid, AccessShareLock);
+            state->heap_rel_opened_by_us = true;  // 标记为我们打开的
+        }
+        
+        // 获取 vector_id 字段的属性编号（假设是第1列，通常是主键或id字段）
+        {
+            int attnum;
+            
+            // 使用 get_attnum 通过关系ID和属性名获取属性编号
+            attnum = get_attnum(RelationGetRelid(state->heap_rel), "id");
+            if (attnum == InvalidAttrNumber) {
+                // 如果找不到 "id" 字段，尝试使用第1列
+                state->vector_id_attnum = 1;
+                elog(LOG, "batch_vector_search_c: 未找到 'id' 字段，使用第1列作为 vector_id");
+            } else {
+                state->vector_id_attnum = attnum;
+                elog(LOG, "batch_vector_search_c: 找到 'id' 字段，属性编号 = %d", state->vector_id_attnum);
+            }
+        }
+        
         // 设置返回元组描述符
         if (get_call_result_type(fcinfo, NULL, &funcctx->tuple_desc) != TYPEFUNC_COMPOSITE)
             elog(ERROR, "return type must be a row type");
@@ -193,6 +229,11 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         if (state->index) {
             index_close(state->index, AccessShareLock);
         }
+        if (state->heap_rel && state->heap_rel_opened_by_us) {
+            // 如果 heap_rel 是我们自己打开的，需要关闭它
+            table_close(state->heap_rel, AccessShareLock);
+            state->heap_rel = NULL;  // 避免重复关闭
+        }
         /* batch_keys 由 SRF 内存上下文自动清理 */
         
         // result_values 和 result_nulls 由 SRF 内存上下文自动清理
@@ -212,8 +253,86 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         tuple_nulls[1] = state->result_nulls[base_idx + 1];
         tuple_nulls[2] = state->result_nulls[base_idx + 2];
         
-        elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=%d, distance=%.6f", 
-             state->current_result, DatumGetInt32(values[0]), DatumGetInt32(values[1]), DatumGetFloat8(values[2]));
+        {
+            // values[1] 是 ItemPointer (TID)，需要从堆表中获取实际的 vector_id 值
+            ItemPointer tid = (ItemPointer)DatumGetPointer(values[1]);
+            
+            // 调试：打印TID值
+            if (tid && ItemPointerIsValid(tid)) {
+                elog(LOG, "batch_vector_search_c: 调试 - TID值: (%u,%u)", 
+                     ItemPointerGetBlockNumber(tid),
+                     ItemPointerGetOffsetNumber(tid));
+            }
+            
+            if (tid && ItemPointerIsValid(tid) && state->heap_rel) {
+                HeapTupleData heap_tuple_data;
+                HeapTuple     heap_tuple = &heap_tuple_data;
+                bool          isnull;
+                Datum         vector_id_datum;
+                Snapshot      snapshot;
+                Buffer        buffer = InvalidBuffer;
+                bool          found;
+                
+                // 获取当前快照
+                snapshot = GetActiveSnapshot();
+                
+                // 初始化 heap_tuple 的 t_self 为 TID
+                heap_tuple->t_self = *tid;
+                
+                // 从堆表中获取元组（类似单次查询的方式）
+                // heap_fetch 的签名：bool heap_fetch(Relation relation, Snapshot snapshot,
+                //                                   HeapTuple tuple, Buffer *userbuf, bool keep_buf)
+                found = heap_fetch(state->heap_rel, snapshot, heap_tuple, &buffer, false);
+                
+                if (found && HeapTupleIsValid(heap_tuple)) {
+                    // 从元组中获取 vector_id 字段的值
+                    vector_id_datum = heap_getattr(heap_tuple, 
+                                                   state->vector_id_attnum,
+                                                   RelationGetDescr(state->heap_rel),
+                                                   &isnull);
+                    
+                    if (!isnull) {
+                        // 将 Datum 转换为 int32
+                        values[1] = vector_id_datum;
+                        tuple_nulls[1] = false;
+                        
+                        elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=%d (tid: %u,%u), distance=%.6f", 
+                             state->current_result, 
+                             DatumGetInt32(values[0]), 
+                             DatumGetInt32(values[1]),
+                             ItemPointerGetBlockNumber(tid),
+                             ItemPointerGetOffsetNumber(tid),
+                             DatumGetFloat8(values[2]));
+                    } else {
+                        // vector_id 列为 NULL
+                        tuple_nulls[1] = true;
+                        elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=null (tid: %u,%u), distance=%.6f", 
+                             state->current_result, DatumGetInt32(values[0]),
+                             ItemPointerGetBlockNumber(tid),
+                             ItemPointerGetOffsetNumber(tid),
+                             DatumGetFloat8(values[2]));
+                    }
+                    
+                    // 释放 buffer（如果分配了）
+                    if (BufferIsValid(buffer)) {
+                        ReleaseBuffer(buffer);
+                    }
+                } else {
+                    // 元组不存在或不可见
+                    tuple_nulls[1] = true;
+                    elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=null (tid: %u,%u 元组不存在), distance=%.6f", 
+                         state->current_result, DatumGetInt32(values[0]),
+                         ItemPointerGetBlockNumber(tid),
+                         ItemPointerGetOffsetNumber(tid),
+                         DatumGetFloat8(values[2]));
+                }
+            } else {
+                // TID 无效
+                tuple_nulls[1] = true;
+                elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=null (TID无效), distance=%.6f", 
+                     state->current_result, DatumGetInt32(values[0]), DatumGetFloat8(values[2]));
+            }
+        }
     } else {
         // 处理null结果
         values[0] = (Datum)0;

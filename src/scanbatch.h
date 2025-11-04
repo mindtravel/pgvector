@@ -43,6 +43,9 @@ typedef struct BatchSearchState {
     int current_result;
     IndexScanDesc scan;
     Relation index;
+    Relation heap_rel;          /* 堆表 Relation，用于从 TID 获取 vector_id */
+    bool heap_rel_opened_by_us; /* 标记 heap_rel 是否由我们打开（需要关闭） */
+    int vector_id_attnum;       /* vector_id 字段的属性编号 */
     ScanKeyBatch batch_keys;
 } BatchSearchState;
 

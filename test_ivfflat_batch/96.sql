@@ -1,5 +1,5 @@
 -- ============================================
--- 向量搜索性能对比测试
+-- 向量搜索性能对比测试 96维
 -- 比较传统单个查询 vs 批量查询的性能
 -- ============================================
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -20,17 +20,17 @@ SELECT
 DROP TABLE IF EXISTS test_vectors_perf CASCADE;
 CREATE TABLE test_vectors_perf (
     id SERIAL PRIMARY KEY,
-    embedding vector(128),
+    embedding vector(96),
     category text,
     description text
 );
 
--- 插入测试数据（1000个向量，128维）
+-- 插入测试数据（1000个向量，96维）
 \echo '插入测试数据...'
 INSERT INTO test_vectors_perf (id, embedding, category, description) 
 SELECT 
     i,
-    (SELECT array_agg(sin(i + j)) FROM generate_series(1, 128) j)::vector(128),
+    (SELECT array_agg(sin(i + j)) FROM generate_series(1, 96) j)::vector(96),
     CASE 
         WHEN i % 4 = 0 THEN 'A'
         WHEN i % 4 = 1 THEN 'B' 
@@ -57,10 +57,10 @@ WHERE relname = 'test_vectors_perf_ivfflat_idx';
 
 -- 定义查询向量（确保4个向量互不相同）
 \echo '定义4个查询向量...'
-\set query1 '(SELECT array_agg(sin(100 + j)) FROM generate_series(1, 128) j)::vector(128)'
-\set query2 '(SELECT array_agg(cos(200 + j)) FROM generate_series(1, 128) j)::vector(128)'
-\set query3 '(SELECT array_agg(sin(300 + j) + cos(300 + j)) FROM generate_series(1, 128) j)::vector(128)'
-\set query4 '(SELECT array_agg(sin(400 + j) * cos(400 + j)) FROM generate_series(1, 128) j)::vector(128)'
+\set query1 '(SELECT array_agg(sin(100 + j)) FROM generate_series(1, 96) j)::vector(96)'
+\set query2 '(SELECT array_agg(cos(200 + j)) FROM generate_series(1, 96) j)::vector(96)'
+\set query3 '(SELECT array_agg(sin(300 + j) + cos(300 + j)) FROM generate_series(1, 96) j)::vector(96)'
+\set query4 '(SELECT array_agg(sin(400 + j) * cos(400 + j)) FROM generate_series(1, 96) j)::vector(96)'
 
 -- ============================================
 -- 第一部分：传统单个向量查询（4次查询，每次LIMIT 3）
