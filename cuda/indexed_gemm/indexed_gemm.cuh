@@ -61,5 +61,34 @@ __global__ void indexed_inner_product_with_topk_kernel(
     int* __restrict__ d_topk_index
 );
     
+/**
+ * 流式内积计算 + top-k选择kernel（v2版本：优化数据上传）
+ * 
+ * 新设计特点：
+ * - 使用query到cluster的映射（CSR格式）
+ * - cluster向量只包含涉及的cluster（连续存储）
+ * - 使用cluster_vector_offset定位每个cluster的向量范围
+ * 
+ * @tparam Capacity warp-sort queue的容量（必须是2的幂，且 > k）
+ * @tparam Ascending true表示选择最小距离（升序），false表示最大距离（降序）
+ */
+template<int Capacity, bool Ascending>
+__global__ void indexed_inner_product_with_topk_kernel_v2(
+    float* __restrict__ d_query_group,
+    float* __restrict__ d_cluster_vector,
+    int* __restrict__ d_query_index,
+    
+    float* __restrict__ d_query_norm,
+    float* __restrict__ d_cluster_vector_norm,
+
+    int n_selected_clusters,
+    int n_selected_vectors,
+    int n_dim,
+    int k,
+
+    float* __restrict__ d_topk_dist,
+    int* __restrict__ d_topk_index
+);
+    
 #endif
 
