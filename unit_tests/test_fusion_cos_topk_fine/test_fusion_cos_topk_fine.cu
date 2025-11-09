@@ -77,7 +77,7 @@ void cpu_cos_distance_topk_fine(
                 dot_product += query[d] * vec_ptr[d];
             }
 
-            float cos_distance = 1.0f - dot_product / (query_norm[q] * cluster_vector_norm[v]);
+            float cos_distance = 1.0f - dot_product / (query_norm[query_index[q]] * cluster_vector_norm[v]);
             // if (denom > 1e-12f) {
             //     const float cos_similarity = dot_product / denom;
             //     cos_distance = 1.0f - cos_similarity;
@@ -105,13 +105,10 @@ int* random_select(int n, int n_selected) {
     int* result = (int*)malloc(n_selected * sizeof(int));
     if (!result) return NULL;
     
-    srand(time(NULL));
-    
     int selected = 0;
     int remaining = n;
     
-    for (int i = 1; i <= n && selected < n_selected; i++) {
-        // 以概率 (m - selected) / (n - i + 1) 选择当前元素
+    for (int i = 0; i < n && selected < n_selected; i++) {
         if (rand() % remaining < n_selected - selected) {
             result[selected++] = i;
         }
@@ -132,14 +129,14 @@ std::vector<double> test_fusion_cos_topk_fine_with_algorithm(
     AlgorithmInfo& algo_info = algorithm_registry.at(algo_version);
     bool pass = true;
 
-    if (!QUIET) {
+    // if (!QUIET) {
         COUT_VAL("配置:", "n_query=", n_query,
                  " n_selected_querys=", n_selected_querys,
                  " n_vectors=", n_selected_vectors,
                  " n_dim=", n_dim,
                  " k=", k,
                  " 算法=", algo_info.description);
-    }
+    // }
 
     const size_t query_bytes = static_cast<size_t>(n_query) * n_dim * sizeof(float);
     const size_t vector_bytes = static_cast<size_t>(n_selected_vectors) * n_dim * sizeof(float);
@@ -149,8 +146,8 @@ std::vector<double> test_fusion_cos_topk_fine_with_algorithm(
     float** h_cluster_vectors = generate_vector_list(n_selected_vectors, n_dim);
     int* h_query_index = random_select(n_query, n_selected_querys);
 
-    std::vector<float> h_query_norm(n_query, 0.0f);
-    std::vector<float> h_cluster_vector_norm(n_selected_vectors, 0.0f);
+    float* h_query_norm = (float*)malloc(n_query * sizeof(float));
+    float* h_cluster_vector_norm = (float*)malloc(n_selected_vectors * sizeof(float));
 
     for (int q = 0; q < n_query; q++) {
         float sum = 0.0f;
@@ -194,8 +191,8 @@ std::vector<double> test_fusion_cos_topk_fine_with_algorithm(
     cudaMemcpy(d_query_index, h_query_index, n_selected_querys * sizeof(int), cudaMemcpyHostToDevice);
     CHECK_CUDA_ERRORS;
 
-    cudaMemcpy(d_query_norm, h_query_norm.data(), n_query * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_cluster_vector_norm, h_cluster_vector_norm.data(), n_selected_vectors * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_query_norm, h_query_norm, n_query * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_cluster_vector_norm, h_cluster_vector_norm, n_selected_vectors * sizeof(float), cudaMemcpyHostToDevice);
     CHECK_CUDA_ERRORS;
 
     double gpu_duration_ms = 0.0;
@@ -229,16 +226,15 @@ std::vector<double> test_fusion_cos_topk_fine_with_algorithm(
     double cpu_duration_ms = 0.0;
     int** h_topk_index_cpu = malloc_vector_list<int>(n_query, k);
     float** h_topk_dist_cpu = malloc_vector_list<float>(n_query, k);
-    // std::vector<int> h_topk_index_cpu(n_query * k);
-    // std::vector<float> h_topk_dist_cpu(n_query * k);
+
     MEASURE_MS_AND_SAVE("cpu耗时:", cpu_duration_ms,
         cpu_cos_distance_topk_fine(
             h_query_vectors,
             h_cluster_vectors,
             h_query_index,
             
-            h_query_norm.data(),
-            h_cluster_vector_norm.data(),
+            h_query_norm,
+            h_cluster_vector_norm,
             
             h_topk_index_cpu,
             h_topk_dist_cpu,
@@ -250,13 +246,7 @@ std::vector<double> test_fusion_cos_topk_fine_with_algorithm(
         );
     );
 
-    // std::vector<float*> gpu_rows(n_query);
-    // std::vector<float*> cpu_rows(n_query);
-    // for (int q = 0; q < n_query; q++) {
-    //     gpu_rows[q] = h_topk_dist_gpu.data() + q * k;
-    //     cpu_rows[q] = h_topk_dist_cpu.data() + q * k;
-    // }
-    pass &= compare_set_2D(h_topk_dist_gpu, h_topk_dist_cpu, n_query, k, EPSILON);
+    pass &= compare_set_2D(h_topk_dist_gpu, h_topk_dist_cpu, n_selected_querys, k, EPSILON);
 
     cudaFree(d_query_vectors);
     cudaFree(d_cluster_vectors);
@@ -318,19 +308,24 @@ bool run_algorithm_tests(AlgorithmVersion selected_version) {
         MetricsCollector metrics;
         metrics.set_columns("pass rate", "n_query", "n_select_querys", "n_vectors", "n_dim", "k",
                              "avg_gpu_ms", "avg_cpu_ms", "avg_speedup", "memory_mb");
-        metrics.set_num_repeats(1);
-
-        // PARAM_3D(n_query, (4, 32, 128),
-        //          n_clusters, (3, 10, 20),
-        //          n_dim, (64, 128, 256))
-        PARAM_3D(n_query, (10000),
-                 n_selected_querys, (10),//, 100, 1000),
-                 n_dim, (64))
+        metrics.set_num_repeats(100);
+        // metrics.set_num_repeats(1);
+        
+        PARAM_3D(n_selected_querys, (1, 200, 1200),
+                 n_selected_vectors, (1024),
+                 n_dim, (128))
+        // PARAM_3D(n_selected_vectors, (128, 1000, 10000),
+        //          n_selected_querys, (100, 1000),
+        //          n_dim, (128, 512, 1024))
+        // PARAM_3D(n_selected_vectors, (128, 1000, 10000),
+        //          n_selected_querys, (10, 100, 1000),
+        //          n_dim, (1, 4, 64, 25, 73, 100, 111, 128, 200, 512, 1024))
         {
             // int n_selected_vectors = 10000;
             // int k = 100;
-            int n_selected_vectors = 10;
-            int k = 2;
+            int n_query = 10000;
+            // int n_selected_vectors = 10000;
+            int k = 100;
 
             auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
                 auto result = test_fusion_cos_topk_fine_with_algorithm(
@@ -366,6 +361,7 @@ int main(int argc, char** argv) {
     }
 
     bool all_pass = run_algorithm_tests(selected_version);
-    COUT_ENDL("\n所有测试:", (all_pass ? " ✅ PASS" : " ❌ FAIL"));
+    COUT_ENDL("\n所有测试:", (all_pass ? " ✅ PASS" : " ❌ FAIL"));        
+
     return all_pass ? 0 : 1;
 }

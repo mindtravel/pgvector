@@ -67,12 +67,6 @@ __device__ __forceinline__ float dot_product_accumulate(
     return sum;
 }
 
-__device__ __forceinline__ void prefetch_l2(const void* ptr) {
-#if __CUDA_ARCH__ >= 700
-    asm volatile("prefetch.global.L2 [%0];" :: "l"(ptr));
-#endif
-}
-
 /**
  * 流式内积计算 + top-k选择kernel（v2版本：优化数据上传）
  *
@@ -112,20 +106,13 @@ __global__ void indexed_inner_product_with_topk_kernel_v2_static(
 
     WarpSortFiltered<Capacity, Ascending, float, int> queue(k);
 
+    // __syncwarp();
+
     int max_iterations = (n_selected_vectors + kWarpSize - 1) / kWarpSize;
 
     for (int iter = 0; iter < max_iterations; ++iter) {
         int vec_idx = iter * kWarpSize + lane;
-        bool has_valid_vec = (vec_idx < n_selected_vectors);
-
-        // if (iter + 1 < max_iterations) {
-        //     int next_vec_idx = (iter + 1) * kWarpSize + lane;
-        //     if (next_vec_idx < n_selected_vectors) {
-        //         const float* next_vec_ptr = d_cluster_vector + next_vec_idx * Dim;
-        //         prefetch_l2(next_vec_ptr);
-        //         prefetch_l2(d_cluster_vector_norm + next_vec_idx);
-        //     }
-        // }
+        bool has_valid_vec = (iter < max_iterations) && (vec_idx < n_selected_vectors);
 
         if (!has_valid_vec) {
             queue.add(dummy_val, -1);
@@ -203,15 +190,6 @@ __global__ void indexed_inner_product_with_topk_kernel_v2_generic(
             int vec_idx = iter * kWarpSize + lane;
             bool has_valid_vec = (vec_idx < n_selected_vectors);
 
-            if (iter + 1 < max_iterations) {
-                int next_vec_idx = (iter + 1) * kWarpSize + lane;
-                if (next_vec_idx < n_selected_vectors) {
-                    const float* next_vec_ptr = d_cluster_vector + next_vec_idx * n_dim;
-                    prefetch_l2(next_vec_ptr);
-                    prefetch_l2(d_cluster_vector_norm + next_vec_idx);
-                }
-            }
-
             if (!has_valid_vec) {
                 queue.add(dummy_val, -1);
             } else {
@@ -232,15 +210,6 @@ __global__ void indexed_inner_product_with_topk_kernel_v2_generic(
         for (int iter = 0; iter < max_iterations; ++iter) {
             int vec_idx = iter * kWarpSize + lane;
             bool has_valid_vec = (vec_idx < n_selected_vectors);
-
-            if (iter + 1 < max_iterations) {
-                int next_vec_idx = (iter + 1) * kWarpSize + lane;
-                if (next_vec_idx < n_selected_vectors) {
-                    const float* next_vec_ptr = d_cluster_vector + next_vec_idx * n_dim;
-                    prefetch_l2(next_vec_ptr);
-                    prefetch_l2(d_cluster_vector_norm + next_vec_idx);
-                }
-            }
 
             if (!has_valid_vec) {
                 queue.add(dummy_val, -1);

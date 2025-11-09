@@ -327,7 +327,7 @@ __global__ void fusion_cos_topk_warpsort_fine_kernel(
  * - 使用d_num_samples数组在kernel中限制处理范围
  */
 void cuda_cos_topk_warpsort_fine(
-    const float* d_query_group,
+    const float* d_query_group,         /* query向量数据 */
     const float* d_cluster_vector,
     const int* d_cluster_query_offset,
     const int* d_cluster_query_data,
@@ -335,15 +335,15 @@ void cuda_cos_topk_warpsort_fine(
     const int* d_cluster_vector_num,
     const float* d_query_norm,
     const float* d_cluster_vector_norm,
-    int* d_topk_index,
-    float* d_topk_dist,
-    int n_query,
-    int distinct_cluster_count,
+    int* d_topk_index,                  /* 结果：topk 索引 */
+    float* d_topk_dist,                 /* 结果：topk 剧烈 */
+    int n_query,                        /* batch中的query数量 */
+    int n_total_cluster,                /* 聚类总数 */
     int n_dim,
-    int n_topn,
-    int n_total_vectors,
-    int max_candidates_per_query,  // 所有query的最大候选数（在host端计算，基于实际值）
-    const int* d_num_samples        // 每个query的实际候选数量 [n_query]（用于限制处理范围）
+    int k,                              /* topk的数量 */
+    int n_total_vectors,                /**/
+    int max_candidates_per_query,       // 所有query的最大候选数（在host端计算，基于实际值）
+    const int* d_num_samples            // 每个query的实际候选数量 [n_query]（用于限制处理范围）
 ) {
     /**
      * 策略：
@@ -387,7 +387,7 @@ void cuda_cos_topk_warpsort_fine(
         CUDATimer timer_inner_product("Indexed Inner Product Kernel", ENABLE_CUDA_TIMING);
         // 调用索引化的内积计算kernel
         // 每个block处理一个cluster
-        dim3 grid(distinct_cluster_count);
+        dim3 grid(n_total_cluster);
         dim3 block(256); // 每个block使用256个线程
         
         // 暂时禁用共享内存优化，避免misaligned address错误
@@ -405,7 +405,7 @@ void cuda_cos_topk_warpsort_fine(
             d_query_pos_atomic,  // 原子计数器数组，仅用于分配存储位置
             d_num_samples,  // 每个query的实际候选数量（用于边界检查）
             n_query,
-            distinct_cluster_count,
+            n_total_cluster,
             n_dim,
             n_total_vectors,
             max_candidates_per_query
@@ -442,7 +442,7 @@ void cuda_cos_topk_warpsort_fine(
     // 为每个query调用top-k选择kernel
     // 选择capacity（在块外定义，以便debug代码访问）
     int capacity = 32;
-    while (capacity < n_topn) capacity <<= 1;
+    while (capacity < k) capacity <<= 1;
     capacity = min(capacity, 256);  // 限制最大capacity
     
     dim3 topk_grid(n_query);
@@ -460,7 +460,7 @@ void cuda_cos_topk_warpsort_fine(
                 d_index,
                 n_query,
                 max_candidates_per_query,  // 使用实际的最大候选数（而非固定上限）
-                n_topn,
+                k,
                 d_topk_dist,
                 d_topk_index
             );
@@ -472,7 +472,7 @@ void cuda_cos_topk_warpsort_fine(
                 d_index,
                 n_query,
                 max_candidates_per_query,  // 使用实际的最大候选数（而非固定上限）
-                n_topn,
+                k,
                 d_topk_dist,
                 d_topk_index
             );
@@ -484,7 +484,7 @@ void cuda_cos_topk_warpsort_fine(
                 d_index,
                 n_query,
                 max_candidates_per_query,  // 使用实际的最大候选数（而非固定上限）
-                n_topn,
+                k,
                 d_topk_dist,
                 d_topk_index
             );
@@ -507,26 +507,26 @@ void cuda_cos_topk_warpsort_fine(
     // Debug: 检查top-k结果
     if (!QUIET) {
         printf("\n=== GPU Debug: Top-K Kernel Info ===\n");
-        printf("n_topn=%d, capacity=%d, grid=(%d,1,1), block=(%d,1,1)\n", 
-               n_topn, capacity, n_query, 32);
+        printf("k=%d, capacity=%d, grid=(%d,1,1), block=(%d,1,1)\n", 
+               k, capacity, n_query, 32);
         
-        float* h_topk_dist = (float*)malloc(n_query * n_topn * sizeof(float));
-        int* h_topk_index = (int*)malloc(n_query * n_topn * sizeof(int));
+        float* h_topk_dist = (float*)malloc(n_query * k * sizeof(float));
+        int* h_topk_index = (int*)malloc(n_query * k * sizeof(int));
         
-        cudaMemcpy(h_topk_dist, d_topk_dist, n_query * n_topn * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_topk_index, d_topk_index, n_query * n_topn * sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_topk_dist, d_topk_dist, n_query * k * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_topk_index, d_topk_index, n_query * k * sizeof(int), cudaMemcpyDeviceToHost);
         
         printf("d_topk_dist:\n");
         for (int i = 0; i < n_query; i++) {
-            for (int j = 0; j < n_topn; j++) {
-                printf("%.4f ", h_topk_dist[i * n_topn + j]);
+            for (int j = 0; j < k; j++) {
+                printf("%.4f ", h_topk_dist[i * k + j]);
             }
             printf("\n");
         }
         printf("d_topk_index:\n");
         for (int i = 0; i < n_query; i++) {
-            for (int j = 0; j < n_topn; j++) {
-                printf("%d ", h_topk_index[i * n_topn + j]);
+            for (int j = 0; j < k; j++) {
+                printf("%d ", h_topk_index[i * k + j]);
             }
             printf("\n");
         }

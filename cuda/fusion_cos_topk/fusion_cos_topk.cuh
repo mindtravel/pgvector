@@ -7,9 +7,15 @@
  * 融合算子：纯寄存器+双调排序 实现 topk
  **/
 __global__ void fusion_cos_topk_warpsort_kernel(
-    float* d_query_norm, float* d_data_norm, float* d_inner_product, int* d_index,
-    int* topk_index, float* topk_dist,
-    int n_query, int n_batch, int k
+    float* d_query_norm, 
+    float* d_data_norm, 
+    float* d_inner_product, 
+    int* d_index,
+    int* topk_index, 
+    float* topk_dist,
+    int n_query, 
+    int n_batch, 
+    int k
 );
 
 
@@ -36,10 +42,15 @@ __global__ void fusion_cos_topk_sharedmem_kernel(
  * 融合算子：纯寄存器+双调排序 实现 topk
  **/
 void cuda_cos_topk_warpsort(
-    float** h_query_vector_group, float** h_data_vector_group, 
-    int** data_index, int** topk_index, float** topk_cos_dist,
-    int n_query, int n_batch, int n_dim,
-    int k /*查找的最近邻个数*/
+    float** h_query_vector_group,       /*query向量*/ 
+    float** h_data_vector_group,        /*data向量也就是聚类中心*/
+    int** data_index,                   /*data向量也就是聚类中心索引（这个算子在设计的时候，需要传入一个索引数组，但是聚类的索引如果是顺序的话，到时候我就把这个参数去掉）*/
+    int** topk_index,                   /*结果：需要精筛的聚类中心的索引 [n_querys * n_probes]*/
+    float** topk_cos_dist,              /*结果：需要精筛的聚类中心的距离 [n_querys * n_probes]（不一定用得上）*/
+    int n_query,                        /*query数量*/
+    int n_batch,                        /*data向量个数，也就是n_total_clusters*/
+    int n_dim,                          /*向量维数*/
+    int k                               /*查找的最近邻个数，也就是 n_probes*/
 );
 
 /**
@@ -165,6 +176,47 @@ void cuda_cos_topk_warpsort_fine_v1(
     int n_dim,
     int n_topn,
     int n_total_vectors
+);
+
+/**
+ * 流式融合余弦距离top-k计算（v2版本：优化数据上传）
+ * 
+ * 新设计特点：
+ * 1. 只上传涉及的cluster向量（而非所有cluster）
+ * 2. 使用query到cluster的映射（CSR格式）
+ * 3. 预计算query和cluster向量的l2norm
+ * 4. cluster向量在GPU上连续存储（只包含涉及的cluster）
+ * 
+ * @param d_query_group query向量 [n_query * n_dim]
+ * @param d_cluster_vector 涉及的cluster向量（连续存储）[n_selected_vectors * n_dim]
+ * @param d_query_cluster_offset query到cluster映射的offset [n_query+1]
+ * @param d_query_cluster_data query到cluster映射的data [total_relations]
+ * @param d_cluster_vector_offset 每个cluster在d_cluster_vector中的起始位置 [n_selected_clusters+1]
+ * @param d_query_norm query的l2norm [n_query]
+ * @param d_cluster_vector_norm cluster向量的l2norm [n_selected_vectors]
+ * @param d_topk_index [out] 每个query的topk索引 [n_query * k]
+ * @param d_topk_dist [out] 每个query的topk距离 [n_query * k]
+ * @param n_query query数量
+ * @param n_selected_clusters 涉及的cluster数量
+ * @param n_selected_vectors 涉及的向量总数
+ * @param n_dim 向量维度
+ * @param k topk数量
+ */
+void cuda_cos_topk_warpsort_fine_v2(
+    float* d_query_group,
+    float* d_cluster_vector,
+    int* d_query_index,
+    
+    float* d_query_norm,
+    float* d_cluster_vector_norm,
+
+    int* d_topk_index,
+    float* d_topk_dist,
+    
+    int n_selected_clusters,
+    int n_selected_vectors,
+    int n_dim,
+    int k
 );
 
 
