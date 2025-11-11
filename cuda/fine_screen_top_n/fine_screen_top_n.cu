@@ -5,6 +5,7 @@
 #include <thrust/fill.h>
 #include <limits.h>
 #include <float.h>
+#include <vector>
 
 #define ENABLE_CUDA_TIMING 0
 
@@ -336,4 +337,91 @@ void fine_screen_top_n(
     cudaFree(d_query_mutex);
     cudaFree(d_topn_index);
     cudaFree(d_topn_dist);
+}
+
+void fine_screen_top_n_blocks(
+    float* h_query_group,
+    int n_query,
+    int n_dim,
+    int n_topn,
+    float** h_block_vectors,
+    int* h_block_vector_counts,
+    int block_count,
+    int* h_block_query_offset,
+    int* h_block_query_data,
+    int* h_query_topn_index,
+    float* h_query_topn_dist
+) {
+    if (n_query <= 0 || n_dim <= 0 || n_topn <= 0 || block_count <= 0) {
+        return;
+    }
+
+    float* d_query_group = nullptr;
+    size_t query_bytes = static_cast<size_t>(n_query) * n_dim * sizeof(float);
+    cudaMalloc(&d_query_group, query_bytes);
+    cudaMemcpy(d_query_group, h_query_group, query_bytes, cudaMemcpyHostToDevice);
+
+    std::vector<float*> d_block_buffers(block_count, nullptr);
+    for (int block_id = 0; block_id < block_count; ++block_id) {
+        int vec_count = h_block_vector_counts[block_id];
+        if (vec_count <= 0 || !h_block_vectors[block_id]) {
+            continue;
+        }
+        size_t bytes = static_cast<size_t>(vec_count) * n_dim * sizeof(float);
+        cudaMalloc(&d_block_buffers[block_id], bytes);
+        cudaMemcpy(d_block_buffers[block_id],
+                   h_block_vectors[block_id],
+                   bytes,
+                   cudaMemcpyHostToDevice);
+    }
+
+    float** d_block_ptrs = nullptr;
+    cudaMalloc(&d_block_ptrs, block_count * sizeof(float*));
+    cudaMemcpy(d_block_ptrs, d_block_buffers.data(),
+               block_count * sizeof(float*), cudaMemcpyHostToDevice);
+
+    int* d_block_vector_counts = nullptr;
+    cudaMalloc(&d_block_vector_counts, block_count * sizeof(int));
+    cudaMemcpy(d_block_vector_counts, h_block_vector_counts,
+               block_count * sizeof(int), cudaMemcpyHostToDevice);
+
+    int* d_block_query_offset = nullptr;
+    cudaMalloc(&d_block_query_offset, (block_count + 1) * sizeof(int));
+    cudaMemcpy(d_block_query_offset, h_block_query_offset,
+               (block_count + 1) * sizeof(int), cudaMemcpyHostToDevice);
+
+    size_t block_query_entries = static_cast<size_t>(h_block_query_offset[block_count]);
+    int* d_block_query_data = nullptr;
+    if (block_query_entries > 0) {
+        cudaMalloc(&d_block_query_data, block_query_entries * sizeof(int));
+        cudaMemcpy(d_block_query_data, h_block_query_data,
+                   block_query_entries * sizeof(int), cudaMemcpyHostToDevice);
+    }
+
+    int* d_topn_index = nullptr;
+    float* d_topn_dist = nullptr;
+    cudaMalloc(&d_topn_index, static_cast<size_t>(n_query) * n_topn * sizeof(int));
+    cudaMalloc(&d_topn_dist, static_cast<size_t>(n_query) * n_topn * sizeof(float));
+    cudaMemset(d_topn_index, 0xff, static_cast<size_t>(n_query) * n_topn * sizeof(int));
+    cudaMemset(d_topn_dist, 0, static_cast<size_t>(n_query) * n_topn * sizeof(float));
+
+    // TODO: 精筛 kernel 待实现
+
+    cudaMemcpy(h_query_topn_index, d_topn_index,
+               static_cast<size_t>(n_query) * n_topn * sizeof(int),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_query_topn_dist, d_topn_dist,
+               static_cast<size_t>(n_query) * n_topn * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    cudaFree(d_topn_dist);
+    cudaFree(d_topn_index);
+    if (d_block_query_data) cudaFree(d_block_query_data);
+    cudaFree(d_block_query_offset);
+    cudaFree(d_block_vector_counts);
+    cudaFree(d_block_ptrs);
+    for (float*& ptr : d_block_buffers) {
+        if (ptr) cudaFree(ptr);
+    }
+    cudaFree(d_query_group);
 }
