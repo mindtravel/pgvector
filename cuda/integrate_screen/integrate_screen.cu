@@ -255,7 +255,7 @@ void batch_search_pipeline(float** query_batch,
             std::vector<float> fine_topn_dist(static_cast<size_t>(n_query) * k);
 
             fine_screen_top_n_blocks(
-                h_query_group,
+                h_query_flat.data(),
                 n_query,
                 n_dim,
                 k,
