@@ -211,7 +211,7 @@ __global__ void cluster_l2_distance_kernel(
 
 }
 
-void fine_screen_top_n(
+void fine_screen_top_n_old(
     float* h_query_group, int* h_query_cluster_group, int* h_cluster_query_offset, int* h_cluster_query_data,
     int* cluster_map,
     int* h_cluster_vector_index, int* h_cluster_vector_num, float** h_cluster_vector,
