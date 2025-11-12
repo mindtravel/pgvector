@@ -54,8 +54,8 @@ echo "运行测试..."
 # echo "运行 final_topk 测试..."
 # ./test_final_topk/test_final_topk
 # echo "=================================="
-echo "运行 integrate_screen 测试..."
-./test_integrate_screen/test_integrate_screen 
+echo "运行 integrated_coarse_fine 测试..."
+./test_integrated_coarse_fine/test_integrated_coarse_fine 
 echo "=================================="
 
 echo "所有测试完成！"
