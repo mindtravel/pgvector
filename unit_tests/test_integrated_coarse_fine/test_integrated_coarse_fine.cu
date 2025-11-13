@@ -1,8 +1,11 @@
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include "../../cuda/integrate_screen/integrate_screen.cuh"
@@ -107,6 +110,15 @@ struct QueryBatch {
     std::vector<float*> ptrs;
 };
 
+static float l2_distance(const float* a, const float* b, int dim) {
+    float sum = 0.0f;
+    for (int i = 0; i < dim; ++i) {
+        float diff = a[i] - b[i];
+        sum += diff * diff;
+    }
+    return std::sqrt(sum);
+}
+
 static QueryBatch generate_queries(const BenchmarkCase& config, std::mt19937& rng) {
     std::uniform_real_distribution<float> value_dist(-1.0f, 1.0f);
     QueryBatch batch;
@@ -132,6 +144,87 @@ static std::vector<float> generate_cluster_centers(const BenchmarkCase& config,
     return centers;
 }
 
+static void cpu_coarse_fine_search(const BenchmarkCase& config,
+                                   const QueryBatch& queries,
+                                   const ClusterDataset& dataset,
+                                   const std::vector<float>& centers,
+                                   int n_cluster_per_query,
+                                   int topn,
+                                   std::vector<int>& out_index,
+                                   std::vector<float>& out_dist) {
+    const int n_query = config.n_query;
+    const int n_dim = config.vector_dim;
+    const int n_clusters = config.n_clusters;
+
+    struct Pair { float dist; int idx; };
+    std::vector<int> coarse_indices(static_cast<size_t>(n_query) * n_cluster_per_query);
+
+    const unsigned num_threads = std::max(1u, std::thread::hardware_concurrency());
+    auto worker = [&](int start, int end) {
+        std::vector<Pair> tmp(n_clusters);
+        std::vector<Pair> fine_buffer;
+        for (int qi = start; qi < end; ++qi) {
+            const float* query = queries.ptrs[qi];
+
+            // coarse: compare with cluster centers
+            for (int cid = 0; cid < n_clusters; ++cid) {
+                const float* center = centers.data() + static_cast<size_t>(cid) * n_dim;
+                tmp[cid] = {l2_distance(query, center, n_dim), cid};
+            }
+            std::partial_sort(tmp.begin(), tmp.begin() + n_cluster_per_query, tmp.end(),
+                              [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
+            for (int k = 0; k < n_cluster_per_query; ++k) {
+                coarse_indices[static_cast<size_t>(qi) * n_cluster_per_query + k] = tmp[k].idx;
+            }
+
+            // fine: iterate vectors inside selected clusters
+            fine_buffer.clear();
+            for (int k = 0; k < n_cluster_per_query; ++k) {
+                int cid = coarse_indices[static_cast<size_t>(qi) * n_cluster_per_query + k];
+                int vec_count = dataset.cluster_sizes[cid];
+                const float* base = dataset.cluster_ptrs[cid];
+                for (int vid = 0; vid < vec_count; ++vid) {
+                    const float* vec = base + static_cast<size_t>(vid) * n_dim;
+                    fine_buffer.push_back({l2_distance(query, vec, n_dim), vid});
+                }
+            }
+            if (fine_buffer.size() > static_cast<size_t>(topn)) {
+                std::nth_element(fine_buffer.begin(), fine_buffer.begin() + topn, fine_buffer.end(),
+                                 [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
+                fine_buffer.resize(topn);
+            } else {
+                std::sort(fine_buffer.begin(), fine_buffer.end(),
+                          [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
+            }
+            std::sort(fine_buffer.begin(), fine_buffer.end(),
+                      [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
+
+            for (int t = 0; t < topn; ++t) {
+                size_t offset = static_cast<size_t>(qi) * topn + t;
+                if (t < static_cast<int>(fine_buffer.size())) {
+                    out_index[offset] = fine_buffer[t].idx;
+                    out_dist[offset] = fine_buffer[t].dist;
+                } else {
+                    out_index[offset] = -1;
+                    out_dist[offset] = 0.0f;
+                }
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    int chunk = (n_query + num_threads - 1) / num_threads;
+    int start = 0;
+    for (unsigned t = 0; t < num_threads && start < n_query; ++t) {
+        int end = std::min(n_query, start + chunk);
+        threads.emplace_back(worker, start, end);
+        start = end;
+    }
+    for (auto& th : threads) {
+        th.join();
+    }
+}
+
 static void run_case(const BenchmarkCase& config) {
     std::mt19937 rng(1234);
 
@@ -145,7 +238,8 @@ static void run_case(const BenchmarkCase& config) {
     float** query_ptrs = queries.ptrs.data();
     float* cluster_center_data = centers.data();
 
-    auto run_pipeline = [&](bool use_balance, const char* tag) {
+    auto run_pipeline = [&](bool use_balance, const char* tag, std::vector<int>& out_idx,
+                            std::vector<float>& out_dist) {
         float** topk_dist = reinterpret_cast<float**>(
             malloc_vector_list(config.n_query, config.topn, sizeof(float)));
         int** topk_index = reinterpret_cast<int**>(
@@ -185,13 +279,50 @@ static void run_case(const BenchmarkCase& config) {
                  " top_index[0]=", topk_index[0][0],
                  " top_dist[0]=", topk_dist[0][0]);
 
+        for (int qi = 0; qi < config.n_query; ++qi) {
+            for (int t = 0; t < config.topn; ++t) {
+                size_t offset = static_cast<size_t>(qi) * config.topn + t;
+                out_idx[offset] = topk_index[qi][t];
+                out_dist[offset] = topk_dist[qi][t];
+            }
+        }
+
         free_vector_list(reinterpret_cast<void**>(topk_dist));
         free_vector_list(reinterpret_cast<void**>(topk_index));
         delete[] n_isnull;
     };
 
-    run_pipeline(false, "unbalanced");
-    run_pipeline(true, "balanced");
+    std::vector<int> gpu_idx_unbalanced(static_cast<size_t>(config.n_query) * config.topn);
+    std::vector<float> gpu_dist_unbalanced(static_cast<size_t>(config.n_query) * config.topn);
+    std::vector<int> gpu_idx_balanced = gpu_idx_unbalanced;
+    std::vector<float> gpu_dist_balanced = gpu_dist_unbalanced;
+
+    run_pipeline(false, "unbalanced", gpu_idx_unbalanced, gpu_dist_unbalanced);
+    run_pipeline(true, "balanced", gpu_idx_balanced, gpu_dist_balanced);
+
+    std::vector<int> cpu_idx(static_cast<size_t>(config.n_query) * config.topn);
+    std::vector<float> cpu_dist(static_cast<size_t>(config.n_query) * config.topn);
+    cpu_coarse_fine_search(config, queries, dataset, centers,
+                           std::min(config.n_clusters, config.topk),
+                           config.topn,
+                           cpu_idx,
+                           cpu_dist);
+
+    auto compare_results = [&](const char* tag,
+                               const std::vector<int>& gpu_idx,
+                               const std::vector<float>& gpu_dist) {
+        int mismatch = 0;
+        for (size_t i = 0; i < cpu_idx.size(); ++i) {
+            if (gpu_idx[i] != cpu_idx[i] ||
+                std::fabs(gpu_dist[i] - cpu_dist[i]) > 1e-3f) {
+                ++mismatch;
+            }
+        }
+        COUT_VAL("[compare] ", tag, " mismatches=", mismatch);
+    };
+
+    compare_results("unbalanced", gpu_idx_unbalanced, gpu_dist_unbalanced);
+    compare_results("balanced", gpu_idx_balanced, gpu_dist_balanced);
 
     release_cluster_dataset(dataset);
 }
