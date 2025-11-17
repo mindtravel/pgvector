@@ -12,15 +12,16 @@
 
 namespace {
 
-inline void cuda_check(cudaError_t status, const char* expr, const char* file, int line) {
-    if (status != cudaSuccess) {
+inline void _check_cuda_last_error(const char* file, int line) {
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
         throw std::runtime_error(
-            std::string("[cuda error] ") + expr + " -> " + cudaGetErrorString(status) +
+            std::string("[CUDA Last Error]: ") + cudaGetErrorString(err) +
             " (" + file + ":" + std::to_string(line) + ")");
     }
 }
 
-#define CUDA_CHECK(expr) cuda_check((expr), #expr, __FILE__, __LINE__)
+#define CHECK_CUDA_ERRORS _check_cuda_last_error(__FILE__, __LINE__);
 
 inline void flatten_query_batch(float** query_batch,
                                 int n_query,
@@ -102,8 +103,8 @@ void batch_search_pipeline(float** query_batch,
 
     try {
         const size_t query_bytes = h_query_flat.size() * sizeof(float);
-        CUDA_CHECK(cudaMalloc(&d_queries, query_bytes));
-        CUDA_CHECK(cudaMemcpy(d_queries, h_query_flat.data(), query_bytes, cudaMemcpyHostToDevice));
+        cudaMalloc(&d_queries, query_bytes);
+        cudaMemcpy(d_queries, h_query_flat.data(), query_bytes, cudaMemcpyHostToDevice);
 
         for (int cluster_id = 0; cluster_id < n_total_cluster; ++cluster_id) {
             const int vec_count = cluster_size[cluster_id];
@@ -111,12 +112,13 @@ void batch_search_pipeline(float** query_batch,
                 continue;
             }
             const size_t bytes = static_cast<size_t>(vec_count) * n_dim * sizeof(float);
-            CUDA_CHECK(cudaMalloc(&d_clusters[cluster_id], bytes));
-            CUDA_CHECK(cudaMemcpy(d_clusters[cluster_id],
-                                  cluster_data[cluster_id],
-                                  bytes,
-                                  cudaMemcpyHostToDevice));
+            cudaMalloc(&d_clusters[cluster_id], bytes);
+            cudaMemcpy(d_clusters[cluster_id],
+                       cluster_data[cluster_id],
+                       bytes,
+                       cudaMemcpyHostToDevice);
         }
+        CHECK_CUDA_ERRORS
 
         // ------------------------------------------------------------------
         // Step 1. 粗筛：调用 warpsort 融合算子，得到 query -> cluster mapping
@@ -167,6 +169,7 @@ void batch_search_pipeline(float** query_batch,
             n_dim,
             n_cluster_per_query
         );
+        CHECK_CUDA_ERRORS
 
         // ------------------------------------------------------------------
         // Step 2. 将 query→cluster 粗筛结果转成 block 序列
@@ -267,6 +270,7 @@ void batch_search_pipeline(float** query_batch,
                 fine_topn_index.data(),
                 fine_topn_dist.data()
             );
+            CHECK_CUDA_ERRORS
 
             if (topk_index) {
                 for (int qi = 0; qi < n_query; ++qi) {
@@ -306,5 +310,6 @@ void batch_search_pipeline(float** query_batch,
 
 void run_integrate_pipeline() {
     // TODO: 后续补充粗筛 + 精筛整体调度
-    CUDA_CHECK(cudaDeviceSynchronize());
+    cudaDeviceSynchronize();
+    CHECK_CUDA_ERRORS
 }

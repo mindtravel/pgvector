@@ -5,21 +5,12 @@
 #include <cmath>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
 #include "../../cuda/integrate_screen/integrate_screen.cuh"
 #include "../common/test_utils.cuh"
-
-#define CUDA_CHECK(cmd)                                                   \
-    do {                                                                  \
-        cudaError_t _err = (cmd);                                         \
-        if (_err != cudaSuccess) {                                        \
-            std::cerr << "[CUDA ERROR] " << cudaGetErrorString(_err)      \
-                      << " @ " << __FILE__ << ":" << __LINE__ << "\n";    \
-            std::exit(EXIT_FAILURE);                                      \
-        }                                                                 \
-    } while (0)
 
 struct BenchmarkCase {
     int n_query;
@@ -57,7 +48,8 @@ static ClusterDataset prepare_cluster_dataset(const BenchmarkCase& config,
 
         float* host_ptr = nullptr;
         size_t bytes = static_cast<size_t>(vec_count) * config.vector_dim * sizeof(float);
-        CUDA_CHECK(cudaMallocHost(reinterpret_cast<void**>(&host_ptr), bytes));
+        cudaMallocHost(reinterpret_cast<void**>(&host_ptr), bytes);
+        CHECK_CUDA_ERRORS;
 
         for (size_t i = 0; i < static_cast<size_t>(vec_count) * config.vector_dim; ++i) {
             host_ptr[i] = value_dist(rng);
@@ -106,31 +98,45 @@ static BalancedMapping build_balanced_mapping(const ClusterDataset& dataset,
 }
 
 struct QueryBatch {
-    std::vector<std::vector<float>> storage;
-    std::vector<float*> ptrs;
+    float** ptrs = nullptr;
 };
 
-static float l2_distance(const float* a, const float* b, int dim) {
-    float sum = 0.0f;
-    for (int i = 0; i < dim; ++i) {
-        float diff = a[i] - b[i];
-        sum += diff * diff;
+static void release_query_batch(QueryBatch& batch) {
+    if (batch.ptrs) {
+        free_vector_list(reinterpret_cast<void**>(batch.ptrs));
+        batch.ptrs = nullptr;
     }
-    return std::sqrt(sum);
+}
+
+// 余弦距离：1 - cos，相比 L2 更符合当前测试目标
+static float cosine_distance(const float* a, const float* b, int dim) {
+    float dot = 0.0f;
+    float na = 0.0f;
+    float nb = 0.0f;
+    for (int i = 0; i < dim; ++i) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    float denom = std::sqrt(na) * std::sqrt(nb);
+    if (denom < 1e-6f) return 1.0f;
+    return 1.0f - dot / denom;
 }
 
 static QueryBatch generate_queries(const BenchmarkCase& config, std::mt19937& rng) {
     std::uniform_real_distribution<float> value_dist(-1.0f, 1.0f);
-    QueryBatch batch;
-    batch.storage.resize(config.n_query, std::vector<float>(config.vector_dim, 0.0f));
-    batch.ptrs.resize(config.n_query);
-
+    auto ptrs = reinterpret_cast<float**>(
+        malloc_vector_list(config.n_query, config.vector_dim, sizeof(float)));
+    if (!ptrs) {
+        throw std::runtime_error("malloc_vector_list failed for queries");
+    }
     for (int qi = 0; qi < config.n_query; ++qi) {
         for (int d = 0; d < config.vector_dim; ++d) {
-            batch.storage[qi][d] = value_dist(rng);
+            ptrs[qi][d] = value_dist(rng);
         }
-        batch.ptrs[qi] = batch.storage[qi].data();
     }
+    QueryBatch batch;
+    batch.ptrs = ptrs;
     return batch;
 }
 
@@ -169,7 +175,7 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
             // coarse: compare with cluster centers
             for (int cid = 0; cid < n_clusters; ++cid) {
                 const float* center = centers.data() + static_cast<size_t>(cid) * n_dim;
-                tmp[cid] = {l2_distance(query, center, n_dim), cid};
+                tmp[cid] = {cosine_distance(query, center, n_dim), cid};
             }
             std::partial_sort(tmp.begin(), tmp.begin() + n_cluster_per_query, tmp.end(),
                               [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
@@ -185,7 +191,7 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
                 const float* base = dataset.cluster_ptrs[cid];
                 for (int vid = 0; vid < vec_count; ++vid) {
                     const float* vec = base + static_cast<size_t>(vid) * n_dim;
-                    fine_buffer.push_back({l2_distance(query, vec, n_dim), vid});
+                    fine_buffer.push_back({cosine_distance(query, vec, n_dim), vid});
                 }
             }
             if (fine_buffer.size() > static_cast<size_t>(topn)) {
@@ -229,13 +235,13 @@ static void run_case(const BenchmarkCase& config) {
     std::mt19937 rng(1234);
 
     auto dataset = prepare_cluster_dataset(config, rng);
-    auto queries = generate_queries(config, rng);
+    QueryBatch queries = generate_queries(config, rng);
     auto centers = generate_cluster_centers(config, rng);
     auto balanced = build_balanced_mapping(dataset, 512);
 
     float** cluster_data = dataset.cluster_ptrs.data();
     int* cluster_sizes = dataset.cluster_sizes.data();
-    float** query_ptrs = queries.ptrs.data();
+    float** query_ptrs = queries.ptrs;
     float* cluster_center_data = centers.data();
 
     auto run_pipeline = [&](bool use_balance, const char* tag, std::vector<int>& out_idx,
@@ -324,6 +330,7 @@ static void run_case(const BenchmarkCase& config) {
     compare_results("unbalanced", gpu_idx_unbalanced, gpu_dist_unbalanced);
     compare_results("balanced", gpu_idx_balanced, gpu_dist_balanced);
 
+    release_query_batch(queries);
     release_cluster_dataset(dataset);
 }
 
@@ -337,6 +344,7 @@ int main() {
     for (const auto& c : cases) {
         run_case(c);
     }
-    CUDA_CHECK(cudaDeviceSynchronize());
+    cudaDeviceSynchronize();
+    CHECK_CUDA_ERRORS;
     return 0;
 }
