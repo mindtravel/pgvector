@@ -128,7 +128,7 @@ void gpu_fine_screen_top_n(
     int* h_query_topn_index, float* h_query_topn_dist
 ) {
     // 直接调用fine_screen_top_n函数
-    fine_screen_top_n(
+    fine_screen_top_n_old(
         h_query_group, h_query_cluster_group, h_cluster_query_offset, h_cluster_query_data,
         cluster_map,
         h_cluster_vector_index, h_cluster_vector_num, h_cluster_vector,
