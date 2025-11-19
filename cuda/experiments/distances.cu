@@ -1,7 +1,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
 
-#include "l2norm.cuh"
+#include "../l2norm/l2norm.cuh"
 #include "distances.h"
 #include "pch.h"
 

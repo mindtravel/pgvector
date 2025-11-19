@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cfloat>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -257,19 +259,24 @@ void batch_search_pipeline(float** query_batch,
             std::vector<int> fine_topn_index(static_cast<size_t>(n_query) * k);
             std::vector<float> fine_topn_dist(static_cast<size_t>(n_query) * k);
 
-            fine_screen_top_n_blocks(
-                h_query_flat.data(),
-                n_query,
-                n_dim,
-                k,
-                compact_block_host_ptrs.data(),
-                compact_block_sizes.data(),
-                active_block_count,
-                block_query_offset.data(),
-                block_query_data.data(),
-                fine_topn_index.data(),
-                fine_topn_dist.data()
-            );
+            // TODO: fine_screen_top_n_blocks 函数尚未实现，暂时注释掉
+            // fine_screen_top_n_blocks(
+            //     h_query_flat.data(),
+            //     n_query,
+            //     n_dim,
+            //     k,
+            //     compact_block_host_ptrs.data(),
+            //     compact_block_sizes.data(),
+            //     active_block_count,
+            //     block_query_offset.data(),
+            //     block_query_data.data(),
+            //     fine_topn_index.data(),
+            //     fine_topn_dist.data()
+            // );
+            // 暂时使用空实现
+            printf("Warning: fine_screen_top_n_blocks is not implemented, skipping fine screening\n");
+            std::fill(fine_topn_index.begin(), fine_topn_index.end(), -1);
+            std::fill(fine_topn_dist.begin(), fine_topn_dist.end(), FLT_MAX);
             CHECK_CUDA_ERRORS
 
             if (topk_index) {

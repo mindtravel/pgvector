@@ -18,12 +18,17 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
 set(SOURCES
     test_final_topk.cu
     ../common/test_utils.cu
-    ../../cuda/fine_screen_top_n/fine_screen_top_n.cu
-    ../../cuda/l2norm.cu
+    # 不编译fine_screen_top_n_old相关代码
+    # ../../cuda/fine_screen_top_n/fine_screen_top_n.cu
+    # 使用共享库，不再重复编译l2norm.cu
+    # ../../cuda/l2norm/l2norm.cu
 )
 
 # 创建可执行文件
 add_executable(test_final_topk ${SOURCES})
+
+# 链接共享的l2norm库
+target_link_libraries(test_final_topk l2norm_lib)
 
 # 链接CUDA库
 target_link_libraries(test_final_topk 

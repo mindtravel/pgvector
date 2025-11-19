@@ -3,7 +3,8 @@
 # 源文件列表
 set(SOURCES
     test_fusion_cos_topk_fine.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/l2norm/l2norm.cu
+    # 使用共享库，不再重复编译l2norm.cu
+    # ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/l2norm/l2norm.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v2.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v3.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v3_32.cu
@@ -17,6 +18,9 @@ set(SOURCES
 
 # 创建可执行文件
 add_executable(test_fusion_cos_topk_fine ${SOURCES})
+
+# 链接共享的l2norm库
+target_link_libraries(test_fusion_cos_topk_fine l2norm_lib)
 
 # 设置包含目录
 target_include_directories(test_fusion_cos_topk_fine PRIVATE

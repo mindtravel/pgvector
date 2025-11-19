@@ -119,6 +119,7 @@ void cpu_fine_screen_top_n(
 }
 
 // GPU版本的精筛topn计算（暂时空实现）
+// 注意：fine_screen_top_n_old 已不再使用，此函数暂时为空实现
 void gpu_fine_screen_top_n(
     float* h_query_group, int* h_query_cluster_group, int* h_cluster_query_offset, int* h_cluster_query_data,
     int* cluster_map,
@@ -127,15 +128,16 @@ void gpu_fine_screen_top_n(
     int max_cluster_vector_count,  // 新增：最大聚类向量数量
     int* h_query_topn_index, float* h_query_topn_dist
 ) {
-    // 直接调用fine_screen_top_n函数
-    fine_screen_top_n_old(
-        h_query_group, h_query_cluster_group, h_cluster_query_offset, h_cluster_query_data,
-        cluster_map,
-        h_cluster_vector_index, h_cluster_vector_num, h_cluster_vector,
-        n_query, n_cluster, distinct_cluster_count, n_dim, n_topn, max_cluster_id, tol_vector,
-        max_cluster_vector_count,  // 新增：最大聚类向量数量
-        h_query_topn_index, h_query_topn_dist
-    );
+    // fine_screen_top_n_old 已移除，暂时使用空实现
+    // TODO: 使用新的精筛算子实现替代
+    printf("Warning: gpu_fine_screen_top_n is not implemented (fine_screen_top_n_old removed)\n");
+    // 初始化输出为无效值
+    for (int q = 0; q < n_query; q++) {
+        for (int k = 0; k < n_topn; k++) {
+            h_query_topn_index[q * n_topn + k] = -1;
+            h_query_topn_dist[q * n_topn + k] = FLT_MAX;
+        }
+    }
 }
 
 // 生成稀疏的cluster ID
