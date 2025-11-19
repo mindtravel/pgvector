@@ -2,7 +2,7 @@
 #include <type_traits>
 #include <math_constants.h>
 
-#include "../l2norm.cuh"
+#include "../l2norm/l2norm.cuh"
 #include "../pch.h"
 #include "warpsort_utils.cuh"
 #include "warpsort.cuh"
