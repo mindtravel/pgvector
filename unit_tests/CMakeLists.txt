@@ -42,6 +42,7 @@ add_subdirectory(test_warpsort)
 add_subdirectory(test_bitonic)
 add_subdirectory(test_stream_pass_data)
 add_subdirectory(test_final_topk)
+add_subdirectory(test_integrated_coarse_fine)
 
 # 统一测试目标
 add_custom_target(run_all_tests
@@ -56,5 +57,6 @@ add_custom_target(run_all_tests
         test_bitonic
         test_stream_pass_data
         test_final_topk
+        test_integrated_coarse_fine
     COMMENT "运行所有单元测试"
 )
