@@ -36,14 +36,17 @@ echo "运行测试..."
 # echo "运行 matrix_multiply 测试..."
 # ./test_matrix_multiply/test_matrix_multiply
 
-echo "运行 l2norm 测试..."
-./test_l2norm/test_l2norm
+# echo "运行 l2norm 测试..."
+# ./test_l2norm/test_l2norm
 
 # echo "运行 cos_distance 测试..."
 # ./test_cos_distance/test_cos_distance
 
 # echo "运行 fusion_cos_topk 测试..."
 # ./test_fusion_cos_topk/test_fusion_cos_topk $1
+
+echo "运行 fusion_cos_topk_fine 测试..."
+./test_fusion_cos_topk_fine/test_fusion_cos_topk_fine $1
 
 # echo "运行 warp sort 测试..."
 # ./test_warpsort/test_warpsort

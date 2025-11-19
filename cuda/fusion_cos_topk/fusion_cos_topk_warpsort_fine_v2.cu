@@ -5,7 +5,7 @@
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include <algorithm>
 
-#define ENABLE_CUDA_TIMING 1
+#define ENABLE_CUDA_TIMING 0
 using namespace pgvector::warpsort_utils;
 
 /**

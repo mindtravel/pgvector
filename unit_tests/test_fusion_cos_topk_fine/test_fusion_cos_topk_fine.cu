@@ -13,7 +13,10 @@
 #define EPSILON 1e-2f
 
 enum AlgorithmVersion {
-    WARP_SORT_FINE_V2,  // 融合余弦距离精筛（warpsort v2）
+    WARP_SORT_FINE_V2,  // 融合余弦距离精筛（float4，一个block一个query）
+    WARP_SORT_FINE_V3,  // 融合余弦距离精筛（一个block处理8个query）
+    WARP_SORT_FINE_V3_32,  // 融合余弦距离精筛（一个block处理16个query）
+    WARP_SORT_FINE_V4,  // 融合余弦距离精筛（混合策略：动态选择最优算法）
     ALL_VERSIONS        // 运行所有算法版本
 };
 
@@ -41,8 +44,10 @@ struct AlgorithmInfo {
 };
 
 std::map<AlgorithmVersion, AlgorithmInfo> algorithm_registry = {
-        // {WARP_SORT_FINE_V2, {"warpsort_fine_v1", "WarpSort 精筛 v1 (query-cluster 映射)", cuda_cos_topk_warpsort_fine_v1}},
-    {WARP_SORT_FINE_V2, {"warpsort_fine_v2", "WarpSort 精筛 v2 (query-cluster 映射)", cuda_cos_topk_warpsort_fine_v2}}
+    {WARP_SORT_FINE_V2, {"warpsort_fine_v2", "WarpSort 精筛 v2 (一个block一个query)", cuda_cos_topk_warpsort_fine_v2}},
+    {WARP_SORT_FINE_V3, {"warpsort_fine_v3", "WarpSort 精筛 v3 (一个block处理8个query)", cuda_cos_topk_warpsort_fine_v3}},
+    {WARP_SORT_FINE_V3_32, {"warpsort_fine_v3_32", "WarpSort 精筛 v3_32 (一个block处理16个query)", cuda_cos_topk_warpsort_fine_v3_32}},
+    {WARP_SORT_FINE_V4, {"warpsort_fine_v4", "WarpSort 精筛 v4 (混合策略：动态选择)", cuda_cos_topk_warpsort_fine_v4}}
 };
 
 /**
@@ -129,14 +134,14 @@ std::vector<double> test_fusion_cos_topk_fine_with_algorithm(
     AlgorithmInfo& algo_info = algorithm_registry.at(algo_version);
     bool pass = true;
 
-    // if (!QUIET) {
+    if (!QUIET) {
         COUT_VAL("配置:", "n_query=", n_query,
                  " n_selected_querys=", n_selected_querys,
                  " n_vectors=", n_selected_vectors,
                  " n_dim=", n_dim,
                  " k=", k,
                  " 算法=", algo_info.description);
-    // }
+    }
 
     const size_t query_bytes = static_cast<size_t>(n_query) * n_dim * sizeof(float);
     const size_t vector_bytes = static_cast<size_t>(n_selected_vectors) * n_dim * sizeof(float);
@@ -278,14 +283,26 @@ std::vector<double> test_fusion_cos_topk_fine_with_algorithm(
 
 AlgorithmVersion parse_algorithm_version(const char* arg) {
     const std::string version(arg);
-    if (version == "warpsort" || version == "v2" || version == "0") {
+    if (version == "v2" || version == "2") {
         return WARP_SORT_FINE_V2;
+    }
+    if (version == "v3" || version == "3") {
+        return WARP_SORT_FINE_V3;
+    }
+    if (version == "v3_32" || version == "3_32") {
+        return WARP_SORT_FINE_V3_32;
+    }
+    if (version == "v4" || version == "4") {
+        return WARP_SORT_FINE_V4;
+    }
+    if (version == "warpsort" || version == "0") {
+        return WARP_SORT_FINE_V2;  // 默认v2
     }
     if (version == "all" || version == "ALL" || version == "compare") {
         return ALL_VERSIONS;
     }
     COUT_VAL("未知的算法版本:", version.c_str());
-    COUT_VAL("可用选项: warpsort, all");
+    COUT_VAL("可用选项: v2, v3, v3_32, v4, all");
     exit(1);
 }
 
@@ -308,15 +325,27 @@ bool run_algorithm_tests(AlgorithmVersion selected_version) {
         MetricsCollector metrics;
         metrics.set_columns("pass rate", "n_query", "n_select_querys", "n_vectors", "n_dim", "k",
                              "avg_gpu_ms", "avg_cpu_ms", "avg_speedup", "memory_mb");
-        metrics.set_num_repeats(100);
-        // metrics.set_num_repeats(1);
-        
-        PARAM_3D(n_selected_querys, (1, 200, 1200),
+
+        test_fusion_cos_topk_fine_with_algorithm(
+            10000,
+            10,
+            1024,
+            128,
+            100,
+            version
+        );
+
+        metrics.set_num_repeats(50);
+        PARAM_3D(n_selected_querys, (1, 5, 10, 100, 128, 200, 256, 300, 384, 512, 600, 1000, 1200),
                  n_selected_vectors, (1024),
                  n_dim, (128))
+        
+        // metrics.set_num_repeats(1);        
         // PARAM_3D(n_selected_vectors, (128, 1000, 10000),
         //          n_selected_querys, (100, 1000),
         //          n_dim, (128, 512, 1024))
+
+        // metrics.set_num_repeats(1);
         // PARAM_3D(n_selected_vectors, (128, 1000, 10000),
         //          n_selected_querys, (10, 100, 1000),
         //          n_dim, (1, 4, 64, 25, 73, 100, 111, 128, 200, 512, 1024))

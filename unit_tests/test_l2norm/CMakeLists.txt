@@ -30,3 +30,6 @@ target_link_libraries(test_l2norm
 enable_testing()
 add_test(NAME l2norm_test COMMAND test_l2norm)
 
+
+
+

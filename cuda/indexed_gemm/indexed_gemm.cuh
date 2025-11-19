@@ -61,20 +61,6 @@ __global__ void indexed_inner_product_with_topk_kernel(
     int* __restrict__ d_topk_index
 );
     
-#include <cuda_runtime.h>
-
-/**
- * 流式内积计算 + top-k选择kernel（v2版本：优化数据上传）
- *
- * 新设计特点：
- * - 使用query到cluster的映射（CSR格式）
- * - cluster向量只包含涉及的cluster（连续存储）
- * - 使用cluster_vector_offset定位每个cluster的向量范围
- *
- * @tparam Capacity warp-sort queue的容量（必须是2的幂，且 > k）
- * @tparam Ascending true表示选择最小距离（升序），false表示最大距离（降序）
- * @tparam Dim 向量维度（compile-time 常量）
- */
 template<int Capacity, bool Ascending, int Dim>
 __global__ void indexed_inner_product_with_topk_kernel_v2_static(
     float* __restrict__ d_query_group,
@@ -92,9 +78,6 @@ __global__ void indexed_inner_product_with_topk_kernel_v2_static(
     int* __restrict__ d_topk_index
 );
 
-/**
- * 泛化版本：保留 runtime n_dim 参数，作为未覆盖静态维度时的回退实现。
- */
 template<int Capacity, bool Ascending>
 __global__ void indexed_inner_product_with_topk_kernel_v2_generic(
     float* __restrict__ d_query_group,
@@ -113,10 +96,41 @@ __global__ void indexed_inner_product_with_topk_kernel_v2_generic(
     int* __restrict__ d_topk_index
 );
 
-/**
- * host 端调度函数：根据 n_dim 在更高层级一次性选择具体的 kernel 模板实例，避免
- * 在 device 端再根据维度分支。
- */
+template<int Capacity, bool Ascending, int Dim, int QueriesPerBlock>
+__global__ void indexed_inner_product_with_topk_kernel_v3_static(
+    float* __restrict__ d_query_group,
+    float* __restrict__ d_cluster_vector,
+    int* __restrict__ d_query_index,
+
+    float* __restrict__ d_query_norm,
+    float* __restrict__ d_cluster_vector_norm,
+
+    int n_selected_querys,
+    int n_selected_vectors,
+    int k,
+
+    float* __restrict__ d_topk_dist,
+    int* __restrict__ d_topk_index
+);
+
+template<int Capacity, bool Ascending, int QueriesPerBlock>
+__global__ void indexed_inner_product_with_topk_kernel_v3_generic(
+    float* __restrict__ d_query_group,
+    float* __restrict__ d_cluster_vector,
+    int* __restrict__ d_query_index,
+
+    float* __restrict__ d_query_norm,
+    float* __restrict__ d_cluster_vector_norm,
+
+    int n_selected_querys,
+    int n_selected_vectors,
+    int n_dim,
+    int k,
+
+    float* __restrict__ d_topk_dist,
+    int* __restrict__ d_topk_index
+);
+
 template<int Capacity, bool Ascending>
 inline void launch_indexed_inner_product_with_topk_kernel_v2(
     dim3 grid,
@@ -146,10 +160,11 @@ inline void launch_indexed_inner_product_with_topk_kernel_v2(
             n_dim,
             k,
             d_topk_dist,
-            d_topk_index);
+            d_topk_index
+        );
     };
 
-    switch (n_dim) { /*针对我们的数据集做特殊优化*/
+    switch (n_dim) {
         case 96:
             indexed_inner_product_with_topk_kernel_v2_static<Capacity, Ascending, 96><<<grid, block, 0, stream>>>(
                 d_query_group,
@@ -161,7 +176,8 @@ inline void launch_indexed_inner_product_with_topk_kernel_v2(
                 n_selected_vectors,
                 k,
                 d_topk_dist,
-                d_topk_index);
+                d_topk_index
+            );
             break;
         case 128:
             indexed_inner_product_with_topk_kernel_v2_static<Capacity, Ascending, 128><<<grid, block, 0, stream>>>(
@@ -174,7 +190,8 @@ inline void launch_indexed_inner_product_with_topk_kernel_v2(
                 n_selected_vectors,
                 k,
                 d_topk_dist,
-                d_topk_index);
+                d_topk_index
+            );
             break;
         case 200:
             indexed_inner_product_with_topk_kernel_v2_static<Capacity, Ascending, 200><<<grid, block, 0, stream>>>(
@@ -187,13 +204,137 @@ inline void launch_indexed_inner_product_with_topk_kernel_v2(
                 n_selected_vectors,
                 k,
                 d_topk_dist,
-                d_topk_index);
+                d_topk_index
+            );
             break;
         default:
             launch_generic();
             break;
     }
 }
-    
+
+/**
+ * Launch函数：v3版本（一个block处理多个query）
+ * 
+ * @tparam Capacity warp-sort queue的容量
+ * @tparam Ascending 是否升序
+ * @tparam QueriesPerBlock 每个block处理的query数量（建议为8）
+ * 
+ * @param block 每个block的线程数（需要至少QueriesPerBlock * 32个线程）
+ * @param n_dim 向量维度
+ * @param n_selected_querys query总数
+ * @param ... 其他参数同v2版本
+ * 
+ * 注意：grid配置会自动计算，grid.y = (n_selected_querys + QueriesPerBlock - 1) / QueriesPerBlock
+ */
+template<int Capacity, bool Ascending, int QueriesPerBlock>
+inline void launch_indexed_inner_product_with_topk_kernel_v3(
+    dim3 block,
+    int n_dim,
+    float* __restrict__ d_query_group,
+    float* __restrict__ d_cluster_vector,
+    int* __restrict__ d_query_index,
+    float* __restrict__ d_query_norm,
+    float* __restrict__ d_cluster_vector_norm,
+    int n_selected_querys,
+    int n_selected_vectors,
+    int k,
+    float* __restrict__ d_topk_dist,
+    int* __restrict__ d_topk_index,
+    cudaStream_t stream = 0) {
+
+    /* 计算grid配置：每个block处理QueriesPerBlock个query */
+    dim3 grid(1, (n_selected_querys + QueriesPerBlock - 1) / QueriesPerBlock, 1);
+
+    auto launch_generic = [&]() {
+        indexed_inner_product_with_topk_kernel_v3_generic<Capacity, Ascending, QueriesPerBlock><<<grid, block, 0, stream>>>(
+            d_query_group,
+            d_cluster_vector,
+            d_query_index,
+            d_query_norm,
+            d_cluster_vector_norm,
+            n_selected_querys,
+            n_selected_vectors,
+            n_dim,
+            k,
+            d_topk_dist,
+            d_topk_index
+        );
+    };
+
+    switch (n_dim) {
+        case 96:
+            indexed_inner_product_with_topk_kernel_v3_static<Capacity, Ascending, 96, QueriesPerBlock><<<grid, block, 0, stream>>>(
+                d_query_group,
+                d_cluster_vector,
+                d_query_index,
+                d_query_norm,
+                d_cluster_vector_norm,
+                n_selected_querys,
+                n_selected_vectors,
+                k,
+                d_topk_dist,
+                d_topk_index
+            );
+            break;
+        case 128:
+            indexed_inner_product_with_topk_kernel_v3_static<Capacity, Ascending, 128, QueriesPerBlock><<<grid, block, 0, stream>>>(
+                d_query_group,
+                d_cluster_vector,
+                d_query_index,
+                d_query_norm,
+                d_cluster_vector_norm,
+                n_selected_querys,
+                n_selected_vectors,
+                k,
+                d_topk_dist,
+                d_topk_index
+            );
+            break;
+        case 200:
+            indexed_inner_product_with_topk_kernel_v3_static<Capacity, Ascending, 200, QueriesPerBlock><<<grid, block, 0, stream>>>(
+                d_query_group,
+                d_cluster_vector,
+                d_query_index,
+                d_query_norm,
+                d_cluster_vector_norm,
+                n_selected_querys,
+                n_selected_vectors,
+                k,
+                d_topk_dist,
+                d_topk_index
+            );
+            break;
+        default:
+            launch_generic();
+            break;
+    }
+}
+
+/**
+ * Launch函数：v4版本（混合策略）
+ * 
+ * 根据数据规模动态选择最优算法：
+ * - 大规模query（n_query > 100 && n_vectors > 512）：使用cublas_gemm
+ * - 小规模query：使用v3流式实现
+ * 
+ * 注意：实现在indexed_gemm_v4.cu中
+ */
+template<int Capacity, bool Ascending, int QueriesPerBlock>
+void launch_indexed_inner_product_with_topk_kernel_v4(
+    dim3 block,
+    int n_dim,
+    float* __restrict__ d_query_group,
+    float* __restrict__ d_cluster_vector,
+    int* __restrict__ d_query_index,
+    float* __restrict__ d_query_norm,
+    float* __restrict__ d_cluster_vector_norm,
+    int n_selected_querys,
+    int n_selected_vectors,
+    int k,
+    float* __restrict__ d_topk_dist,
+    int* __restrict__ d_topk_index,
+    cudaStream_t stream = 0);
+
 #endif
 

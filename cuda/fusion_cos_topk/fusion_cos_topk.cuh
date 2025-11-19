@@ -219,5 +219,90 @@ void cuda_cos_topk_warpsort_fine_v2(
     int k
 );
 
+/**
+ * 流式融合余弦距离top-k计算（v3版本：一个block处理多个query）
+ * 
+ * 相比v2版本的改进：
+ * - 每个block处理多个query（默认8个），提高GPU利用率
+ * - 减少kernel启动开销
+ * - 每个warp独立处理一个query
+ * 
+ * @param d_query_group query向量 [n_query * n_dim]
+ * @param d_cluster_vector 涉及的cluster向量（连续存储）[n_selected_vectors * n_dim]
+ * @param d_query_index query索引 [n_selected_querys]
+ * @param d_query_norm query的l2norm [n_query]
+ * @param d_cluster_vector_norm cluster向量的l2norm [n_selected_vectors]
+ * @param d_topk_index [out] 每个query的topk索引 [n_selected_querys * k]
+ * @param d_topk_dist [out] 每个query的topk距离 [n_selected_querys * k]
+ * @param n_selected_querys 需要处理的query数量
+ * @param n_selected_vectors 涉及的向量总数
+ * @param n_dim 向量维度
+ * @param k topk数量
+ */
+void cuda_cos_topk_warpsort_fine_v3(
+    float* d_query_group,
+    float* d_cluster_vector,
+    int* d_query_index,
+    
+    float* d_query_norm,
+    float* d_cluster_vector_norm,
+
+    int* d_topk_index,
+    float* d_topk_dist,
+    
+    int n_selected_querys,
+    int n_selected_vectors,
+    int n_dim,
+    int k
+);
+
+/**
+ * 流式融合余弦距离top-k计算（v4版本：混合策略）
+ * 
+ * 根据数据规模动态选择最优算法：
+ * - 大规模query（n_query > 100 && n_vectors > 512）：使用cublas_gemm + top-k选择
+ * - 小规模query：使用v3流式实现
+ */
+void cuda_cos_topk_warpsort_fine_v4(
+    float* d_query_group,
+    float* d_cluster_vector,
+    int* d_query_index,
+    
+    float* d_query_norm,
+    float* d_cluster_vector_norm,
+
+    int* d_topk_index,
+    float* d_topk_dist,
+    
+    int n_selected_querys,
+    int n_selected_vectors,
+    int n_dim,
+    int k
+);
+
+/**
+ * 流式融合余弦距离top-k计算（v3_32版本：一个block处理16个query）
+ * 
+ * 相比v3版本的改进：
+ * - 每个block处理16个query（而不是8个），进一步减少kernel启动开销
+ * - 需要512个线程（16个warp，减少寄存器使用）
+ */
+void cuda_cos_topk_warpsort_fine_v3_32(
+    float* d_query_group,
+    float* d_cluster_vector,
+    int* d_query_index,
+    
+    float* d_query_norm,
+    float* d_cluster_vector_norm,
+
+    int* d_topk_index,
+    float* d_topk_dist,
+    
+    int n_selected_querys,
+    int n_selected_vectors,
+    int n_dim,
+    int k
+);
+
 
 #endif

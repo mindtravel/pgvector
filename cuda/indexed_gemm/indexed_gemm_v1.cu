@@ -82,7 +82,7 @@ __global__ void indexed_inner_product_with_topk_kernel(
     
     // 遍历所有cluster，每个warp处理一部分cluster
     // 注意：每个warp需要确保处理完所有分配给它的cluster，即使某些cluster不包含当前query
-    bool warp_has_valid_data = false;  // 标记该warp是否处理过包含当前query的cluster
+    // bool warp_has_valid_data = false;  // 标记该warp是否处理过包含当前query的cluster
     int warp_processed_cluster_count = 0;  // 该warp处理过的包含该query的cluster数量（用于调试）
     
     // 调试输出：打印所有cluster的query范围（只在第一个block的第一个warp的第一个线程打印）
@@ -146,7 +146,7 @@ __global__ void indexed_inner_product_with_topk_kernel(
         }
         
         // 标记该warp处理过有效数据
-        warp_has_valid_data = true;
+        // warp_has_valid_data = true;
         warp_processed_cluster_count++;
         
         // if (warp_id < 2 && lane == 0) {
