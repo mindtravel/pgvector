@@ -74,6 +74,7 @@ add_subdirectory(test_print_cuda)
 add_subdirectory(test_matrix_multiply)
 add_subdirectory(test_cos_distance)
 add_subdirectory(test_fusion_cos_topk)
+add_subdirectory(test_fusion_cos_topk_fine)
 add_subdirectory(test_warpsort)
 add_subdirectory(test_bitonic)
 add_subdirectory(test_stream_pass_data)
@@ -89,6 +90,7 @@ add_custom_target(run_all_tests
         test_matrix_multiply 
         test_cos_distance 
         test_fusion_cos_topk
+        test_fusion_cos_topk_fine
         test_warpsort
         test_bitonic
         test_stream_pass_data

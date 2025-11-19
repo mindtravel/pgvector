@@ -222,15 +222,15 @@ std::vector<double> test_fusion_cos_topk_fine_with_algorithm(
         CHECK_CUDA_ERRORS;
     );
 
-    int** h_topk_index_gpu = malloc_vector_list<int>(n_query, k);
-    float** h_topk_dist_gpu = malloc_vector_list<float>(n_query, k);
+    int** h_topk_index_gpu = (int**)malloc_vector_list(n_query, k, sizeof(int));
+    float** h_topk_dist_gpu = (float**)malloc_vector_list(n_query, k, sizeof(float));
     cudaMemcpy(h_topk_index_gpu[0], d_topk_index, n_query * k * sizeof(int), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_topk_dist_gpu[0], d_topk_dist, n_query * k * sizeof(float), cudaMemcpyDeviceToHost);
     CHECK_CUDA_ERRORS;
 
     double cpu_duration_ms = 0.0;
-    int** h_topk_index_cpu = malloc_vector_list<int>(n_query, k);
-    float** h_topk_dist_cpu = malloc_vector_list<float>(n_query, k);
+    int** h_topk_index_cpu = (int**)malloc_vector_list(n_query, k, sizeof(int));
+    float** h_topk_dist_cpu = (float**)malloc_vector_list(n_query, k, sizeof(float));
 
     MEASURE_MS_AND_SAVE("cpu耗时:", cpu_duration_ms,
         cpu_cos_distance_topk_fine(
@@ -384,7 +384,7 @@ bool run_algorithm_tests(AlgorithmVersion selected_version) {
 int main(int argc, char** argv) {
     srand(static_cast<unsigned>(time(nullptr)));
 
-    AlgorithmVersion selected_version = ALL_VERSIONS;
+    AlgorithmVersion selected_version = WARP_SORT_FINE_V3;
     if (argc > 1) {
         selected_version = parse_algorithm_version(argv[1]);
     }

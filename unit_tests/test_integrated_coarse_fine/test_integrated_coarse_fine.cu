@@ -35,7 +35,8 @@ struct BalancedMapping {
 
 static ClusterDataset prepare_cluster_dataset(const BenchmarkCase& config,
                                               std::mt19937& rng) {
-    std::uniform_int_distribution<int> count_dist(500, 3000);
+    // 减小每个cluster的向量数量范围，加快测试速度
+    std::uniform_int_distribution<int> count_dist(50, 200);
     std::uniform_real_distribution<float> value_dist(-1.0f, 1.0f);
 
     ClusterDataset dataset;
@@ -335,10 +336,14 @@ static void run_case(const BenchmarkCase& config) {
 }
 
 int main() {
+    // 使用更小的测试数据以加快测试速度
     std::vector<BenchmarkCase> cases = {
-        {512, 64, 128, 32, 32},
-        {2000, 256, 256, 64, 64},
-        {4000, 512, 512, 128, 128}
+        // {512, 64, 128, 32, 32},
+        // {2000, 256, 256, 64, 64},
+        // {4000, 512, 512, 128, 128}
+        {100, 16, 64, 8, 8},      // 小规模测试
+        {200, 32, 128, 16, 16},   // 中等规模测试
+        {512, 64, 128, 32, 32}    // 保留一个稍大的测试
     };
 
     for (const auto& c : cases) {

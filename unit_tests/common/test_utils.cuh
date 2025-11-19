@@ -11,7 +11,7 @@
 #include "metrics_collector.cuh"
 
 #define DEBUG false /* debug模式：用于寻找正确输出和测试函数输出的差异 */
-#define QUIET false /* 静默模式：不打印日志（用于重复运行）*/
+#define QUIET true /* 静默模式：不打印日志（用于重复运行）*/
 /**
  * @brief 用宏简化计时语法，并将结果（毫秒）存入指定的变量。
  * @param TESTNAME 字符串字面量，用于日志输出的测试名称。
