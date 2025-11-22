@@ -24,11 +24,10 @@ typedef struct {
     float* d_batch_distances; // GPU上的批量距离结果
     float* h_centers_pinned; // 页锁定主机内存（零拷贝用）
     
-    // IndexTuple存储（与CPU端存储方式完全一致）
-    // IndexTuple包含：t_info + t_tid + Vector数据
-    char* d_probe_index_tuples; // GPU上的完整IndexTuple数据（按CPU方式存储）
-    size_t index_tuple_size;    // 每个IndexTuple的大小（包括对齐），0表示变长
-    int* d_probe_tuple_offsets; // 每个IndexTuple在连续内存中的偏移量（用于变长元组）
+    // 分离存储方案：向量数据和TID数据分离存储，提高性能和内存访问效率
+    // 向量数据：对齐存储，连续内存，提高访问效率
+    float* d_probe_vectors;     // GPU上的向量数据（对齐存储，连续内存）
+    char* d_probe_tids;         // GPU上的TID数据（ItemPointerData，每个6字节，连续存储）
     int* d_probe_query_map;     // GPU上的查询映射（每个向量属于哪个查询）
     float* d_probe_distances;   // GPU上的距离数组
     int num_probe_candidates;   // 候选数量
@@ -37,6 +36,7 @@ typedef struct {
     // GPU TopK排序用的临时缓冲区
     int* d_topk_indices;        // GPU上的TopK索引
     float* d_topk_distances;    // GPU上的TopK距离
+    char* d_topk_tids;          // GPU上的TopK TID结果（批量提取）
     
     int num_centers;         // 聚类中心数量
     int dimensions;          // 向量维度
@@ -62,20 +62,18 @@ extern int cuda_upload_centers_zero_copy(CudaCenterSearchContext* ctx,
                                         const float* centers_data);
 extern int cuda_set_zero_copy_mode(CudaCenterSearchContext* ctx, bool enable);
 
-// Probe候选数据上传和处理相关函数（IndexTuple模式，与CPU端存储方式完全一致）
-// 上传完整的IndexTuple数据到GPU（包含t_info + t_tid + Vector数据）
-// index_tuples: 指向IndexTuple数组的指针（每个IndexTuple大小可能不同）
-// tuple_sizes: 每个IndexTuple的大小数组（用于变长元组），如果为NULL且fixed_tuple_size>0则使用固定大小
-// tuple_offsets: 每个IndexTuple在连续内存中的偏移量（可选），如果为NULL则假设连续
-// fixed_tuple_size: 固定大小的IndexTuple大小，如果为0则使用tuple_sizes
+// Probe候选数据上传和处理相关函数
+// 分离存储方案：向量数据和TID数据分离上传，提高性能
+// vectors: 向量数据数组（连续存储，每个向量dimensions个float）
+// tids: TID数据数组（ItemPointerData，每个6字节，连续存储）
+// query_ids: 查询ID映射（每个候选属于哪个查询）
+// 注意：vectors[i], tids[i], query_ids[i] 必须对应同一个候选，保证索引一致性
 extern int cuda_upload_probe_vectors(CudaCenterSearchContext* ctx,
-                                     const char* index_tuples,
+                                     const float* vectors,
+                                     const char* tids,  /* ItemPointerData数组，每个6字节 */
                                      const int* query_ids,
-                                     const size_t* tuple_sizes,
-                                     const int* tuple_offsets,
                                      int num_candidates,
-                                     int dimensions,
-                                     size_t fixed_tuple_size);
+                                     int dimensions);
 extern int cuda_compute_batch_probe_distances(CudaCenterSearchContext* ctx,
                                              const float* batch_query_vectors,
                                              int num_queries);
@@ -86,6 +84,13 @@ extern int cuda_topk_probe_candidates(CudaCenterSearchContext* ctx,
                                       void* topk_vector_ids,  /* ItemPointerData数组 */
                                       float* topk_distances,
                                       int* topk_counts);
+// 一致性检查函数
+extern int cuda_verify_probe_consistency(CudaCenterSearchContext* ctx,
+                                         int num_candidates,
+                                         int dimensions);
+
+// 获取最后一个CUDA错误的字符串（用于PostgreSQL错误报告）
+extern const char* cuda_get_last_error_string(void);
 
 #ifdef __cplusplus
 }

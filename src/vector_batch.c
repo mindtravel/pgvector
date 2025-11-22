@@ -389,7 +389,7 @@ batch_l2_distance(PG_FUNCTION_ARGS)
 
 #ifdef USE_CUDA
 	/* 尝试使用GPU批量计算 */
-	elog(LOG, "batch_l2_distance: 尝试使用GPU批量计算");
+	// elog(LOG, "batch_l2_distance: 尝试使用GPU批量计算");
 	
 	/* 检查CUDA是否可用 */
 	if (cuda_is_available()) {		
@@ -400,7 +400,7 @@ batch_l2_distance(PG_FUNCTION_ARGS)
 		Vector *query;
 		CudaCenterSearchContext* ctx;
 		
-		elog(LOG, "batch_l2_distance: CUDA可用，开始GPU批量计算");
+		// elog(LOG, "batch_l2_distance: CUDA可用，开始GPU批量计算");
 
 		batch_query_data = (float *) palloc(queries->count * queries->dim * sizeof(float));
 		target_data = (float *) palloc(queries->dim * sizeof(float));
@@ -415,20 +415,20 @@ batch_l2_distance(PG_FUNCTION_ARGS)
 		/* 复制目标向量数据 */
 		memcpy(target_data, target->x, queries->dim * sizeof(float));
 		
-		elog(LOG, "batch_l2_distance: 数据准备完成，开始GPU批量计算");
+		// elog(LOG, "batch_l2_distance: 数据准备完成，开始GPU批量计算");
 		
 		/* 创建GPU上下文 - 使用批量支持 */
 		ctx = cuda_center_search_init(queries->count, queries->dim, false);
 		if (ctx) {
-			elog(LOG, "batch_l2_distance: GPU上下文创建成功");
+			// elog(LOG, "batch_l2_distance: GPU上下文创建成功");
 			
 			/* 上传查询向量数据到GPU */
 			if (cuda_upload_centers(ctx, batch_query_data) == 0) {
-				elog(LOG, "batch_l2_distance: 查询向量数据上传成功");
+				// elog(LOG, "batch_l2_distance: 查询向量数据上传成功");
 				
 				/* 使用CUDA Wrapper中的批量距离计算函数 */
 				if (cuda_compute_batch_center_distances(ctx, target_data, 1, gpu_distances) == 0) {
-					elog(LOG, "batch_l2_distance: GPU批量距离计算成功");
+					// elog(LOG, "batch_l2_distance: GPU批量距离计算成功");
 					
 					/* 转换结果 */
 					distances = palloc(sizeof(Datum) * queries->count);
@@ -446,7 +446,7 @@ batch_l2_distance(PG_FUNCTION_ARGS)
 					pfree(gpu_distances);
 					pfree(distances);
 					
-					elog(LOG, "batch_l2_distance: GPU批量计算完成，返回结果");
+					// elog(LOG, "batch_l2_distance: GPU批量计算完成，返回结果");
 					PG_RETURN_ARRAYTYPE_P(result);
 				} else {
 					elog(WARNING, "batch_l2_distance: GPU批量距离计算失败，回退到CPU计算");

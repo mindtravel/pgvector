@@ -73,21 +73,21 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
     HeapTuple tuple;
     
 
-    elog(LOG, "batch_vector_search_c: 开始批量向量搜索");
+    // elog(LOG, "batch_vector_search_c: 开始批量向量搜索");
     
     /* 获取参数 */
     index_oid           = PG_GETARG_OID(0);
     query_vectors_array = PG_GETARG_ARRAYTYPE_P(1);
     k                   = PG_GETARG_INT32(2);
 
-    elog(LOG, "batch_vector_search_c: 参数获取完成 - index_oid=%u, k=%d", index_oid, k);
+    // elog(LOG, "batch_vector_search_c: 参数获取完成 - index_oid=%u, k=%d", index_oid, k);
     
     /* 解析查询向量数组结构，获取向量数量 */
     n_querys = ArrayGetNItems(
         ARR_NDIM(query_vectors_array),
         ARR_DIMS(query_vectors_array)
     );
-    elog(LOG, "batch_vector_search_c: 向量数量 = %d", n_querys);
+    // elog(LOG, "batch_vector_search_c: 向量数量 = %d", n_querys);
     
     /* 解析向量内容，获取向量维度 */
     get_typlenbyvalalign(
@@ -102,7 +102,7 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
 
     if (nelems > 0 && !nulls[0]) {
         vec_dim = DatumGetVector(elems[0])->dim;
-        elog(LOG, "batch_vector_search_c: 向量维度 = %d", vec_dim);
+        // elog(LOG, "batch_vector_search_c: 向量维度 = %d", vec_dim);
     } else {
         elog(ERROR, "batch_vector_search_c: 无法获取向量维度，数组为空或第一个向量为NULL");
     }
@@ -136,9 +136,13 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         
         /* 设置批量键指向的数据区域 */ 
         ScanKeyBatchAddData(batch_keys, elems, nulls, nelems);
-        elog(LOG, "batch_vector_search_c: 所有向量添加完成");
+        // elog(LOG, "batch_vector_search_c: 所有向量添加完成");
         
         // 创建索引扫描
+        // 注意：IndexScanDesc是通过RelationGetIndexScan在当前内存上下文（SRF内存上下文）中分配的
+        // IndexScanDesc的生命周期由PostgreSQL管理，我们只需要清理opaque数据
+        // 但是，tmpCtx也是在CurrentMemoryContext（SRF内存上下文）中创建的
+        // 所以，tmpCtx会在SRF清理时自动删除，我们需要在SRF清理之前手动删除它
         index = index_open(index_oid, AccessShareLock);
         scan = ivfflatbatchbeginscan(index, 1, batch_keys);
         if (!scan) {
@@ -146,7 +150,8 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
             /* batch_keys 由 SRF 内存上下文自动清理 */
             elog(ERROR, "batch_vector_search_c: ivfflatbatchbeginscan 失败");
         }
-        elog(LOG, "batch_vector_search_c: 索引扫描创建完成");
+        // elog(LOG, "batch_vector_search_c: 索引扫描创建完成 - scan=%p, scan->opaque=%p, scan->indexRelation=%p", 
+        //      scan, scan ? scan->opaque : NULL, scan ? scan->indexRelation : NULL);
         
         // 一次性获取所有查询的所有结果
         max_results = k * n_querys; // 每个查询k个结果 × 查询数量
@@ -155,14 +160,126 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         result_nulls = palloc(max_values * sizeof(bool));
         returned_tuples = 0;
         
-        elog(LOG, "batch_vector_search_c: 开始批量处理，预期最大结果数: %d", max_results);
+        // elog(LOG, "batch_vector_search_c: 开始批量处理，预期最大结果数: %d", max_results);
+        // elog(LOG, "batch_vector_search_c: 准备调用ivfflatbatchgettuple - scan=%p, result_values=%p, result_nulls=%p, max_values=%d, k=%d", 
+        //      scan, result_values, result_nulls, max_values, k);
         
         // 调用批量扫描函数，一次性处理所有查询
-        ivfflatbatchgettuple(scan, ForwardScanDirection, 
+        bool gettuple_result = ivfflatbatchgettuple(scan, ForwardScanDirection, 
                             result_values, result_nulls, 
                             max_values, &returned_tuples, k);
         
-        elog(LOG, "batch_vector_search_c: 批量处理完成，返回结果数: %d", returned_tuples);
+        // elog(LOG, "batch_vector_search_c: ivfflatbatchgettuple返回 - result=%d, returned_tuples=%d", gettuple_result, returned_tuples);
+        // elog(LOG, "batch_vector_search_c: 批量处理完成，返回结果数: %d", returned_tuples);
+        
+        // 检查返回的结果是否有效
+        if (returned_tuples == 0) {
+            elog(WARNING, "batch_vector_search_c: 没有返回任何结果");
+        }
+        
+        // 获取堆表 Relation（从索引中获取）
+        Relation heap_rel;
+        bool heap_rel_opened_by_us = false;
+        if (scan->heapRelation) {
+            // 使用索引扫描中的 heapRelation（不需要我们关闭）
+            heap_rel = scan->heapRelation;
+        } else {
+            // 如果 scan 中没有 heapRelation，从索引元数据中获取
+            Oid heap_oid = IndexGetRelation(index_oid, false);
+            if (!OidIsValid(heap_oid)) {
+                elog(ERROR, "batch_vector_search_c: 无法获取堆表 OID");
+            }
+            heap_rel = table_open(heap_oid, AccessShareLock);
+            heap_rel_opened_by_us = true;  // 标记为我们打开的
+        }
+        
+        // 获取 vector_id 字段的属性编号（假设是第1列，通常是主键或id字段）
+        int vector_id_attnum;
+        {
+            int attnum;
+            
+            // 使用 get_attnum 通过关系ID和属性名获取属性编号
+            attnum = get_attnum(RelationGetRelid(heap_rel), "id");
+            if (attnum == InvalidAttrNumber) {
+                // 如果找不到 "id" 字段，尝试使用第1列
+                vector_id_attnum = 1;
+                // elog(LOG, "batch_vector_search_c: 未找到 'id' 字段，使用第1列作为 vector_id");
+            } else {
+                vector_id_attnum = attnum;
+                // elog(LOG, "batch_vector_search_c: 找到 'id' 字段，属性编号 = %d", vector_id_attnum);
+            }
+        }
+        
+        // 在第一次调用时，将所有TID转换为实际的vector_id值
+        // 这样在SRF的后续调用中，我们只需要从result_values中读取数据
+        // elog(LOG, "batch_vector_search_c: 开始转换TID到vector_id，共 %d 个结果", returned_tuples);
+        Snapshot snapshot = GetActiveSnapshot();
+        int converted_count = 0;
+        for (int i = 0; i < returned_tuples; i++) {
+            int base_idx = i * 3;
+            if (!result_nulls[base_idx + 1]) {
+                // values[1] 是 ItemPointer (TID)，需要从堆表中获取实际的 vector_id 值
+                // 注意：GetBatchResults返回的是PointerGetDatum(&buffer->vector_ids[i])
+                // 所以result_values[base_idx + 1]是一个指向ItemPointerData的指针
+                ItemPointer tid = (ItemPointer)DatumGetPointer(result_values[base_idx + 1]);
+                
+                // 检查TID指针是否有效
+                if (tid != NULL && ItemPointerIsValid(tid)) {
+                    converted_count++;
+                    HeapTupleData heap_tuple_data;
+                    HeapTuple     heap_tuple = &heap_tuple_data;
+                    bool          isnull;
+                    Datum         vector_id_datum;
+                    Buffer        buffer = InvalidBuffer;
+                    bool          found;
+                    ItemPointerData tid_copy;
+                    
+                    // 复制TID数据（因为tid可能指向tmpCtx中的数据，可能被释放）
+                    tid_copy = *tid;
+                    
+                    // 初始化 heap_tuple 的 t_self 为 TID
+                    heap_tuple->t_self = tid_copy;
+                    
+                    // 从堆表中获取元组
+                    found = heap_fetch(heap_rel, snapshot, heap_tuple, &buffer, false);
+                    
+                    if (found && HeapTupleIsValid(heap_tuple)) {
+                        // 从元组中获取 vector_id 字段的值
+                        vector_id_datum = heap_getattr(heap_tuple, 
+                                                       vector_id_attnum,
+                                                       RelationGetDescr(heap_rel),
+                                                       &isnull);
+                        
+                        if (!isnull) {
+                            // 将 Datum 转换为 int32 并存储（在SRF内存上下文中）
+                            // 注意：result_values在SRF内存上下文中，所以这里存储的值是安全的
+                            result_values[base_idx + 1] = vector_id_datum;
+                            result_nulls[base_idx + 1] = false;
+                        } else {
+                            // vector_id 列为 NULL
+                            result_nulls[base_idx + 1] = true;
+                        }
+                        
+                        // 释放 buffer（如果分配了）
+                        if (BufferIsValid(buffer)) {
+                            ReleaseBuffer(buffer);
+                        }
+                    } else {
+                        // 元组不存在或不可见
+                        result_nulls[base_idx + 1] = true;
+                    }
+                } else {
+                    // TID 无效
+                    result_nulls[base_idx + 1] = true;
+                }
+            }
+        }
+        // elog(LOG, "batch_vector_search_c: TID转换完成，成功转换 %d 个TID", converted_count);
+        
+        // 关闭堆表（如果是我们打开的）
+        if (heap_rel_opened_by_us) {
+            table_close(heap_rel, AccessShareLock);
+        }
         
         // 保存结果数据到状态中
         state->result_values = result_values;
@@ -174,174 +291,90 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         
         // 保存资源以便后续清理
         state->scan = scan;
-        state->index = index;
+        state->index = NULL;  // 不保存index引用，让PostgreSQL通过scan管理
         state->batch_keys = batch_keys;
-        
-        // 获取堆表 Relation（从索引中获取）
-        // 标记是否由我们打开（需要关闭）
+        state->heap_rel = NULL;  // 已经关闭，不需要保存
         state->heap_rel_opened_by_us = false;
-        if (scan->heapRelation) {
-            // 使用索引扫描中的 heapRelation（不需要我们关闭）
-            state->heap_rel = scan->heapRelation;
-        } else {
-            // 如果 scan 中没有 heapRelation，从索引元数据中获取
-            Oid heap_oid = IndexGetRelation(index_oid, false);
-            if (!OidIsValid(heap_oid)) {
-                elog(ERROR, "batch_vector_search_c: 无法获取堆表 OID");
-            }
-            state->heap_rel = table_open(heap_oid, AccessShareLock);
-            state->heap_rel_opened_by_us = true;  // 标记为我们打开的
-        }
-        
-        // 获取 vector_id 字段的属性编号（假设是第1列，通常是主键或id字段）
-        {
-            int attnum;
-            
-            // 使用 get_attnum 通过关系ID和属性名获取属性编号
-            attnum = get_attnum(RelationGetRelid(state->heap_rel), "id");
-            if (attnum == InvalidAttrNumber) {
-                // 如果找不到 "id" 字段，尝试使用第1列
-                state->vector_id_attnum = 1;
-                elog(LOG, "batch_vector_search_c: 未找到 'id' 字段，使用第1列作为 vector_id");
-            } else {
-                state->vector_id_attnum = attnum;
-                elog(LOG, "batch_vector_search_c: 找到 'id' 字段，属性编号 = %d", state->vector_id_attnum);
-            }
-        }
         
         // 设置返回元组描述符
         if (get_call_result_type(fcinfo, NULL, &funcctx->tuple_desc) != TYPEFUNC_COMPOSITE)
             elog(ERROR, "return type must be a row type");
         funcctx->tuple_desc = BlessTupleDesc(funcctx->tuple_desc);
         
-        elog(LOG, "batch_vector_search_c: 初始化完成，准备返回 %d 个结果", returned_tuples);
+        // elog(LOG, "batch_vector_search_c: 初始化完成，准备返回 %d 个结果", returned_tuples);
     }
     
     // 每次调用返回一个结果
     funcctx = SRF_PERCALL_SETUP();
     state = (BatchSearchState *)funcctx->user_fctx;
     
+    // elog(LOG, "batch_vector_search_c: SRF后续调用 - current_result=%d, returned_tuples=%d", 
+    //      state ? state->current_result : -1, state ? state->returned_tuples : -1);
+    
+    if (!state) {
+        elog(ERROR, "batch_vector_search_c: state为NULL");
+        SRF_RETURN_DONE(funcctx);
+    }
+    
     if (state->current_result >= state->returned_tuples) {
+        // elog(LOG, "batch_vector_search_c: 所有结果已返回，开始清理资源");
+        
         // 清理 PostgreSQL 资源
-        if (state->scan) {
-            ivfflatbatchendscan(state->scan);  // 清理扫描资源和 tmpCtx
-        }
-        if (state->index) {
-            index_close(state->index, AccessShareLock);
-        }
-        if (state->heap_rel && state->heap_rel_opened_by_us) {
-            // 如果 heap_rel 是我们自己打开的，需要关闭它
-            table_close(state->heap_rel, AccessShareLock);
-            state->heap_rel = NULL;  // 避免重复关闭
-        }
+        // 最简化策略：让PostgreSQL的SRF机制自动处理所有资源清理
+        
+        // 重要发现：
+        // 1. scan结构和scan->opaque都在SRF内存上下文中
+        // 2. PostgreSQL会在SRF结束时自动调用清理函数
+        // 3. 手动调用清理函数可能导致双重清理问题
+        // 4. 最安全的方式是完全依赖PostgreSQL的自动清理机制
+        
+        // elog(LOG, "batch_vector_search_c: 依赖PostgreSQL自动清理资源 - scan=%p, index=%p", 
+        //      state->scan, state->index);
+        
+        // heap_rel 已经在第一次调用时关闭，不需要再次关闭
         /* batch_keys 由 SRF 内存上下文自动清理 */
         
-        // result_values 和 result_nulls 由 SRF 内存上下文自动清理
+        // 在返回DONE之前，确保所有指针都已清空
+        // 这样即使PostgreSQL在清理SRF内存上下文时访问state，也不会访问已删除的内存
+        state->result_values = NULL;
+        state->result_nulls = NULL;
+        state->batch_keys = NULL;
+        
+        // 重要：确保所有可能被PostgreSQL访问的字段都已清空
+        // scan和index已经设置为NULL，heap_rel已经在第一次调用时关闭
+        // 但是，我们需要确保state结构本身是安全的
+        
+        // elog(LOG, "batch_vector_search_c: 资源清理完成，返回DONE - scan=%p, index=%p", 
+        //      state->scan, state->index);
+        
+        // 在返回DONE之前，确认所有指针状态
+        // 这可以防止PostgreSQL在清理SRF内存上下文时访问已删除的内存
+        
         SRF_RETURN_DONE(funcctx);
     }
     
     // 返回当前结果
-    if (!state->result_nulls[state->current_result * 3]) {
-        // 直接从result_values数组中获取结果
-        int base_idx = state->current_result * 3;
-        
-        values[0] = state->result_values[base_idx + 0]; // query_id
-        values[1] = state->result_values[base_idx + 1]; // vector_id  
-        values[2] = state->result_values[base_idx + 2]; // distance
-        
-        tuple_nulls[0] = state->result_nulls[base_idx + 0];
-        tuple_nulls[1] = state->result_nulls[base_idx + 1];
-        tuple_nulls[2] = state->result_nulls[base_idx + 2];
-        
-        {
-            // values[1] 是 ItemPointer (TID)，需要从堆表中获取实际的 vector_id 值
-            ItemPointer tid = (ItemPointer)DatumGetPointer(values[1]);
-            
-            // 调试：打印TID值
-            if (tid && ItemPointerIsValid(tid)) {
-                elog(LOG, "batch_vector_search_c: 调试 - TID值: (%u,%u)", 
-                     ItemPointerGetBlockNumber(tid),
-                     ItemPointerGetOffsetNumber(tid));
-            }
-            
-            if (tid && ItemPointerIsValid(tid) && state->heap_rel) {
-                HeapTupleData heap_tuple_data;
-                HeapTuple     heap_tuple = &heap_tuple_data;
-                bool          isnull;
-                Datum         vector_id_datum;
-                Snapshot      snapshot;
-                Buffer        buffer = InvalidBuffer;
-                bool          found;
-                
-                // 获取当前快照
-                snapshot = GetActiveSnapshot();
-                
-                // 初始化 heap_tuple 的 t_self 为 TID
-                heap_tuple->t_self = *tid;
-                
-                // 从堆表中获取元组（类似单次查询的方式）
-                // heap_fetch 的签名：bool heap_fetch(Relation relation, Snapshot snapshot,
-                //                                   HeapTuple tuple, Buffer *userbuf, bool keep_buf)
-                found = heap_fetch(state->heap_rel, snapshot, heap_tuple, &buffer, false);
-                
-                if (found && HeapTupleIsValid(heap_tuple)) {
-                    // 从元组中获取 vector_id 字段的值
-                    vector_id_datum = heap_getattr(heap_tuple, 
-                                                   state->vector_id_attnum,
-                                                   RelationGetDescr(state->heap_rel),
-                                                   &isnull);
-                    
-                    if (!isnull) {
-                        // 将 Datum 转换为 int32
-                        values[1] = vector_id_datum;
-                        tuple_nulls[1] = false;
-                        
-                        elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=%d (tid: %u,%u), distance=%.6f", 
-                             state->current_result, 
-                             DatumGetInt32(values[0]), 
-                             DatumGetInt32(values[1]),
-                             ItemPointerGetBlockNumber(tid),
-                             ItemPointerGetOffsetNumber(tid),
-                             DatumGetFloat8(values[2]));
-                    } else {
-                        // vector_id 列为 NULL
-                        tuple_nulls[1] = true;
-                        elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=null (tid: %u,%u), distance=%.6f", 
-                             state->current_result, DatumGetInt32(values[0]),
-                             ItemPointerGetBlockNumber(tid),
-                             ItemPointerGetOffsetNumber(tid),
-                             DatumGetFloat8(values[2]));
-                    }
-                    
-                    // 释放 buffer（如果分配了）
-                    if (BufferIsValid(buffer)) {
-                        ReleaseBuffer(buffer);
-                    }
-                } else {
-                    // 元组不存在或不可见
-                    tuple_nulls[1] = true;
-                    elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=null (tid: %u,%u 元组不存在), distance=%.6f", 
-                         state->current_result, DatumGetInt32(values[0]),
-                         ItemPointerGetBlockNumber(tid),
-                         ItemPointerGetOffsetNumber(tid),
-                         DatumGetFloat8(values[2]));
-                }
-            } else {
-                // TID 无效
-                tuple_nulls[1] = true;
-                elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=null (TID无效), distance=%.6f", 
-                     state->current_result, DatumGetInt32(values[0]), DatumGetFloat8(values[2]));
-            }
-        }
-    } else {
-        // 处理null结果
-        values[0] = (Datum)0;
-        values[1] = (Datum)0;
-        values[2] = (Datum)0;
-        tuple_nulls[0] = true;
-        tuple_nulls[1] = true;
-        tuple_nulls[2] = true;
+    // 注意：TID已经在第一次调用时转换为实际的vector_id值，所以这里直接读取即可
+    int base_idx = state->current_result * 3;
+    
+    if (base_idx + 2 >= state->returned_tuples * 3) {
+        elog(ERROR, "batch_vector_search_c: 索引越界 - base_idx=%d, returned_tuples=%d", 
+             base_idx, state->returned_tuples);
     }
+    
+    values[0] = state->result_values[base_idx + 0]; // query_id
+    values[1] = state->result_values[base_idx + 1]; // vector_id (已经是实际的int32值)
+    values[2] = state->result_values[base_idx + 2]; // distance
+    
+    tuple_nulls[0] = state->result_nulls[base_idx + 0];
+    tuple_nulls[1] = state->result_nulls[base_idx + 1];
+    tuple_nulls[2] = state->result_nulls[base_idx + 2];
+    
+    // elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=%d, distance=%.6f", 
+    //      state->current_result,
+    //      DatumGetInt32(values[0]),
+    //      DatumGetInt32(values[1]),
+    //      DatumGetFloat8(values[2]));
     
     state->current_result++;
     

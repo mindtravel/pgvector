@@ -22,7 +22,7 @@
 
 
 #ifdef USE_CUDA
-static void GetScanLists_GPU(IndexScanDesc scan, Datum value);
+static void GetScanLists_GPU(IndexScanDesc scan, Datum value) __attribute__((unused));
 static int UploadCentersToGPU(IndexScanDesc scan);
 #endif
 
@@ -52,12 +52,12 @@ GetScanLists(IndexScanDesc scan, Datum value)
 	int			listCount = 0;
 	double		maxDistance = DBL_MAX;
 
-	/* 如果使用GPU加速，先收集所有聚类中心 */
+	/* 
+	 * 单次查询使用CPU版本的probe选择以确保与批量查询的一致性
+	 * 批量查询使用GPU加速，单次查询使用CPU计算，两者结果一致
+	 */
 #ifdef USE_CUDA
-	if (so->use_gpu && so->cuda_ctx) {
-		GetScanLists_GPU(scan, value);
-		return;
-	}
+	// elog(LOG, "GetScanLists: 单次查询使用CPU版本的probe选择以确保结果一致性");
 #endif
 
 	/* Search all list pages */
@@ -244,8 +244,12 @@ static void GetScanLists_GPU(IndexScanDesc scan, Datum value)
 	}
 	
 	/* 输出排序结果 */
-	for (int i = listCount - 1; i >= 0; i--)
-		so->listPages[i] = GetScanList(pairingheap_remove_first(so->listQueue))->startPage;
+	elog(LOG, "GetScanLists_GPU: 单次查询选择的probe列表:");
+	for (int i = listCount - 1; i >= 0; i--) {
+		IvfflatScanList *scanlist = GetScanList(pairingheap_remove_first(so->listQueue));
+		so->listPages[i] = scanlist->startPage;
+		elog(LOG, "  probe %d: 页面=%u, 距离=%.6f", i, scanlist->startPage, scanlist->distance);
+	}
 
 	Assert(pairingheap_is_empty(so->listQueue));
 	
@@ -269,18 +273,18 @@ static int UploadCentersToGPU(IndexScanDesc scan)
 	int upload_result;
 	CudaCenterSearchContext* ctx;
 	
-	elog(LOG, "UploadCentersToGPU: 函数开始执行");
+	// elog(LOG, "UploadCentersToGPU: 函数开始执行");
 	
 	so = (IvfflatScanOpaque) scan->opaque;
-	elog(LOG, "UploadCentersToGPU: 获取扫描状态成功, so=%p", so);
+	// elog(LOG, "UploadCentersToGPU: 获取扫描状态成功, so=%p", so);
 	
 	if (!so) {
 		elog(ERROR, "UploadCentersToGPU: 扫描状态为空");
 		return -1;
 	}
 	
-	elog(LOG, "UploadCentersToGPU: 维度=%d, cuda_ctx=%p, use_gpu=%s", 
-		 so->dimensions, so->cuda_ctx, so->use_gpu ? "是" : "否");
+	// elog(LOG, "UploadCentersToGPU: 维度=%d, cuda_ctx=%p, use_gpu=%s", 
+	// 	 so->dimensions, so->cuda_ctx, so->use_gpu ? "是" : "否");
 	
 	totalLists = 0;
 	center_idx = 0;
@@ -295,11 +299,11 @@ static int UploadCentersToGPU(IndexScanDesc scan)
 	
 	/* 如果已经上传过，直接返回成功 */
 	if (so->centers_uploaded) {
-		elog(LOG, "聚类中心数据已上传，跳过重复上传");
+		// elog(LOG, "聚类中心数据已上传，跳过重复上传");
 		return 0;
 	}
 	
-	elog(LOG, "开始收集聚类中心数据 (维度: %d)", dimensions);
+	// elog(LOG, "开始收集聚类中心数据 (维度: %d)", dimensions);
 	
 	/* 计算总列表数量 */
 	while (BlockNumberIsValid(nextblkno))
@@ -322,7 +326,7 @@ static int UploadCentersToGPU(IndexScanDesc scan)
 		return -1;
 	}
 	
-	elog(LOG, "找到 %d 个聚类中心，开始分配内存", totalLists);
+	// elog(LOG, "找到 %d 个聚类中心，开始分配内存", totalLists);
 	
 	/* 分配内存存储聚类中心数据 */
 	centers_data = palloc(totalLists * dimensions * sizeof(float));
@@ -380,7 +384,7 @@ static int UploadCentersToGPU(IndexScanDesc scan)
 		return -1;
 	}
 	
-	elog(LOG, "聚类中心数据收集完成，开始上传到GPU");
+	// elog(LOG, "聚类中心数据收集完成，开始上传到GPU");
 	
 	/* 上传聚类中心数据到GPU */
 	ctx = (CudaCenterSearchContext*)so->cuda_ctx;
@@ -404,10 +408,10 @@ static int UploadCentersToGPU(IndexScanDesc scan)
 	}
 	
 	if (ctx->use_zero_copy) {
-		elog(LOG, "使用零拷贝模式上传数据");
+		// elog(LOG, "使用零拷贝模式上传数据");
 		upload_result = cuda_upload_centers_zero_copy(ctx, centers_data);
 	} else {
-		elog(LOG, "使用标准模式上传数据");
+		// elog(LOG, "使用标准模式上传数据");
 		upload_result = cuda_upload_centers(ctx, centers_data);
 	}
 	
@@ -416,7 +420,7 @@ static int UploadCentersToGPU(IndexScanDesc scan)
 	
 	if (upload_result == 0) {
 		so->centers_uploaded = true;
-		elog(LOG, "聚类中心数据已成功上传到GPU (%d个中心)", totalLists);
+		// elog(LOG, "聚类中心数据已成功上传到GPU (%d个中心)", totalLists);
 	} else {
 		elog(ERROR, "聚类中心数据上传到GPU失败，错误代码: %d", upload_result);
 	}
@@ -712,39 +716,40 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 	scan->opaque = so;
 	
 	/* 逐步测试 GPU 功能 */
-	elog(LOG, "开始测试 GPU 功能");
+	// elog(LOG, "开始测试 GPU 功能");
 	
 	/* 测试 CUDA 可用性检查 */
 	if (cuda_is_available()) {
-		elog(LOG, "CUDA 可用性检查通过");
+		// elog(LOG, "CUDA 可用性检查通过");
 		
 		/* 测试 CUDA 基本功能 */
 		if (cuda_basic_test()) {
-			elog(LOG, "CUDA 基本功能测试通过");
+			// elog(LOG, "CUDA 基本功能测试通过");
 			
 			/* 测试 CUDA 上下文初始化 */
-			elog(LOG, "开始测试 CUDA 上下文初始化");
+			// elog(LOG, "开始测试 CUDA 上下文初始化");
 			so->cuda_ctx = cuda_center_search_init(lists, dimensions, false);
 			if (so->cuda_ctx) {
-				elog(LOG, "CUDA 上下文初始化成功");
+				// elog(LOG, "CUDA 上下文初始化成功");
 				
 				/* 测试数据上传 */
-				elog(LOG, "开始测试数据上传功能");
+				// elog(LOG, "开始测试数据上传功能");
 				if (UploadCentersToGPU(scan) == 0) {
-					elog(LOG, "数据上传成功");
+					// elog(LOG, "数据上传成功");
 				} else {
-					elog(WARNING, "数据上传失败");
+					// elog(LOG, "数据上传失败");
+					/* 如果数据上传失败，清理CUDA上下文 */
+					cuda_center_search_cleanup(so->cuda_ctx);
+					so->cuda_ctx = NULL;
 				}
 				
-				/* 清理 */
-				cuda_center_search_cleanup(so->cuda_ctx);
-				so->cuda_ctx = NULL;
-				elog(LOG, "CUDA 上下文清理完成");
+				/* 注意：不要在这里清理CUDA上下文，因为后续还需要使用 */
+				// elog(LOG, "CUDA 上下文保留用于后续使用");
 			} else {
-				elog(WARNING, "CUDA 上下文初始化失败");
+				// elog(LOG, "CUDA 上下文初始化失败");
 			}
 		} else {
-			elog(WARNING, "CUDA 基本功能测试失败");
+			elog(ERROR, "CUDA 基本功能测试失败");
 		}
 	} else {
 		elog(LOG, "CUDA 不可用");
@@ -755,7 +760,7 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 		so->use_gpu = true;
 		so->gpu_distances = palloc(lists * sizeof(float));
 		if (!so->gpu_distances) {
-			elog(WARNING, "无法分配GPU距离结果内存，将使用CPU计算");
+			elog(ERROR, "无法分配GPU距离结果内存，将使用CPU计算");
 			so->use_gpu = false;
 			cuda_center_search_cleanup(so->cuda_ctx);
 			so->cuda_ctx = NULL;

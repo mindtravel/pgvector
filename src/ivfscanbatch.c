@@ -42,7 +42,7 @@ ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys)
     IvfflatBatchScanOpaque so;
     MemoryContext tmpCtx;
 
-    elog(LOG, "ivfflatbatchbeginscan: 开始批量扫描, nkeys=%d", batch_keys->nkeys);
+    // elog(LOG, "ivfflatbatchbeginscan: 开始批量扫描, nkeys=%d", batch_keys->nkeys);
 
     /* 创建扫描描述符 */
     scan = RelationGetIndexScan(index, batch_keys->nkeys, norderbys);
@@ -51,6 +51,11 @@ ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys)
     }
     
     /* 先创建临时内存上下文 */
+    /* 注意：tmpCtx应该在CurrentMemoryContext中创建，而不是在SRF内存上下文中
+     * 这样可以确保tmpCtx的生命周期独立于SRF内存上下文
+     * 但是，如果CurrentMemoryContext是SRF内存上下文，tmpCtx也会在SRF清理时被删除
+     * 所以，我们需要确保在SRF清理之前，tmpCtx已经被删除
+     */
     tmpCtx = AllocSetContextCreate(CurrentMemoryContext,
         "Ivfflat batch scan temporary context",
         ALLOCSET_DEFAULT_SIZES);
@@ -95,6 +100,12 @@ ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys)
     if (probes > lists) probes = lists;
     if (maxProbes > lists) maxProbes = lists;
     
+    /* 修复：对于批量查询，maxProbes应该等于probes，避免全表扫描 */
+    maxProbes = probes;
+    
+    // elog(LOG, "ivfflatbatchbeginscan: probe配置 - lists=%d, probes=%d, maxProbes=%d, ivfflat_max_probes=%d", 
+    //      lists, probes, maxProbes, ivfflat_max_probes);
+    
     so->probes = probes;
     so->maxProbes = maxProbes;
     so->listIndex = 0;
@@ -119,7 +130,7 @@ ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys)
     /* 设置scan->opaque */
     scan->opaque = so;
 
-    elog(LOG, "ivfflatbatchbeginscan: 批量扫描初始化完成");
+    // elog(LOG, "ivfflatbatchbeginscan: 批量扫描初始化完成");
     return scan;
 }
 
@@ -158,17 +169,29 @@ void
 ivfflatbatchendscan(IndexScanDesc scan)
 {
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
+    
+    if (!so) {
+        /* 如果opaque已经被清理，直接返回 */
+        return;
+    }
 
 #ifdef USE_CUDA
     /* 清理CUDA资源（如果使用了） */
     if (so->cuda_ctx) {
         cuda_center_search_cleanup((CudaCenterSearchContext*)so->cuda_ctx);
+        so->cuda_ctx = NULL;  // 避免重复清理
     }
 #endif
     
+    /* 保存tmpCtx指针，因为删除tmpCtx后so也会被删除 */
+    MemoryContext tmpCtx = so->tmpCtx;
+    
+    /* 在删除tmpCtx之前，先将scan->opaque设置为NULL，避免后续访问已删除的内存 */
+    scan->opaque = NULL;
+    
     /* 删除临时内存上下文，自动清理所有在tmpCtx中分配的内存 */
-    if (so->tmpCtx) {
-        MemoryContextDelete(so->tmpCtx);
+    if (tmpCtx) {
+        MemoryContextDelete(tmpCtx);
     }
     
     /* 注意：so、batch_ctx、result_buffer 等都在 tmpCtx 中分配，
@@ -184,21 +207,27 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
 #ifdef USE_CUDA
     if (so->cuda_ctx && so->cuda_ctx->initialized) {
         /* 步骤1: 选择最近的列表（probes） */
-        elog(LOG, "ProcessBatchQueriesGPU: 步骤1 - 选择最近的列表");
+        // elog(LOG, "ProcessBatchQueriesGPU: 步骤1 - 选择最近的列表");
         GetScanLists_BatchGPU(scan, batch_keys);
         
-        /* 步骤2: 上传probe候选数据到GPU（使用IndexTuple模式） */
-        elog(LOG, "ProcessBatchQueriesGPU: 步骤2 - 上传probe候选数据（IndexTuple模式）");
+        /* 步骤2: 上传probe候选数据到GPU（分离存储方案） */
+        // elog(LOG, "ProcessBatchQueriesGPU: 步骤2 - 上传probe候选数据（分离存储方案）");
         if (UploadIndexTuplesToGPU_Batch(scan) != 0) {
             elog(ERROR, "ProcessBatchQueriesGPU: 上传probe候选数据失败");
             return;
         }
         
         /* 步骤3: 从GPU获取结果并填充到result_buffer */
-        elog(LOG, "ProcessBatchQueriesGPU: 步骤3 - 获取GPU结果");
+        // elog(LOG, "ProcessBatchQueriesGPU: 步骤3 - 获取GPU结果");
+        /* 保存k值到扫描状态，供GetScanItems_BatchGPU使用 */
+        if (so->result_buffer == NULL) {
+            so->result_buffer = CreateBatchBuffer(nbatch, k, so->dimensions, so->tmpCtx);
+        } else {
+            so->result_buffer->k = k;  /* 更新k值 */
+        }
         GetScanItems_BatchGPU(scan, batch_keys);
         
-        elog(LOG, "ProcessBatchQueriesGPU: GPU处理完成");
+        // elog(LOG, "ProcessBatchQueriesGPU: GPU处理完成");
         return;
     }
 #endif
@@ -213,8 +242,8 @@ GetBatchResults(BatchBuffer* buffer, int query_index, int k, Datum* values, bool
     int i;
     int count = 0;
     
-    elog(LOG, "GetBatchResults: buffer=%p, query_index=%d, k=%d, total_results=%d", 
-         buffer, query_index, k, buffer ? buffer->total_results : 0);
+    // elog(LOG, "GetBatchResults: buffer=%p, query_index=%d, k=%d, total_results=%d", 
+    //     buffer, query_index, k, buffer ? buffer->total_results : 0);
     
     if (buffer == NULL || buffer->total_results == 0) {
         *returned_count = 0;
@@ -338,14 +367,25 @@ GetScanLists_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
         UnlockReleaseBuffer(cbuf);
     }
     
-    /* 准备批量查询数据 */
-    float *batch_query_data = (float *) ScanKeyBatchGetContinuousData(batch_keys);
+    /* 准备批量查询数据 - 使用与probe距离计算相同的方式 */
     int nbatch = batch_keys->nkeys;
-    
+    float *batch_query_data = (float*)palloc(nbatch * so->dimensions * sizeof(float));
     if (!batch_query_data) {
-        elog(ERROR, "无法获取批量查询数据");
+        elog(ERROR, "无法分配聚类中心距离计算的查询数据内存");
         pfree(list_pages);
         return;
+    }
+    
+    /* 手动提取每个查询向量，确保与probe距离计算的顺序完全一致 */
+    for (int i = 0; i < nbatch; i++) {
+        Datum vector_datum = ScanKeyBatchGetVector(batch_keys, i);
+        Vector *vec = DatumGetVector(vector_datum);
+        /* 复制向量数据到连续数组 */
+        memcpy(batch_query_data + i * so->dimensions, &vec->x[0], so->dimensions * sizeof(float));
+        
+        /* 调试：输出查询向量的前几个元素 */
+        // elog(LOG, "GetScanLists_BatchGPU: 查询%d向量前3个元素: [%.6f, %.6f, %.6f] (聚类中心距离计算)", 
+        //      i, vec->x[0], vec->x[1], vec->x[2]);
     }
     
     /* GPU批量计算距离 */
@@ -357,6 +397,7 @@ GetScanLists_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
     
     if (cuda_result != 0) {
         elog(ERROR, "GPU距离计算失败");
+        pfree(batch_query_data);
         pfree(list_pages);
         return;
     }
@@ -395,13 +436,18 @@ GetScanLists_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
         
         /* 输出排序结果 */
         int outputCount = Min(listCount, so->maxProbes);
+        // elog(LOG, "GetScanLists_BatchGPU: 查询%d选择的probe列表:", query_idx);
         for (int i = outputCount - 1; i >= 0; i--) {
-            so->listPages[query_idx * so->maxProbes + i] = GetScanList(pairingheap_remove_first(so->listQueue))->startPage;
+            IvfflatScanList *scanlist = GetScanList(pairingheap_remove_first(so->listQueue));
+            so->listPages[query_idx * so->maxProbes + i] = scanlist->startPage;
+            // elog(LOG, "  probe %d: 页面=%u, 距离=%.6f", i, scanlist->startPage, scanlist->distance);
         }
         
         Assert(pairingheap_is_empty(so->listQueue));
     }
     
+    /* 释放手动分配的内存 */
+    pfree(batch_query_data);
     pfree(list_pages);
 }
 
@@ -419,7 +465,7 @@ GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
     
     /* 确保probes数据已上传 */
     if (!so->cuda_ctx->probes_uploaded) {
-        elog(LOG, "GetScanItems_BatchGPU: probes数据未上传，开始上传（IndexTuple模式）");
+        // elog(LOG, "GetScanItems_BatchGPU: probes数据未上传，开始上传（分离存储方案）");
         if (UploadIndexTuplesToGPU_Batch(scan) != 0) {
             elog(ERROR, "GetScanItems_BatchGPU: probes数据上传失败");
             return;
@@ -445,9 +491,13 @@ GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
         Vector *vec = DatumGetVector(vector_datum);
         /* 复制向量数据到连续数组 */
         memcpy(batch_query_data + i * so->dimensions, &vec->x[0], so->dimensions * sizeof(float));
+        
+        /* 调试：输出查询向量的前几个元素 */
+        // elog(LOG, "GetScanItems_BatchGPU: 查询%d向量前3个元素: [%.6f, %.6f, %.6f] (应该对应查询%d)", 
+        //      i, vec->x[0], vec->x[1], vec->x[2], i);
     }
     
-    elog(LOG, "GetScanItems_BatchGPU: 开始在GPU上计算批量probe距离");
+    // elog(LOG, "GetScanItems_BatchGPU: 开始在GPU上计算批量probe距离");
     int compute_result = cuda_compute_batch_probe_distances(so->cuda_ctx, 
                                                            batch_query_data, 
                                                            nbatch);
@@ -475,7 +525,8 @@ GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
         return;
     }
     
-    elog(LOG, "GetScanItems_BatchGPU: 开始在GPU上进行TopK选择");
+    // elog(LOG, "GetScanItems_BatchGPU: 开始在GPU上进行TopK选择 - k=%d, nbatch=%d, 候选数=%d", 
+    //      k, nbatch, so->cuda_ctx ? so->cuda_ctx->num_probe_candidates : -1);
     int topk_result = cuda_topk_probe_candidates(so->cuda_ctx, 
                                                  k, 
                                                  nbatch,
@@ -485,7 +536,19 @@ GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
                                                  topk_counts);
     
     if (topk_result != 0) {
-        elog(ERROR, "GetScanItems_BatchGPU: GPU TopK选择失败");
+#ifdef USE_CUDA
+        const char* cuda_err = cuda_get_last_error_string();
+        elog(ERROR, "GetScanItems_BatchGPU: GPU TopK选择失败 - k=%d, nbatch=%d, 候选数=%d, 维度=%d, CUDA错误: %s", 
+             k, nbatch, 
+             so->cuda_ctx ? so->cuda_ctx->num_probe_candidates : -1,
+             so->dimensions,
+             cuda_err);
+#else
+        elog(ERROR, "GetScanItems_BatchGPU: GPU TopK选择失败 - k=%d, nbatch=%d, 候选数=%d, 维度=%d", 
+             k, nbatch, 
+             so->cuda_ctx ? so->cuda_ctx->num_probe_candidates : -1,
+             so->dimensions);
+#endif
         pfree(topk_query_ids);
         pfree(topk_vector_ids);
         pfree(topk_distances);
@@ -495,16 +558,25 @@ GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
     
     /* 步骤3: 填充到result_buffer（按列存储） */
     /* 每个查询必须填充k个位置，如果候选不足k个，用null值填充 */
-    int total_results = 0;
+    int total_processed_results = 0;  /* 累计已处理的GPU结果数 */
+    int total_results = 0;            /* 总的缓冲区槽位数 */
     for (int query_idx = 0; query_idx < nbatch; query_idx++) {
         int count = topk_counts[query_idx];
         
         /* 填充实际结果（如果有的话） */
         for (int i = 0; i < count; i++) {
-            int buffer_idx = query_idx * k + i;
-            so->result_buffer->query_ids[buffer_idx] = topk_query_ids[buffer_idx];
-            so->result_buffer->vector_ids[buffer_idx] = topk_vector_ids[buffer_idx];
-            so->result_buffer->distances[buffer_idx] = topk_distances[buffer_idx];
+            int buffer_idx = query_idx * k + i;           /* 目标缓冲区位置 */
+            int source_idx = total_processed_results + i; /* GPU结果数组中的源位置 */
+            
+            so->result_buffer->query_ids[buffer_idx] = topk_query_ids[source_idx];
+            so->result_buffer->vector_ids[buffer_idx] = topk_vector_ids[source_idx];
+            so->result_buffer->distances[buffer_idx] = topk_distances[source_idx];
+            
+            /* 调试日志：验证索引修复效果（仅前几个结果） */
+            // if (query_idx < 3 && i < 2) {
+            //     elog(LOG, "GetScanItems_BatchGPU: 查询%d结果%d - buffer_idx=%d, source_idx=%d, query_id=%d, distance=%.6f", 
+            //          query_idx, i, buffer_idx, source_idx, topk_query_ids[source_idx], topk_distances[source_idx]);
+            // }
         }
         
         /* 如果候选不足k个，用null值填充剩余位置 */
@@ -515,7 +587,8 @@ GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
             so->result_buffer->distances[buffer_idx] = INFINITY;  /* null标记：无效的距离 */
         }
         
-        total_results += k;  /* 每个查询贡献k个槽位 */
+        total_processed_results += count;  /* 累计已处理的GPU结果数 */
+        total_results += k;                /* 每个查询贡献k个槽位 */
     }
     
     so->result_buffer->total_results = total_results;
@@ -525,7 +598,7 @@ GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
     pfree(topk_distances);
     pfree(topk_counts);
     
-    elog(LOG, "GetScanItems_BatchGPU: 成功获取 %d 个结果（GPU计算距离和TopK）", total_results);
+    // elog(LOG, "GetScanItems_BatchGPU: 成功获取 %d 个结果（GPU计算距离和TopK）", total_results);
 }
 
 static int
@@ -627,8 +700,8 @@ UploadCentersToGPU_Batch(IndexScanDesc scan)
 }
 
 /*
- * 上传完整的IndexTuple数据到GPU（与CPU端存储方式完全一致）
- * IndexTuple包含：t_tid + t_info + Vector数据
+ * 上传分离的向量数据和TID数据到GPU（分离存储方案，提高性能）
+ * 关键：确保向量数据、TID数据和查询ID的索引一致性
  */
 static int
 UploadIndexTuplesToGPU_Batch(IndexScanDesc scan)
@@ -640,15 +713,15 @@ UploadIndexTuplesToGPU_Batch(IndexScanDesc scan)
     int dimensions = so->dimensions;
     int estimated_total_candidates = nbatch * maxProbes * 100;  // 估算值
     
-    /* 分配临时数组收集完整的IndexTuple数据 */
-    char **index_tuples = (char**)palloc(estimated_total_candidates * sizeof(char*));
-    size_t *tuple_sizes = (size_t*)palloc(estimated_total_candidates * sizeof(size_t));
+    /* 分配临时数组收集分离的数据（方案1：分离存储） */
+    float *packed_vectors = (float*)palloc(estimated_total_candidates * dimensions * sizeof(float));
+    ItemPointerData *packed_tids = (ItemPointerData*)palloc(estimated_total_candidates * sizeof(ItemPointerData));
     int *query_ids = (int*)palloc(estimated_total_candidates * sizeof(int));
     
-    if (!index_tuples || !tuple_sizes || !query_ids) {
-        elog(ERROR, "UploadIndexTuplesToGPU_Batch: 无法分配IndexTuple数据内存");
-        if (index_tuples) pfree(index_tuples);
-        if (tuple_sizes) pfree(tuple_sizes);
+    if (!packed_vectors || !packed_tids || !query_ids) {
+        elog(ERROR, "UploadIndexTuplesToGPU_Batch: 无法分配分离数据内存");
+        if (packed_vectors) pfree(packed_vectors);
+        if (packed_tids) pfree(packed_tids);
         if (query_ids) pfree(query_ids);
         return -1;
     }
@@ -691,31 +764,35 @@ UploadIndexTuplesToGPU_Batch(IndexScanDesc scan)
                     /* 动态扩容检查 */
                     if (total_candidates >= estimated_total_candidates) {
                         estimated_total_candidates *= 2;
-                        index_tuples = (char**)repalloc(index_tuples, estimated_total_candidates * sizeof(char*));
-                        tuple_sizes = (size_t*)repalloc(tuple_sizes, estimated_total_candidates * sizeof(size_t));
+                        packed_vectors = (float*)repalloc(packed_vectors, estimated_total_candidates * dimensions * sizeof(float));
+                        packed_tids = (ItemPointerData*)repalloc(packed_tids, estimated_total_candidates * sizeof(ItemPointerData));
                         query_ids = (int*)repalloc(query_ids, estimated_total_candidates * sizeof(int));
                     }
                     
-                    /* 获取IndexTuple的大小 */
-                    Size tuple_size = IndexTupleSize(itup);
-                    tuple_sizes[total_candidates] = tuple_size;
+                    /* 关键：使用相同的candidate_idx，确保索引一致性 */
+                    int candidate_idx = total_candidates;
                     
-                    /* 分配内存并复制完整的IndexTuple */
-                    index_tuples[total_candidates] = (char*)palloc(tuple_size);
-                    memcpy(index_tuples[total_candidates], itup, tuple_size);
+                    /* 提取TID数据（从IndexTuple的t_tid字段） */
+                    packed_tids[candidate_idx] = itup->t_tid;
                     
-                    /* 调试：验证 TID 值（前几个候选） */
-                    if (total_candidates < 3) {
-                        ItemPointer tid = &itup->t_tid;
-                        elog(LOG, "UploadIndexTuplesToGPU_Batch: 候选 %d - TID: (%u,%u), tuple_size=%zu", 
-                             total_candidates,
-                             ItemPointerGetBlockNumber(tid),
-                             ItemPointerGetOffsetNumber(tid),
-                             tuple_size);
-                    }
+                    /* 提取向量数据（从IndexTuple中提取Vector，跳过t_tid + t_info） */
+                    Vector *vec = DatumGetVector(vector_datum);
+                    /* 复制向量数据到连续数组（对齐存储） */
+                    memcpy(packed_vectors + candidate_idx * dimensions, 
+                           &vec->x[0], 
+                           dimensions * sizeof(float));
                     
-                    /* 收集元数据 */
-                    query_ids[total_candidates] = query_idx;
+                    /* 收集查询ID（确保索引一致性） */
+                    query_ids[candidate_idx] = query_idx;
+                    
+                    /* 调试：验证数据（前几个候选） */
+                    // if (candidate_idx < 3) {
+                        // elog(LOG, "UploadIndexTuplesToGPU_Batch: 候选 %d - TID: (%u,%u), 向量维度: %d", 
+                        //      candidate_idx,
+                        //      ItemPointerGetBlockNumber(&packed_tids[candidate_idx]),
+                        //      ItemPointerGetOffsetNumber(&packed_tids[candidate_idx]),
+                        //      dimensions);
+                    // }
                     
                     total_candidates++;
                 }
@@ -728,61 +805,36 @@ UploadIndexTuplesToGPU_Batch(IndexScanDesc scan)
     
     if (total_candidates == 0) {
         elog(WARNING, "UploadIndexTuplesToGPU_Batch: 没有找到任何候选向量");
-        for (int i = 0; i < total_candidates; i++) {
-            if (index_tuples[i]) pfree(index_tuples[i]);
-        }
-        pfree(index_tuples);
-        pfree(tuple_sizes);
+        pfree(packed_vectors);
+        pfree(packed_tids);
         pfree(query_ids);
         return -1;
     }
     
-    /* 将IndexTuple打包到连续内存（用于上传） */
-    /* 计算总大小 */
-    size_t total_size = 0;
-    for (int i = 0; i < total_candidates; i++) {
-        total_size += tuple_sizes[i];
-    }
-    
-    /* 分配连续内存并打包IndexTuple */
-    char *packed_tuples = (char*)palloc(total_size);
-    int *tuple_offsets = (int*)palloc((total_candidates + 1) * sizeof(int));
-    
-    tuple_offsets[0] = 0;
-    for (int i = 0; i < total_candidates; i++) {
-        memcpy(packed_tuples + tuple_offsets[i], index_tuples[i], tuple_sizes[i]);
-        tuple_offsets[i + 1] = tuple_offsets[i] + tuple_sizes[i];
-        
-        /* 释放临时内存 */
-        pfree(index_tuples[i]);
-    }
-    pfree(index_tuples);
-    
-    /* 上传完整的IndexTuple数据到GPU */
+    /* 上传分离的向量数据和TID数据到GPU（分离存储方案） */
     {
         int upload_result;
         upload_result = cuda_upload_probe_vectors(so->cuda_ctx,
-                                                  packed_tuples,  // index_tuples
-                                                  query_ids,
-                                                  tuple_sizes,     // tuple_sizes
-                                                  tuple_offsets,   // tuple_offsets
+                                                  packed_vectors,  // 向量数据（对齐存储）
+                                                  (const char*)packed_tids,  // TID数据（ItemPointerData数组）
+                                                  query_ids,      // 查询ID映射
                                                   total_candidates,
-                                                  dimensions,
-                                                  0);     // fixed_tuple_size = 0 (变长)
+                                                  dimensions);
         
-        pfree(packed_tuples);
-        pfree(tuple_sizes);
-        pfree(tuple_offsets);
+        pfree(packed_vectors);
+        pfree(packed_tids);
         pfree(query_ids);
         
         if (upload_result != 0) {
-            elog(ERROR, "UploadIndexTuplesToGPU_Batch: GPU上传失败");
+            /* 输出详细的错误信息以帮助调试 */
+            elog(ERROR, "UploadIndexTuplesToGPU_Batch: GPU上传失败（分离存储方案）- 候选数: %d, 维度: %d, 批量查询数: %d, 最大probes: %d。请检查CUDA错误日志（stderr）获取详细错误信息", 
+                 total_candidates, dimensions, nbatch, maxProbes);
             return -1;
         }
     }
     
-    elog(LOG, "UploadIndexTuplesToGPU_Batch: 成功上传 %d 个IndexTuple（包含t_tid + t_info + Vector数据）", 
-         total_candidates);
+    // elog(LOG, "UploadIndexTuplesToGPU_Batch: 成功上传 %d 个候选（分离存储方案 - 向量数据 + TID数据），批量查询数: %d, 每个查询平均候选数: %.1f", 
+    //      total_candidates, nbatch, (float)total_candidates / nbatch);
     return 0;
 }
 #endif
