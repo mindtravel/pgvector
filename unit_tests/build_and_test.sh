@@ -22,7 +22,8 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug
 
 # 编译
 echo "编译项目..."
-make -j$(nproc)
+# make -j$(nproc)
+make test_fusion_cos_topk_fine -j$(nproc)
 
 # 运行测试
 echo "运行测试..."

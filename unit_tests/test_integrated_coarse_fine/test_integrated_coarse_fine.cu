@@ -16,8 +16,8 @@ struct BenchmarkCase {
     int n_query;
     int n_clusters;
     int vector_dim;
-    int topk;   // 粗筛 cluster 数
-    int topn;   // 精筛 top-n
+    int nprobes;   // 粗筛 nprobes
+    int topk;   // 精筛topk
 };
 
 struct ClusterDataset {
@@ -34,18 +34,33 @@ struct BalancedMapping {
 };
 
 static ClusterDataset prepare_cluster_dataset(const BenchmarkCase& config,
+                                              int total_vectors,
                                               std::mt19937& rng) {
-    // 减小每个cluster的向量数量范围，加快测试速度
-    std::uniform_int_distribution<int> count_dist(50, 200);
+    // 根据总向量数和cluster数量，分配每个cluster的向量数
     std::uniform_real_distribution<float> value_dist(-1.0f, 1.0f);
 
     ClusterDataset dataset;
     dataset.cluster_ptrs.resize(config.n_clusters);
     dataset.cluster_sizes.resize(config.n_clusters);
 
+    // 平均分配向量到各个cluster，剩余部分随机分配
+    int base_vec_per_cluster = total_vectors / config.n_clusters;
+    int remainder = total_vectors % config.n_clusters;
+    
+    // 先分配基础数量
     for (int cid = 0; cid < config.n_clusters; ++cid) {
-        int vec_count = count_dist(rng);
-        dataset.cluster_sizes[cid] = vec_count;
+        dataset.cluster_sizes[cid] = base_vec_per_cluster;
+    }
+    
+    // 随机分配剩余向量
+    std::uniform_int_distribution<int> remainder_dist(0, config.n_clusters - 1);
+    for (int i = 0; i < remainder; ++i) {
+        dataset.cluster_sizes[remainder_dist(rng)]++;
+    }
+
+    // 为每个cluster分配内存并生成数据
+    for (int cid = 0; cid < config.n_clusters; ++cid) {
+        int vec_count = dataset.cluster_sizes[cid];
 
         float* host_ptr = nullptr;
         size_t bytes = static_cast<size_t>(vec_count) * config.vector_dim * sizeof(float);
@@ -109,7 +124,6 @@ static void release_query_batch(QueryBatch& batch) {
     }
 }
 
-// 余弦距离：1 - cos，相比 L2 更符合当前测试目标
 static float cosine_distance(const float* a, const float* b, int dim) {
     float dot = 0.0f;
     float na = 0.0f;
@@ -156,9 +170,9 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
                                    const ClusterDataset& dataset,
                                    const std::vector<float>& centers,
                                    int n_cluster_per_query,
-                                   int topn,
-                                   std::vector<int>& out_index,
-                                   std::vector<float>& out_dist) {
+                                   int nprobes,
+                                   int** out_index,
+                                   float** out_dist) {
     const int n_query = config.n_query;
     const int n_dim = config.vector_dim;
     const int n_clusters = config.n_clusters;
@@ -186,34 +200,46 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
 
             // fine: iterate vectors inside selected clusters
             fine_buffer.clear();
+            
             for (int k = 0; k < n_cluster_per_query; ++k) {
                 int cid = coarse_indices[static_cast<size_t>(qi) * n_cluster_per_query + k];
                 int vec_count = dataset.cluster_sizes[cid];
                 const float* base = dataset.cluster_ptrs[cid];
+                
+                // 计算该 cluster 的全局向量偏移
+                int cluster_global_offset = 0;
+                for (int prev_cid = 0; prev_cid < cid; ++prev_cid) {
+                    cluster_global_offset += dataset.cluster_sizes[prev_cid];
+                }
+                
                 for (int vid = 0; vid < vec_count; ++vid) {
                     const float* vec = base + static_cast<size_t>(vid) * n_dim;
-                    fine_buffer.push_back({cosine_distance(query, vec, n_dim), vid});
+                    // 存储全局索引：cluster 的全局偏移 + cluster 内的局部索引
+                    int global_idx = cluster_global_offset + vid;
+                    fine_buffer.push_back({cosine_distance(query, vec, n_dim), global_idx});
                 }
             }
-            if (fine_buffer.size() > static_cast<size_t>(topn)) {
-                std::nth_element(fine_buffer.begin(), fine_buffer.begin() + topn, fine_buffer.end(),
+            if (fine_buffer.size() > static_cast<size_t>(nprobes)) {
+                // 使用 nth_element 选择前 nprobes 个最小的元素
+                std::nth_element(fine_buffer.begin(), fine_buffer.begin() + nprobes, fine_buffer.end(),
                                  [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
-                fine_buffer.resize(topn);
+                fine_buffer.resize(nprobes);
+                // nth_element 只保证第 n 个元素在正确位置，需要排序
+                std::sort(fine_buffer.begin(), fine_buffer.end(),
+                          [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
             } else {
+                // 候选数不足 nprobes，直接排序
                 std::sort(fine_buffer.begin(), fine_buffer.end(),
                           [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
             }
-            std::sort(fine_buffer.begin(), fine_buffer.end(),
-                      [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
 
-            for (int t = 0; t < topn; ++t) {
-                size_t offset = static_cast<size_t>(qi) * topn + t;
+            for (int t = 0; t < nprobes; ++t) {
                 if (t < static_cast<int>(fine_buffer.size())) {
-                    out_index[offset] = fine_buffer[t].idx;
-                    out_dist[offset] = fine_buffer[t].dist;
+                    out_index[qi][t] = fine_buffer[t].idx;
+                    out_dist[qi][t] = fine_buffer[t].dist;
                 } else {
-                    out_index[offset] = -1;
-                    out_dist[offset] = 0.0f;
+                    out_index[qi][t] = -1;
+                    out_dist[qi][t] = 0.0f;
                 }
             }
         }
@@ -232,10 +258,17 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
     }
 }
 
-static void run_case(const BenchmarkCase& config) {
+/**
+ * 运行单个测试用例，返回性能指标
+ * @param config 测试配置
+ * @param total_vectors 总向量数
+ * @return {pass_rate_unbalanced, pass_rate_balanced, gpu_ms_unbalanced, gpu_ms_balanced, cpu_ms, speedup_unbalanced, speedup_balanced, total_vectors}
+ */
+static std::vector<double> run_case(const BenchmarkCase& config, int total_vectors) {
     std::mt19937 rng(1234);
 
-    auto dataset = prepare_cluster_dataset(config, rng);
+    auto dataset = prepare_cluster_dataset(config, total_vectors, rng);
+    
     QueryBatch queries = generate_queries(config, rng);
     auto centers = generate_cluster_centers(config, rng);
     auto balanced = build_balanced_mapping(dataset, 512);
@@ -245,111 +278,220 @@ static void run_case(const BenchmarkCase& config) {
     float** query_ptrs = queries.ptrs;
     float* cluster_center_data = centers.data();
 
-    auto run_pipeline = [&](bool use_balance, const char* tag, std::vector<int>& out_idx,
-                            std::vector<float>& out_dist) {
-        float** topk_dist = reinterpret_cast<float**>(
-            malloc_vector_list(config.n_query, config.topn, sizeof(float)));
-        int** topk_index = reinterpret_cast<int**>(
-            malloc_vector_list(config.n_query, config.topn, sizeof(int)));
-        int* n_isnull = new int[config.n_query];
+    // CPU 参考实现：使用 C 数组
+    // 注意：输出大小应该是 topk（最终输出的topk数量），不是 nprobes（粗筛的cluster数）
+    int** cpu_idx = (int**)malloc_vector_list(config.n_query, config.topk, sizeof(int));
+    float** cpu_dist = (float**)malloc_vector_list(config.n_query, config.topk, sizeof(float));
+    double cpu_ms = 0.0;
+    MEASURE_MS_AND_SAVE("cpu耗时:", cpu_ms,
+        cpu_coarse_fine_search(config, queries, dataset, centers,
+                               config.nprobes,  // n_cluster_per_query: 粗筛选择的cluster数
+                               config.topk,     // nprobes: 最终输出的topk数量
+                               cpu_idx,
+                               cpu_dist);
+    );
 
-        auto start = std::chrono::high_resolution_clock::now();
-        batch_search_pipeline(
-            query_ptrs,
-            cluster_sizes,
-            cluster_data,
-            cluster_center_data,
-            topk_dist,
-            topk_index,
-            n_isnull,
-            config.n_query,
-            config.vector_dim,
-            config.n_clusters,
-            std::min(config.n_clusters, config.topk),
-            config.topn,
-            use_balance,
-            use_balance ? balanced.cluster2block_offset.data() : nullptr,
-            use_balance ? balanced.cluster2block_ids.data() : nullptr,
-            use_balance ? balanced.cluster2block_local_offsets.data() : nullptr,
-            use_balance ? balanced.block_vector_counts.data() : nullptr,
-            use_balance ? balanced.block_count : 0
+    auto run_pipeline = [&](bool use_balance, const char* tag, int** topk_index,
+                            float** topk_dist) -> double {
+        int* n_isnull = static_cast<int*>(malloc(config.n_query * sizeof(int)));
+
+        double gpu_ms = 0.0;
+        MEASURE_MS_AND_SAVE("gpu耗时:", gpu_ms,
+            batch_search_pipeline(
+                query_ptrs,
+                cluster_sizes,
+                cluster_data,
+                cluster_center_data,
+                topk_dist,
+                topk_index,
+                n_isnull,
+                config.n_query,
+                config.vector_dim,
+                config.n_clusters,
+                config.nprobes,  // n_cluster_per_query: 粗筛选择的cluster数
+                config.topk,     // k: 最终输出的topk数量
+                use_balance,
+                use_balance ? balanced.cluster2block_offset.data() : nullptr,
+                use_balance ? balanced.cluster2block_ids.data() : nullptr,
+                use_balance ? balanced.cluster2block_local_offsets.data() : nullptr,
+                use_balance ? balanced.block_vector_counts.data() : nullptr,
+                use_balance ? balanced.block_count : 0
+            );
+            cudaDeviceSynchronize();
+            CHECK_CUDA_ERRORS;
         );
-        auto end = std::chrono::high_resolution_clock::now();
-        double ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-        COUT_VAL("[", tag, "] n_query=", config.n_query,
-                 " clusters=", config.n_clusters,
-                 " dim=", config.vector_dim,
-                 " elapsed=", ms, "ms");
-        COUT_VAL("  sample query0 isnull=", n_isnull[0],
-                 " top_index[0]=", topk_index[0][0],
-                 " top_dist[0]=", topk_dist[0][0]);
+        if (!QUIET) {
+            COUT_VAL("[", tag, "] n_query=", config.n_query,
+                     " clusters=", config.n_clusters,
+                     " dim=", config.vector_dim,
+                     " elapsed=", gpu_ms, "ms");
+            COUT_VAL("  sample query0 isnull=", n_isnull[0],
+                     " top_index[0]=", topk_index[0][0],
+                     " top_dist[0]=", topk_dist[0][0]);
+        }
 
+        free(n_isnull);
+        
+        return gpu_ms;
+    };
+
+    // GPU 输出大小也应该是 topk
+    int** gpu_idx_unbalanced = (int**)malloc_vector_list(config.n_query, config.topk, sizeof(int));
+    float** gpu_dist_unbalanced = (float**)malloc_vector_list(config.n_query, config.topk, sizeof(float));
+    int** gpu_idx_balanced = (int**)malloc_vector_list(config.n_query, config.topk, sizeof(int));
+    float** gpu_dist_balanced = (float**)malloc_vector_list(config.n_query, config.topk, sizeof(float));
+
+    double gpu_ms_unbalanced = run_pipeline(false, "unbalanced", gpu_idx_unbalanced, gpu_dist_unbalanced);
+    double gpu_ms_balanced = run_pipeline(true, "balanced", gpu_idx_balanced, gpu_dist_balanced);
+
+    // 比较时使用 topk 作为输出大小
+    // 添加调试输出
+    if (config.n_query <= 4 && config.topk <= 2) {
+        COUT_ENDL("=== DEBUG: Comparing CPU vs GPU results ===");
         for (int qi = 0; qi < config.n_query; ++qi) {
-            for (int t = 0; t < config.topn; ++t) {
-                size_t offset = static_cast<size_t>(qi) * config.topn + t;
-                out_idx[offset] = topk_index[qi][t];
-                out_dist[offset] = topk_dist[qi][t];
+            COUT_VAL("Query ", qi, ":");
+            COUT_VAL("  CPU:   ");
+            for (int j = 0; j < config.topk; ++j) {
+                COUT_VAL("(idx=", cpu_idx[qi][j], " dist=", cpu_dist[qi][j], ") ");
             }
-        }
-
-        free_vector_list(reinterpret_cast<void**>(topk_dist));
-        free_vector_list(reinterpret_cast<void**>(topk_index));
-        delete[] n_isnull;
-    };
-
-    std::vector<int> gpu_idx_unbalanced(static_cast<size_t>(config.n_query) * config.topn);
-    std::vector<float> gpu_dist_unbalanced(static_cast<size_t>(config.n_query) * config.topn);
-    std::vector<int> gpu_idx_balanced = gpu_idx_unbalanced;
-    std::vector<float> gpu_dist_balanced = gpu_dist_unbalanced;
-
-    run_pipeline(false, "unbalanced", gpu_idx_unbalanced, gpu_dist_unbalanced);
-    run_pipeline(true, "balanced", gpu_idx_balanced, gpu_dist_balanced);
-
-    std::vector<int> cpu_idx(static_cast<size_t>(config.n_query) * config.topn);
-    std::vector<float> cpu_dist(static_cast<size_t>(config.n_query) * config.topn);
-    cpu_coarse_fine_search(config, queries, dataset, centers,
-                           std::min(config.n_clusters, config.topk),
-                           config.topn,
-                           cpu_idx,
-                           cpu_dist);
-
-    auto compare_results = [&](const char* tag,
-                               const std::vector<int>& gpu_idx,
-                               const std::vector<float>& gpu_dist) {
-        int mismatch = 0;
-        for (size_t i = 0; i < cpu_idx.size(); ++i) {
-            if (gpu_idx[i] != cpu_idx[i] ||
-                std::fabs(gpu_dist[i] - cpu_dist[i]) > 1e-3f) {
-                ++mismatch;
+            COUT_ENDL();
+            COUT_VAL("  GPU(unbalanced): ");
+            for (int j = 0; j < config.topk; ++j) {
+                COUT_VAL("(idx=", gpu_idx_unbalanced[qi][j], " dist=", gpu_dist_unbalanced[qi][j], ") ");
             }
+            COUT_ENDL();
+            COUT_VAL("  GPU(balanced):   ");
+            for (int j = 0; j < config.topk; ++j) {
+                COUT_VAL("(idx=", gpu_idx_balanced[qi][j], " dist=", gpu_dist_balanced[qi][j], ") ");
+            }
+            COUT_ENDL();
         }
-        COUT_VAL("[compare] ", tag, " mismatches=", mismatch);
-    };
+    }
+    
+    bool pass_unbalanced = compare_set_2D<int>(cpu_idx, gpu_idx_unbalanced, config.n_query, config.topk, 0.0f) &&
+                          compare_set_2D<float>(cpu_dist, gpu_dist_unbalanced, config.n_query, config.topk, 1e-3f);
+    bool pass_balanced = compare_set_2D<int>(cpu_idx, gpu_idx_balanced, config.n_query, config.topk, 0.0f) &&
+                        compare_set_2D<float>(cpu_dist, gpu_dist_balanced, config.n_query, config.topk, 1e-3f);
+    
+    double pass_rate_unbalanced = pass_unbalanced ? 1.0 : 0.0;
+    double pass_rate_balanced = pass_balanced ? 1.0 : 0.0;
+    
+    // 清理内存
+    free_vector_list((void**)cpu_idx);
+    free_vector_list((void**)cpu_dist);
+    free_vector_list((void**)gpu_idx_unbalanced);
+    free_vector_list((void**)gpu_dist_unbalanced);
+    free_vector_list((void**)gpu_idx_balanced);
+    free_vector_list((void**)gpu_dist_balanced);
 
-    compare_results("unbalanced", gpu_idx_unbalanced, gpu_dist_unbalanced);
-    compare_results("balanced", gpu_idx_balanced, gpu_dist_balanced);
+    double speedup_unbalanced = (gpu_ms_unbalanced > 1e-6) ? (cpu_ms / gpu_ms_unbalanced) : 0.0;
+    double speedup_balanced = (gpu_ms_balanced > 1e-6) ? (cpu_ms / gpu_ms_balanced) : 0.0;
 
     release_query_batch(queries);
     release_cluster_dataset(dataset);
+
+    return {
+        pass_rate_unbalanced,
+        pass_rate_balanced,
+        gpu_ms_unbalanced,
+        gpu_ms_balanced,
+        cpu_ms,
+        speedup_unbalanced,
+        speedup_balanced,
+        static_cast<double>(total_vectors)
+    };
 }
 
 int main() {
-    // 使用更小的测试数据以加快测试速度
-    std::vector<BenchmarkCase> cases = {
-        // {512, 64, 128, 32, 32},
-        // {2000, 256, 256, 64, 64},
-        // {4000, 512, 512, 128, 128}
-        {100, 16, 64, 8, 8},      // 小规模测试
-        {200, 32, 128, 16, 16},   // 中等规模测试
-        {512, 64, 128, 32, 32}    // 保留一个稍大的测试
-    };
+    MetricsCollector metrics;
+    metrics.set_columns("pass_rate_unbal", "pass_rate_bal", "n_query", "n_clusters", "vector_dim", 
+                        "topk", "nprobes", "total_vectors", "gpu_ms_unbal", "gpu_ms_bal", 
+                        "cpu_ms", "speedup_unbal", "speedup_bal");
+    metrics.set_num_repeats(1);
+    
+    BenchmarkCase config = {100, 10, 128, 5, 10};
+    run_case(config, 10000); // warmup
 
-    for (const auto& c : cases) {
-        run_case(c);
+    // PARAM_3D(total_vectors, (10000, 50000, 100000, 200000, 500000, 1000000),
+    //          n_query, (100, 200, 512, 1000, 2000),
+    //          vector_dim, (128, 256))
+    // PARAM_3D(total_vectors, (10000, 50000, 100000, 200000, 500000, 1000000),
+    //         n_query, (100, 200, 512, 1000),
+    //         vector_dim, (128, 256))
+    //  PARAM_3D(total_vectors, (10000, 1000000),
+    //          nprobes, (1, 2, 5, 10, 20),
+    //          vector_dim, (128))
+    // {
+    //     int n_clusters = std::max(10, static_cast<int>(std::sqrt(total_vectors)));         
+    //     int n_query = 10000;
+    //     int topk = 100;
+    PARAM_3D(total_vectors, (10000),
+    nprobes, (5),
+    vector_dim, (128))
+    {
+        int n_clusters = std::max(10, static_cast<int>(std::sqrt(total_vectors)));         
+        int n_query = 4;
+        int topk = 2;
+         
+        BenchmarkCase config = {n_query, n_clusters, vector_dim, nprobes, topk};
+        
+        if (!QUIET) {
+            COUT_ENDL("========================================");
+            COUT_VAL("Testing: total_vectors=", total_vectors,
+                     " n_query=", n_query, 
+                     " n_clusters=", n_clusters,
+                     " vector_dim=", vector_dim,
+                     " topk=", topk,
+                     " nprobes=", nprobes);
+            COUT_ENDL("========================================");
+        }
+        
+        try {
+            auto result = metrics.add_row_averaged([&]() -> std::vector<double> {
+                auto metrics_result = run_case(config, total_vectors);
+                // 返回：n_query, n_clusters, vector_dim, topk, nprobes, total_vectors, pass_unbal, pass_bal, 
+                //       gpu_ms_unbal, gpu_ms_bal, cpu_ms, speedup_unbal, speedup_bal
+                return {
+                    metrics_result[0],  // pass_rate_unbalanced
+                    metrics_result[1],  // pass_rate_balanced
+                    static_cast<double>(n_query),
+                    static_cast<double>(n_clusters),
+                    static_cast<double>(vector_dim),
+                    static_cast<double>(topk),
+                    static_cast<double>(nprobes),
+                    static_cast<double>(total_vectors),
+
+                    metrics_result[2],  // gpu_ms_unbalanced
+                    metrics_result[3],  // gpu_ms_balanced
+                    metrics_result[4],  // cpu_ms
+                    metrics_result[5],  // speedup_unbalanced
+                    metrics_result[6]   // speedup_balanced
+                };
+            });
+            
+            if (!QUIET) {
+                COUT_VAL("Result: total_vectors=", static_cast<int>(result[7]),
+                         " pass_rate_unbal=", std::fixed, std::setprecision(4), result[0], 
+                         " pass_rate_bal=", std::fixed, std::setprecision(4), result[1],
+                         " speedup_unbal=", std::fixed, std::setprecision(2), result[11],
+                         " speedup_bal=", std::fixed, std::setprecision(2), result[12]);
+            }
+        } catch (const std::exception& e) {
+            COUT_VAL("[ERROR] Test failed: ", e.what());
+            return 1;
+        }
     }
+    
     cudaDeviceSynchronize();
     CHECK_CUDA_ERRORS;
+    
+    // 打印统计表格
+    metrics.print_table();
+    
+    // 导出 CSV
+    metrics.export_csv("integrated_coarse_fine_metrics.csv");
+    
+    COUT_ENDL("All tests completed successfully!");
     return 0;
 }

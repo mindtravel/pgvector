@@ -385,6 +385,7 @@ int main(int argc, char** argv) {
     srand(static_cast<unsigned>(time(nullptr)));
 
     AlgorithmVersion selected_version = WARP_SORT_FINE_V3;
+    // AlgorithmVersion selected_version = WARP_SORT_FINE_V2;
     if (argc > 1) {
         selected_version = parse_algorithm_version(argv[1]);
     }
