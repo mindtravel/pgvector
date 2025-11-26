@@ -336,5 +336,32 @@ void launch_indexed_inner_product_with_topk_kernel_v4(
     int* __restrict__ d_topk_index,
     cudaStream_t stream = 0);
 
+/**
+ * Launch函数：v3固定probe版本（一个block处理一个probe的多个query）
+ * 
+ * @tparam Capacity warp-sort queue的容量
+ * @tparam Ascending 是否升序
+ * @tparam QueriesPerBlock 每个block处理的query数量（建议为8）
+ */
+template<int Capacity, bool Ascending, int QueriesPerBlock>
+void launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe(
+    dim3 block,
+    int n_dim,
+    float* __restrict__ d_query_group,
+    float* __restrict__ d_cluster_vector,
+    int* __restrict__ d_probe_vector_offset,
+    int* __restrict__ d_probe_vector_count,
+    int* __restrict__ d_probe_queries,
+    int* __restrict__ d_probe_query_offsets,
+    int* __restrict__ d_probe_query_probe_indices,
+    float* __restrict__ d_query_norm,
+    float* __restrict__ d_cluster_vector_norm,
+    int n_probes,
+    int max_queries_per_probe,
+    int k,
+    float* __restrict__ d_topk_dist,
+    int* __restrict__ d_topk_index,
+    cudaStream_t stream);
+
 #endif
 

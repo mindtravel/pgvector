@@ -184,8 +184,12 @@ __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel
     static_assert(QueriesPerBlock > 0 && QueriesPerBlock <= 32, 
                   "QueriesPerBlock must be between 1 and 32");
     
+    /* 共享内存缓存querynorm：一个block内的所有query共享 */
+    __shared__ float s_query_norm[QueriesPerBlock];
+    
     const int warp_id = threadIdx.x / kWarpSize;
     const int query_id = blockIdx.y * QueriesPerBlock + warp_id;
+    const int lane = laneId();
     
     /* 边界处理：如果当前warp没有对应的query，直接返回
      * 例如：10个query，QueriesPerBlock=8时
@@ -193,12 +197,16 @@ __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel
      * - Block 1: warp 0-1 处理 query 8-9，warp 2-7 直接返回
      */
     if (query_id >= n_selected_querys) return;
-    
-    const int query_global_id = d_query_index[query_id];
-    const int lane = laneId();
 
-    const float query_norm = d_query_norm[query_global_id];
-    if (query_norm < 1e-6f) return;
+    const int query_global_id = d_query_index[query_id];
+    
+    /* 每个warp的lane 0负责加载对应的query_norm到共享内存 */
+    if (warp_id < QueriesPerBlock && lane == 0) {
+        s_query_norm[warp_id] = d_query_norm[query_global_id];
+        if (s_query_norm[warp_id] < 1e-6f) return;
+    }
+
+    __syncthreads();
     const float* query_global_ptr = d_query_group + query_global_id * Dim;
 
     using WarpSortBase =
@@ -211,7 +219,7 @@ __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel
 
     for (int iter = 0; iter < max_iterations; ++iter) {
         int vec_idx = iter * kWarpSize + lane;
-        bool has_valid_vec = (iter < max_iterations) && (vec_idx < n_selected_vectors);
+        bool has_valid_vec = (vec_idx < n_selected_vectors);
 
         if (!has_valid_vec) {
             queue.add(dummy_val, -1);
@@ -223,7 +231,7 @@ __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel
             if (data_norm < 1e-6f) {
                 queue.add(dummy_val, -1);
             } else {
-                float cos_similarity = dot_product / (query_norm * data_norm);
+                float cos_similarity = dot_product / (s_query_norm[warp_id] * data_norm);
                 float cos_distance = 1.0f - cos_similarity;
                 queue.add(cos_distance, vec_idx);
             }
@@ -254,8 +262,7 @@ template<int Capacity, bool Ascending, int QueriesPerBlock>
 __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel_v3_generic(
     float* __restrict__ d_query_group,
     float* __restrict__ d_cluster_vector,
-    int* __restrict__ d_query_i
-    ndex,
+    int* __restrict__ d_query_index,
 
     float* __restrict__ d_query_norm,
     float* __restrict__ d_cluster_vector_norm,
@@ -270,8 +277,13 @@ __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel
     static_assert(QueriesPerBlock > 0 && QueriesPerBlock <= 32, 
                   "QueriesPerBlock must be between 1 and 32");
     
+    /* 共享内存缓存querynorm：一个block内的所有query共享 */
+    __shared__ float s_query_norm[QueriesPerBlock];
+    
     const int warp_id = threadIdx.x / kWarpSize;
     const int query_id = blockIdx.y * QueriesPerBlock + warp_id;
+    const int lane = laneId();
+    
     
     /* 边界处理：如果当前warp没有对应的query，直接返回
      * 例如：10个query，QueriesPerBlock=8时
@@ -279,12 +291,17 @@ __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel
      * - Block 1: warp 0-1 处理 query 8-9，warp 2-7 直接返回
      */
     if (query_id >= n_selected_querys) return;
-    
     const int query_global_id = d_query_index[query_id];
-    const int lane = laneId();
+    
+    /* 每个warp的lane 0负责加载对应的query_norm到共享内存 */
+    if (warp_id < QueriesPerBlock && lane == 0) {
+        s_query_norm[warp_id] = d_query_norm[query_global_id];
+        if (s_query_norm[warp_id] < 1e-6f) return;
+    }
+    
+    /* 同步所有warp，确保共享内存已加载完成 */
+    __syncthreads();
 
-    const float query_norm = d_query_norm[query_global_id];
-    if (query_norm < 1e-6f) return;
     const float* query_global_ptr = d_query_group + query_global_id * n_dim;
     const bool query_ptr_aligned =
         (reinterpret_cast<uintptr_t>(query_global_ptr) & (sizeof(float4) - 1)) == 0;
@@ -317,7 +334,7 @@ __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel
                 if (data_norm < 1e-6f) {
                     queue.add(dummy_val, -1);
                 } else {
-                    float cos_similarity = dot_product / (query_norm * data_norm);
+                    float cos_similarity = dot_product / (s_query_norm[warp_id] * data_norm);
                     float cos_distance = 1.0f - cos_similarity;
                     queue.add(cos_distance, vec_idx);
                 }
@@ -338,7 +355,7 @@ __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel
                 if (data_norm < 1e-6f) {
                     queue.add(dummy_val, -1);
                 } else {
-                    float cos_similarity = dot_product / (query_norm * data_norm);
+                    float cos_similarity = dot_product / (s_query_norm[warp_id] * data_norm);
                     float cos_distance = 1.0f - cos_similarity;
                     queue.add(cos_distance, vec_idx);
                 }
@@ -359,76 +376,76 @@ __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel
 
 // 显式实例化：v3版本（一个block处理8个query）
 // Capacity 64, QueriesPerBlock=8
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 96, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 96, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int,
     float* __restrict__, int* __restrict__);
  
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 128, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 128, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int,
     float* __restrict__, int* __restrict__);
  
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 200, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 200, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int,
     float* __restrict__, int* __restrict__);
  
 // Capacity 128, QueriesPerBlock=8
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 96, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 96, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int,
     float* __restrict__, int* __restrict__);
  
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 128, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 128, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int,
     float* __restrict__, int* __restrict__);
  
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 200, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 200, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int,
     float* __restrict__, int* __restrict__);
  
 // Capacity 256, QueriesPerBlock=8
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 96, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 96, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int,
     float* __restrict__, int* __restrict__);
  
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 128, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 128, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int,
     float* __restrict__, int* __restrict__);
  
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 200, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 200, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int,
     float* __restrict__, int* __restrict__);
 
 // Generic版本，QueriesPerBlock=8
-template __global__ void indexed_inner_product_with_topk_kernel_v3_generic<64, true, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_generic<64, true, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int, int,
     float* __restrict__, int* __restrict__);
 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_generic<128, true, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_generic<128, true, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int, int,
     float* __restrict__, int* __restrict__);
 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_generic<256, true, 8>(
+template __global__ void indexed_inner_product_with_topk_kernel_v3_generic<256, true, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
     int, int, int, int,

@@ -62,7 +62,7 @@ __global__ void l2_norm_kernel_optimized_v3(
  * - n_dim > 128: 使用优化的shared memory规约
  * - 如果dim是4的倍数且较大: 优先考虑float4向量化版本
  */
-void compute_l2_norm(
+void compute_l2_norm_gpu(
     const float* vectors,
     float* vector_l2_norm,
     int n_batch,

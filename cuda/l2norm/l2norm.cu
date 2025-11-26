@@ -391,7 +391,7 @@ __global__ void l2_norm_kernel_basic(
  * 
  * 提供自动选择和手动切换两种模式
  */
-void compute_l2_norm(
+void compute_l2_norm_gpu(
     const float* vectors,
     float* vector_l2_norm,
     int n_batch,

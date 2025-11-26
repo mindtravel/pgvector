@@ -14,7 +14,7 @@
 
 enum AlgorithmVersion {
     WARP_SORT_FINE_V2,  // 融合余弦距离精筛（float4，一个block一个query）
-    WARP_SORT_FINE_V3,  // 融合余弦距离精筛（一个block处理8个query）
+    WARP_SORT_FINE_V3,  // 融合余弦距离精筛（一个block处理4个query）
     WARP_SORT_FINE_V3_32,  // 融合余弦距离精筛（一个block处理16个query）
     WARP_SORT_FINE_V4,  // 融合余弦距离精筛（混合策略：动态选择最优算法）
     ALL_VERSIONS        // 运行所有算法版本
@@ -154,23 +154,11 @@ std::vector<double> test_fusion_cos_topk_fine_with_algorithm(
     float* h_query_norm = (float*)malloc(n_query * sizeof(float));
     float* h_cluster_vector_norm = (float*)malloc(n_selected_vectors * sizeof(float));
 
-    for (int q = 0; q < n_query; q++) {
-        float sum = 0.0f;
-        const float* row = h_query_vectors[q];
-        for (int d = 0; d < n_dim; d++) {
-            sum += row[d] * row[d];
-        }
-        h_query_norm[q] = std::sqrt(sum);
-    }
+    // 计算query向量的L2范数
+    compute_l2_norms_batch(h_query_vectors, h_query_norm, n_query, n_dim);
 
-    for (int v = 0; v < n_selected_vectors; v++) {
-        float sum = 0.0f;
-        const float* row = h_cluster_vectors[v];
-        for (int d = 0; d < n_dim; d++) {
-            sum += row[d] * row[d];
-        }
-        h_cluster_vector_norm[v] = std::sqrt(sum);
-    }
+    // 计算cluster向量的L2范数
+    compute_l2_norms_batch(h_cluster_vectors, h_cluster_vector_norm, n_selected_vectors, n_dim);
 
     float *d_query_vectors = nullptr;
     float *d_cluster_vectors = nullptr;
@@ -335,26 +323,27 @@ bool run_algorithm_tests(AlgorithmVersion selected_version) {
             version
         );
 
-        metrics.set_num_repeats(50);
-        PARAM_3D(n_selected_querys, (1, 5, 10, 100, 128, 200, 256, 300, 384, 512, 600, 1000, 1200),
-                 n_selected_vectors, (1024),
-                 n_dim, (128))
+        // metrics.set_num_repeats(50);
+        // PARAM_3D(n_selected_querys, (1, 5, 10, 100, 128, 200, 256, 300, 384, 512, 600, 1000, 1200),
+        //          n_selected_vectors, (1024),
+        //          n_dim, (128))
         
         // metrics.set_num_repeats(1);        
         // PARAM_3D(n_selected_vectors, (128, 1000, 10000),
         //          n_selected_querys, (100, 1000),
         //          n_dim, (128, 512, 1024))
 
-        // metrics.set_num_repeats(1);
-        // PARAM_3D(n_selected_vectors, (128, 1000, 10000),
-        //          n_selected_querys, (10, 100, 1000),
-        //          n_dim, (1, 4, 64, 25, 73, 100, 111, 128, 200, 512, 1024))
+        metrics.set_num_repeats(1);
+        PARAM_3D(n_selected_vectors, (1, 2, 10, 20, 50, 90, 95, 99, 100, 101, 128, 1000, 10000),
+            n_selected_querys, (1, 5, 10, 100, 128, 200, 256, 300, 384, 512, 600, 1000, 1200),
+            n_dim, (128))
         {
             // int n_selected_vectors = 10000;
             // int k = 100;
             int n_query = 10000;
             // int n_selected_vectors = 10000;
-            int k = 100;
+            // int k = 100;
+            int k = 2;
 
             auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
                 auto result = test_fusion_cos_topk_fine_with_algorithm(

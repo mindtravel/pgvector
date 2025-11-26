@@ -43,8 +43,8 @@ void cuda_cos_topk_warpsort_fine_v4(
     capacity = std::min(capacity, kMaxCapacity);
     
     // 配置kernel launch
-    constexpr int kQueriesPerBlock = 8;
-    dim3 block(256);  // 8个warp，每个warp 32个线程
+    constexpr int kQueriesPerBlock = 4;
+    dim3 block(128);  // 4个warp，每个warp 32个线程
     
     {
         CUDATimer timer_kernel("Indexed Inner Product with TopK Kernel (v4)", ENABLE_CUDA_TIMING);

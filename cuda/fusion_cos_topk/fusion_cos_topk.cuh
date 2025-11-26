@@ -44,7 +44,6 @@ __global__ void fusion_cos_topk_sharedmem_kernel(
 void cuda_cos_topk_warpsort(
     float** h_query_vector_group,       /*query向量*/ 
     float** h_data_vector_group,        /*data向量也就是聚类中心*/
-    int** data_index,                   /*data向量也就是聚类中心索引（这个算子在设计的时候，需要传入一个索引数组，但是聚类的索引如果是顺序的话，到时候我就把这个参数去掉）*/
     int** topk_index,                   /*结果：需要精筛的聚类中心的索引 [n_querys * n_probes]*/
     float** topk_cos_dist,              /*结果：需要精筛的聚类中心的距离 [n_querys * n_probes]（不一定用得上）*/
     int n_query,                        /*query数量*/
@@ -300,6 +299,55 @@ void cuda_cos_topk_warpsort_fine_v3_32(
     
     int n_selected_querys,
     int n_selected_vectors,
+    int n_dim,
+    int k
+);
+
+/**
+ * 固定 probe 版本的流式融合余弦距离top-k计算（v3_fixed_probe版本）
+ * 
+ * 核心设计：
+ * - 每个 block 处理一个 probe 的多个 query
+ * - gridDim.x = n_probes（每个 block 一个 probe）
+ * - gridDim.y = query batch 数量（每个 block 处理一个 probe 的一个 query batch）
+ * - 利用 L2 cache：多个 query 访问相同的 probe 向量数据
+ * - 输出格式：[n_query][max_probes_per_query][k]，每个probe结果写入独立位置
+ * 
+ * @param d_query_group query向量 [n_query * n_dim]
+ * @param d_cluster_vector 所有向量数据（连续存储）[n_total_vectors * n_dim]
+ * @param d_probe_vector_offset 每个probe在d_cluster_vector中的起始位置 [n_probes]
+ * @param d_probe_vector_count 每个probe的向量数量 [n_probes]
+ * @param d_probe_queries probe对应的query列表（CSR格式）[total_queries]
+ * @param d_probe_query_offsets probe的query列表起始位置（CSR格式）[n_probes + 1]
+ * @param d_probe_query_probe_indices 每个probe-query对中probe在query中的索引 [total_queries_in_probes]
+ * @param d_query_norm query的l2norm [n_query]
+ * @param d_cluster_vector_norm 所有向量的l2norm [n_total_vectors]
+ * @param d_topk_index [out] 每个query的每个probe的topk索引 [n_query][max_probes_per_query][k]
+ * @param d_topk_dist [out] 每个query的每个probe的topk距离 [n_query][max_probes_per_query][k]
+ * @param n_probes probe数量
+ * @param n_query query数量
+ * @param max_probes_per_query 每个query的最大probe数量
+ * @param n_dim 向量维度
+ * @param k topk数量
+ */
+void cuda_cos_topk_warpsort_fine_v3_fixed_probe(
+    float* d_query_group,
+    float* d_cluster_vector,
+    int* d_probe_vector_offset,
+    int* d_probe_vector_count,
+    int* d_probe_queries,
+    int* d_probe_query_offsets,
+    int* d_probe_query_probe_indices,
+    float* d_query_norm,
+    float* d_cluster_vector_norm,
+    int* d_topk_index,
+    float* d_topk_dist,
+
+    float** candidate_dist,
+    int** candidate_index,
+
+    int n_probes,
+    int n_query,
     int n_dim,
     int k
 );

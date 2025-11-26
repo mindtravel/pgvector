@@ -309,7 +309,7 @@ void launch_indexed_inner_product_with_topk_kernel_v4(
 }
 
 // 显式实例化v4版本的launch函数
-template void launch_indexed_inner_product_with_topk_kernel_v4<64, true, 8>(
+template void launch_indexed_inner_product_with_topk_kernel_v4<64, true, 4>(
     dim3 block,
     int n_dim,
     float* __restrict__ d_query_group,
@@ -324,7 +324,7 @@ template void launch_indexed_inner_product_with_topk_kernel_v4<64, true, 8>(
     int* __restrict__ d_topk_index,
     cudaStream_t stream);
 
-template void launch_indexed_inner_product_with_topk_kernel_v4<128, true, 8>(
+template void launch_indexed_inner_product_with_topk_kernel_v4<128, true, 4>(
     dim3 block,
     int n_dim,
     float* __restrict__ d_query_group,
@@ -339,7 +339,7 @@ template void launch_indexed_inner_product_with_topk_kernel_v4<128, true, 8>(
     int* __restrict__ d_topk_index,
     cudaStream_t stream);
 
-template void launch_indexed_inner_product_with_topk_kernel_v4<256, true, 8>(
+template void launch_indexed_inner_product_with_topk_kernel_v4<256, true, 4>(
     dim3 block,
     int n_dim,
     float* __restrict__ d_query_group,

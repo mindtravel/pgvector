@@ -5,13 +5,14 @@
 #include <cstdlib>
 #include <algorithm>
 #include <vector>
+#include <cmath>
 #include <cuda_runtime.h>
 #include "output_macros.cuh"
 #include "params_macros.cuh"
 #include "metrics_collector.cuh"
 
 #define DEBUG false /* debug模式：用于寻找正确输出和测试函数输出的差异 */
-#define QUIET true /* 静默模式：不打印日志（用于重复运行）*/
+#define QUIET false /* 静默模式：不打印日志（用于重复运行）*/
 /**
  * @brief 用宏简化计时语法，并将结果（毫秒）存入指定的变量。
  * @param TESTNAME 字符串字面量，用于日志输出的测试名称。
@@ -257,6 +258,57 @@ float*** generate_large_scale_vectors(int n_lists, int n_batch, int n_dim);
 
 void** malloc_vector_list(size_t n_batch, size_t n_dim, size_t elem_size);
 void free_vector_list(void** vector_list);
+
+/**
+ * 计算向量的平方和（sum of squares）
+ * @param vector 向量数据
+ * @param n_dim 向量维度
+ * @return 平方和
+ */
+inline float compute_squared_sum(const float* vector, int n_dim) {
+    float sum = 0.0f;
+    for (int d = 0; d < n_dim; d++) {
+        sum += vector[d] * vector[d];
+    }
+    return sum;
+}
+
+/**
+ * 计算向量的 L2 范数（L2 norm）
+ * @param vector 向量数据
+ * @param n_dim 向量维度
+ * @return L2 范数（sqrt(sum of squares)）
+ */
+inline float compute_l2_norm(const float* vector, int n_dim) {
+    float sum = compute_squared_sum(vector, n_dim);
+    return sqrtf(sum);
+}
+
+/**
+ * 批量计算向量的平方和
+ * @param vectors 向量数组 [n_batch][n_dim]
+ * @param squared_sums 输出的平方和数组 [n_batch]
+ * @param n_batch 向量数量
+ * @param n_dim 向量维度
+ */
+inline void compute_squared_sums_batch(float** vectors, float* squared_sums, int n_batch, int n_dim) {
+    for (int i = 0; i < n_batch; i++) {
+        squared_sums[i] = compute_squared_sum(vectors[i], n_dim);
+    }
+}
+
+/**
+ * 批量计算向量的 L2 范数
+ * @param vectors 向量数组 [n_batch][n_dim]
+ * @param norms 输出的 L2 范数数组 [n_batch]
+ * @param n_batch 向量数量
+ * @param n_dim 向量维度
+ */
+inline void compute_l2_norms_batch(float** vectors, float* norms, int n_batch, int n_dim) {
+    for (int i = 0; i < n_batch; i++) {
+        norms[i] = compute_l2_norm(vectors[i], n_dim);
+    }
+}
 
 // 函数声明
 void* generate_cluster_query_data(int* query_cluster_group, int n_query, int k, int batch_size);

@@ -23,6 +23,8 @@
 #include <math_constants.h>
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
+#include <thrust/sequence.h>
+#include <thrust/device_ptr.h>
 
 #include "fusion_cos_topk.cuh"
 #include "../unit_tests/common/test_utils.cuh"
@@ -31,6 +33,32 @@
 #include "warpsortfilter/warpsort.cuh"
 
 #define ENABLE_CUDA_TIMING 0
+
+/**
+ * Kernel: 并行生成顺序索引
+ * 为每个query生成 [0, 1, 2, ..., n_batch-1] 的索引序列
+ * 
+ * 线程模型：
+ * - gridDim.x = n_query (每个block处理一个query)
+ * - blockDim.x = min(256, n_batch) (每个block的线程数)
+ * - 每个线程处理多个索引位置（如果 n_batch > blockDim.x）
+ */
+__global__ void generate_sequence_indices_kernel(
+    int* d_index,
+    int n_query,
+    int n_batch)
+{
+    const int query_id = blockIdx.x;
+    if (query_id >= n_query) return;
+    
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;
+    
+    // 每个线程处理多个索引位置（stride loop）
+    for (int idx = tid; idx < n_batch; idx += block_size) {
+        d_index[query_id * n_batch + idx] = idx;
+    }
+}
 
 namespace pgvector {
 namespace fusion_cos_topk_warpsort {
@@ -247,8 +275,11 @@ template cudaError_t fusion_cos_topk_warpsort<float, uint32_t>(
 void cuda_cos_topk_warpsort(
     float** h_query_vectors, 
     float** h_data_vectors, 
-    int** h_index, int** h_topk_index, float** h_topk_cos_dist,
-    int n_query, int n_batch, int n_dim,
+    int** h_topk_index, 
+    float** h_topk_cos_dist,
+    int n_query, 
+    int n_batch, 
+    int n_dim,
     int k /*查找的最近邻个数*/
 ){ 
     /**
@@ -334,16 +365,14 @@ void cuda_cos_topk_warpsort(
         );
         // cudaMemcpy(d_data_vectors, h_data_vectors, size_data, cudaMemcpyHostToDevice);        
 
-        /* 复制索引数组 */
-        cudaMemcpy2D(
-            d_index,
-            n_batch * sizeof(int),
-            h_index[0],
-            n_batch * sizeof(int),
-            n_batch * sizeof(int),
-            n_query,
-            cudaMemcpyHostToDevice
-        );
+        /* 使用 CUDA kernel 并行生成顺序索引 [0, 1, 2, ..., n_batch-1] */
+        // 线程模型：每个block处理一个query，每个block使用256个线程（或更少）
+        const int threads_per_block = 256;
+        dim3 block_dim((n_batch < threads_per_block) ? n_batch : threads_per_block);
+        dim3 grid_dim(n_query);
+        
+        generate_sequence_indices_kernel<<<grid_dim, block_dim>>>(
+            d_index, n_query, n_batch);
         // CHECK_CUDA_ERRORS;
 
         /* 初始化距离数组（为一个小于-1的负数） */

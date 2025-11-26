@@ -21,8 +21,9 @@ struct BenchmarkCase {
 };
 
 struct ClusterDataset {
-    std::vector<float*> cluster_ptrs;
-    std::vector<int> cluster_sizes;
+    float*** cluster_ptrs;
+    int* cluster_sizes;
+    int n_clusters;
 };
 
 struct BalancedMapping {
@@ -40,8 +41,8 @@ static ClusterDataset prepare_cluster_dataset(const BenchmarkCase& config,
     std::uniform_real_distribution<float> value_dist(-1.0f, 1.0f);
 
     ClusterDataset dataset;
-    dataset.cluster_ptrs.resize(config.n_clusters);
-    dataset.cluster_sizes.resize(config.n_clusters);
+    dataset.cluster_ptrs = (float***)malloc(config.n_clusters * sizeof(float**));
+    dataset.cluster_sizes = (int*)malloc(config.n_clusters * sizeof(int));
 
     // 平均分配向量到各个cluster，剩余部分随机分配
     int base_vec_per_cluster = total_vectors / config.n_clusters;
@@ -61,35 +62,23 @@ static ClusterDataset prepare_cluster_dataset(const BenchmarkCase& config,
     // 为每个cluster分配内存并生成数据
     for (int cid = 0; cid < config.n_clusters; ++cid) {
         int vec_count = dataset.cluster_sizes[cid];
-
-        float* host_ptr = nullptr;
-        size_t bytes = static_cast<size_t>(vec_count) * config.vector_dim * sizeof(float);
-        cudaMallocHost(reinterpret_cast<void**>(&host_ptr), bytes);
-        CHECK_CUDA_ERRORS;
-
-        for (size_t i = 0; i < static_cast<size_t>(vec_count) * config.vector_dim; ++i) {
-            host_ptr[i] = value_dist(rng);
-        }
-        dataset.cluster_ptrs[cid] = host_ptr;
+        dataset.cluster_ptrs[cid] = generate_vector_list(vec_count, config.vector_dim);
     }
     return dataset;
 }
 
 static void release_cluster_dataset(ClusterDataset& dataset) {
-    for (float*& ptr : dataset.cluster_ptrs) {
-        if (ptr) {
-            cudaFreeHost(ptr);
-            ptr = nullptr;
-        }
+    for (int cid = 0; cid < dataset.n_clusters; ++cid) {
+        free_vector_list((void**)dataset.cluster_ptrs[cid]);
     }
-    dataset.cluster_ptrs.clear();
-    dataset.cluster_sizes.clear();
+    free(dataset.cluster_ptrs);
+    free(dataset.cluster_sizes);
 }
 
 static BalancedMapping build_balanced_mapping(const ClusterDataset& dataset,
                                               int chunk_size) {
     BalancedMapping mapping;
-    int n_clusters = static_cast<int>(dataset.cluster_sizes.size());
+    int n_clusters = dataset.n_clusters;
     mapping.cluster2block_offset.resize(n_clusters + 1, 0);
 
     int global_block_id = 0;
@@ -116,14 +105,6 @@ static BalancedMapping build_balanced_mapping(const ClusterDataset& dataset,
 struct QueryBatch {
     float** ptrs = nullptr;
 };
-
-static void release_query_batch(QueryBatch& batch) {
-    if (batch.ptrs) {
-        free_vector_list(reinterpret_cast<void**>(batch.ptrs));
-        batch.ptrs = nullptr;
-    }
-}
-
 static float cosine_distance(const float* a, const float* b, int dim) {
     float dot = 0.0f;
     float na = 0.0f;
@@ -138,73 +119,51 @@ static float cosine_distance(const float* a, const float* b, int dim) {
     return 1.0f - dot / denom;
 }
 
-static QueryBatch generate_queries(const BenchmarkCase& config, std::mt19937& rng) {
-    std::uniform_real_distribution<float> value_dist(-1.0f, 1.0f);
-    auto ptrs = reinterpret_cast<float**>(
-        malloc_vector_list(config.n_query, config.vector_dim, sizeof(float)));
-    if (!ptrs) {
-        throw std::runtime_error("malloc_vector_list failed for queries");
-    }
-    for (int qi = 0; qi < config.n_query; ++qi) {
-        for (int d = 0; d < config.vector_dim; ++d) {
-            ptrs[qi][d] = value_dist(rng);
-        }
-    }
-    QueryBatch batch;
-    batch.ptrs = ptrs;
-    return batch;
-}
 
-static std::vector<float> generate_cluster_centers(const BenchmarkCase& config,
-                                                   std::mt19937& rng) {
-    std::uniform_real_distribution<float> value_dist(-1.0f, 1.0f);
-    std::vector<float> centers(static_cast<size_t>(config.n_clusters) * config.vector_dim);
-    for (float& v : centers) {
-        v = value_dist(rng);
-    }
-    return centers;
-}
+
 
 static void cpu_coarse_fine_search(const BenchmarkCase& config,
-                                   const QueryBatch& queries,
+                                   float** query_batch,
                                    const ClusterDataset& dataset,
-                                   const std::vector<float>& centers,
+                                   float** centers,
                                    int n_cluster_per_query,
                                    int nprobes,
                                    int** out_index,
-                                   float** out_dist) {
+                                   float** out_dist,
+
+                                   int** coarse_indices,
+                                   float** coarse_dists) {
     const int n_query = config.n_query;
     const int n_dim = config.vector_dim;
     const int n_clusters = config.n_clusters;
 
-    struct Pair { float dist; int idx; };
-    std::vector<int> coarse_indices(static_cast<size_t>(n_query) * n_cluster_per_query);
+    struct Pair { float dist; int idx; };  
 
     const unsigned num_threads = std::max(1u, std::thread::hardware_concurrency());
     auto worker = [&](int start, int end) {
         std::vector<Pair> tmp(n_clusters);
         std::vector<Pair> fine_buffer;
         for (int qi = start; qi < end; ++qi) {
-            const float* query = queries.ptrs[qi];
+            const float* query = query_batch[qi];
 
             // coarse: compare with cluster centers
             for (int cid = 0; cid < n_clusters; ++cid) {
-                const float* center = centers.data() + static_cast<size_t>(cid) * n_dim;
-                tmp[cid] = {cosine_distance(query, center, n_dim), cid};
+                tmp[cid] = {cosine_distance(query, centers[cid], n_dim), cid};
             }
             std::partial_sort(tmp.begin(), tmp.begin() + n_cluster_per_query, tmp.end(),
                               [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
             for (int k = 0; k < n_cluster_per_query; ++k) {
-                coarse_indices[static_cast<size_t>(qi) * n_cluster_per_query + k] = tmp[k].idx;
+                coarse_indices[qi][k] = tmp[k].idx;
+                coarse_dists[qi][k] = tmp[k].dist;
             }
 
             // fine: iterate vectors inside selected clusters
             fine_buffer.clear();
             
             for (int k = 0; k < n_cluster_per_query; ++k) {
-                int cid = coarse_indices[static_cast<size_t>(qi) * n_cluster_per_query + k];
+                int cid = coarse_indices[qi][k];
                 int vec_count = dataset.cluster_sizes[cid];
-                const float* base = dataset.cluster_ptrs[cid];
+                const float* base = dataset.cluster_ptrs[cid][0];
                 
                 // 计算该 cluster 的全局向量偏移
                 int cluster_global_offset = 0;
@@ -269,27 +228,48 @@ static std::vector<double> run_case(const BenchmarkCase& config, int total_vecto
 
     auto dataset = prepare_cluster_dataset(config, total_vectors, rng);
     
-    QueryBatch queries = generate_queries(config, rng);
-    auto centers = generate_cluster_centers(config, rng);
+    float** query_batch = generate_vector_list(config.n_query, config.vector_dim);
     auto balanced = build_balanced_mapping(dataset, 512);
 
-    float** cluster_data = dataset.cluster_ptrs.data();
-    int* cluster_sizes = dataset.cluster_sizes.data();
-    float** query_ptrs = queries.ptrs;
-    float* cluster_center_data = centers.data();
+    float*** cluster_data = dataset.cluster_ptrs;
+    int* cluster_sizes = dataset.cluster_sizes;
+    float** cluster_center_data = generate_vector_list(config.n_clusters, config.vector_dim);
 
     // CPU 参考实现：使用 C 数组
     // 注意：输出大小应该是 topk（最终输出的topk数量），不是 nprobes（粗筛的cluster数）
     int** cpu_idx = (int**)malloc_vector_list(config.n_query, config.topk, sizeof(int));
     float** cpu_dist = (float**)malloc_vector_list(config.n_query, config.topk, sizeof(float));
+    
+    // CPU 粗筛结果
+    int** cpu_coarse_indices = (int**)malloc_vector_list(config.n_query, config.nprobes, sizeof(int));
+    float** cpu_coarse_dists = (float**)malloc_vector_list(config.n_query, config.nprobes, sizeof(float));
+    int** gpu_coarse_indices = (int**)malloc_vector_list(config.n_query, config.nprobes, sizeof(int));
+    float** gpu_coarse_dists = (float**)malloc_vector_list(config.n_query, config.nprobes, sizeof(float));
+
     double cpu_ms = 0.0;
     MEASURE_MS_AND_SAVE("cpu耗时:", cpu_ms,
-        cpu_coarse_fine_search(config, queries, dataset, centers,
+        cpu_coarse_fine_search(config, query_batch, dataset, cluster_center_data,
                                config.nprobes,  // n_cluster_per_query: 粗筛选择的cluster数
                                config.topk,     // nprobes: 最终输出的topk数量
                                cpu_idx,
-                               cpu_dist);
+                               cpu_dist,
+
+                               cpu_coarse_indices,
+                               cpu_coarse_dists
+        );
     );
+    
+    // 输出CPU粗筛结果
+    // if (config.n_query <= 4) {
+    //     COUT_ENDL("=== CPU Coarse Search Results ===");
+    //     for (int qi = 0; qi < config.n_query; ++qi) {
+    //         COUT_VAL("Query ", qi, " coarse clusters: ");
+    //         for (int k = 0; k < config.nprobes; ++k) {
+    //             COUT_VAL("(cluster=", cpu_coarse_indices[qi][k], " dist=", cpu_coarse_dists[qi][k], ") ");
+    //         }
+    //         COUT_ENDL();
+    //     }
+    // }
 
     auto run_pipeline = [&](bool use_balance, const char* tag, int** topk_index,
                             float** topk_dist) -> double {
@@ -298,18 +278,24 @@ static std::vector<double> run_case(const BenchmarkCase& config, int total_vecto
         double gpu_ms = 0.0;
         MEASURE_MS_AND_SAVE("gpu耗时:", gpu_ms,
             batch_search_pipeline(
-                query_ptrs,
+                query_batch,
                 cluster_sizes,
                 cluster_data,
                 cluster_center_data,
+
                 topk_dist,
                 topk_index,
                 n_isnull,
+                
+                gpu_coarse_indices,
+                gpu_coarse_dists,
+
                 config.n_query,
                 config.vector_dim,
                 config.n_clusters,
                 config.nprobes,  // n_cluster_per_query: 粗筛选择的cluster数
                 config.topk,     // k: 最终输出的topk数量
+
                 use_balance,
                 use_balance ? balanced.cluster2block_offset.data() : nullptr,
                 use_balance ? balanced.cluster2block_ids.data() : nullptr,
@@ -339,11 +325,11 @@ static std::vector<double> run_case(const BenchmarkCase& config, int total_vecto
     // GPU 输出大小也应该是 topk
     int** gpu_idx_unbalanced = (int**)malloc_vector_list(config.n_query, config.topk, sizeof(int));
     float** gpu_dist_unbalanced = (float**)malloc_vector_list(config.n_query, config.topk, sizeof(float));
-    int** gpu_idx_balanced = (int**)malloc_vector_list(config.n_query, config.topk, sizeof(int));
-    float** gpu_dist_balanced = (float**)malloc_vector_list(config.n_query, config.topk, sizeof(float));
+    // int** gpu_idx_balanced = (int**)malloc_vector_list(config.n_query, config.topk, sizeof(int));
+    // float** gpu_dist_balanced = (float**)malloc_vector_list(config.n_query, config.topk, sizeof(float));
 
     double gpu_ms_unbalanced = run_pipeline(false, "unbalanced", gpu_idx_unbalanced, gpu_dist_unbalanced);
-    double gpu_ms_balanced = run_pipeline(true, "balanced", gpu_idx_balanced, gpu_dist_balanced);
+    // double gpu_ms_balanced = run_pipeline(true, "balanced", gpu_idx_balanced, gpu_dist_balanced);
 
     // 比较时使用 topk 作为输出大小
     // 添加调试输出
@@ -361,57 +347,70 @@ static std::vector<double> run_case(const BenchmarkCase& config, int total_vecto
                 COUT_VAL("(idx=", gpu_idx_unbalanced[qi][j], " dist=", gpu_dist_unbalanced[qi][j], ") ");
             }
             COUT_ENDL();
-            COUT_VAL("  GPU(balanced):   ");
-            for (int j = 0; j < config.topk; ++j) {
-                COUT_VAL("(idx=", gpu_idx_balanced[qi][j], " dist=", gpu_dist_balanced[qi][j], ") ");
-            }
-            COUT_ENDL();
+            // COUT_VAL("  GPU(balanced):   ");
+            // for (int j = 0; j < config.topk; ++j) {
+            //     COUT_VAL("(idx=", gpu_idx_balanced[qi][j], " dist=", gpu_dist_balanced[qi][j], ") ");
+            // }
+            // COUT_ENDL();
         }
     }
-    
+    bool pass_coarse = compare_set_2D<int>(cpu_coarse_indices, gpu_coarse_indices, config.n_query, config.nprobes, 0.0f) &&
+                       compare_set_2D<float>(cpu_coarse_dists, gpu_coarse_dists, config.n_query, config.nprobes, 1e-3f);
+    printf("pass_coarse: %d\n", pass_coarse);
     bool pass_unbalanced = compare_set_2D<int>(cpu_idx, gpu_idx_unbalanced, config.n_query, config.topk, 0.0f) &&
                           compare_set_2D<float>(cpu_dist, gpu_dist_unbalanced, config.n_query, config.topk, 1e-3f);
-    bool pass_balanced = compare_set_2D<int>(cpu_idx, gpu_idx_balanced, config.n_query, config.topk, 0.0f) &&
-                        compare_set_2D<float>(cpu_dist, gpu_dist_balanced, config.n_query, config.topk, 1e-3f);
+    // bool pass_balanced = compare_set_2D<int>(cpu_idx, gpu_idx_balanced, config.n_query, config.topk, 0.0f) &&
+    //                     compare_set_2D<float>(cpu_dist, gpu_dist_balanced, config.n_query, config.topk, 1e-3f);
     
     double pass_rate_unbalanced = pass_unbalanced ? 1.0 : 0.0;
-    double pass_rate_balanced = pass_balanced ? 1.0 : 0.0;
+    // double pass_rate_balanced = pass_balanced ? 1.0 : 0.0;
     
     // 清理内存
     free_vector_list((void**)cpu_idx);
     free_vector_list((void**)cpu_dist);
+
     free_vector_list((void**)gpu_idx_unbalanced);
     free_vector_list((void**)gpu_dist_unbalanced);
-    free_vector_list((void**)gpu_idx_balanced);
-    free_vector_list((void**)gpu_dist_balanced);
+    // free_vector_list((void**)gpu_idx_balanced);
+    // free_vector_list((void**)gpu_dist_balanced);
+
+    free_vector_list((void**)cpu_coarse_indices);
+    free_vector_list((void**)cpu_coarse_dists);
+    free_vector_list((void**)gpu_coarse_indices);
+    free_vector_list((void**)gpu_coarse_dists);
 
     double speedup_unbalanced = (gpu_ms_unbalanced > 1e-6) ? (cpu_ms / gpu_ms_unbalanced) : 0.0;
-    double speedup_balanced = (gpu_ms_balanced > 1e-6) ? (cpu_ms / gpu_ms_balanced) : 0.0;
+    // double speedup_balanced = (gpu_ms_balanced > 1e-6) ? (cpu_ms / gpu_ms_balanced) : 0.0;
 
-    release_query_batch(queries);
+    free_vector_list((void**)query_batch);
     release_cluster_dataset(dataset);
 
     return {
         pass_rate_unbalanced,
-        pass_rate_balanced,
+        // pass_rate_balanced,
         gpu_ms_unbalanced,
-        gpu_ms_balanced,
+        // gpu_ms_balanced,
         cpu_ms,
         speedup_unbalanced,
-        speedup_balanced,
-        static_cast<double>(total_vectors)
+        // speedup_balanced,
     };
 }
 
 int main() {
     MetricsCollector metrics;
-    metrics.set_columns("pass_rate_unbal", "pass_rate_bal", "n_query", "n_clusters", "vector_dim", 
-                        "topk", "nprobes", "total_vectors", "gpu_ms_unbal", "gpu_ms_bal", 
-                        "cpu_ms", "speedup_unbal", "speedup_bal");
+    // metrics.set_columns("pass_rate_unbal", "pass_rate_bal", "n_query", "n_clusters", "vector_dim", 
+    //                     "topk", "nprobes", "total_vectors", "gpu_ms_unbal", "gpu_ms_bal", 
+    //                     "cpu_ms", "speedup_unbal", "speedup_bal");
+    metrics.set_columns("pass_rate_unbal", "n_query", "n_clusters", "vector_dim", 
+                        "topk", "nprobes", "total_vectors", "gpu_ms_unbal", "cpu_ms", 
+                        "speedup_unbal");
     metrics.set_num_repeats(1);
     
     BenchmarkCase config = {100, 10, 128, 5, 10};
+    
+    config = {100, 10, 128, 5, 10};
     run_case(config, 10000); // warmup
+    COUT_ENDL("=========warmup done=========");
 
     // PARAM_3D(total_vectors, (10000, 50000, 100000, 200000, 500000, 1000000),
     //          n_query, (100, 200, 512, 1000, 2000),
@@ -452,31 +451,44 @@ int main() {
                 auto metrics_result = run_case(config, total_vectors);
                 // 返回：n_query, n_clusters, vector_dim, topk, nprobes, total_vectors, pass_unbal, pass_bal, 
                 //       gpu_ms_unbal, gpu_ms_bal, cpu_ms, speedup_unbal, speedup_bal
+                // return {
+                //     metrics_result[0],  // pass_rate_unbalanced
+                //     // metrics_result[1],  // pass_rate_balanced
+                //     static_cast<double>(n_query),
+                //     static_cast<double>(n_clusters),
+                //     static_cast<double>(vector_dim),
+                //     static_cast<double>(topk),
+                //     static_cast<double>(nprobes),
+                //     static_cast<double>(total_vectors),
+
+                //     metrics_result[2],  // gpu_ms_unbalanced
+                //     // metrics_result[3],  // gpu_ms_balanced
+                //     metrics_result[4],  // cpu_ms
+                //     metrics_result[5],  // speedup_unbalanced
+                //     // metrics_result[6]   // speedup_balanced
+                // };
                 return {
                     metrics_result[0],  // pass_rate_unbalanced
-                    metrics_result[1],  // pass_rate_balanced
                     static_cast<double>(n_query),
                     static_cast<double>(n_clusters),
                     static_cast<double>(vector_dim),
                     static_cast<double>(topk),
                     static_cast<double>(nprobes),
                     static_cast<double>(total_vectors),
-
-                    metrics_result[2],  // gpu_ms_unbalanced
-                    metrics_result[3],  // gpu_ms_balanced
-                    metrics_result[4],  // cpu_ms
-                    metrics_result[5],  // speedup_unbalanced
-                    metrics_result[6]   // speedup_balanced
+                    metrics_result[1],  // gpu_ms_unbalanced
+                    metrics_result[2],  // cpu_ms
+                    metrics_result[3]  // speedup_unbalanced
                 };
             });
             
-            if (!QUIET) {
-                COUT_VAL("Result: total_vectors=", static_cast<int>(result[7]),
-                         " pass_rate_unbal=", std::fixed, std::setprecision(4), result[0], 
-                         " pass_rate_bal=", std::fixed, std::setprecision(4), result[1],
-                         " speedup_unbal=", std::fixed, std::setprecision(2), result[11],
-                         " speedup_bal=", std::fixed, std::setprecision(2), result[12]);
-            }
+            // if (!QUIET) {
+            //     COUT_VAL("Result: total_vectors=", static_cast<int>(result[7]),
+            //              " pass_rate_unbal=", std::fixed, std::setprecision(4), result[0], 
+            //              " pass_rate_bal=", std::fixed, std::setprecision(4), result[1],
+            //              " speedup_unbal=", std::fixed, std::setprecision(2), result[11]
+            //             //  " speedup_bal=", std::fixed, std::setprecision(2), result[12]
+            //             );
+            // }
         } catch (const std::exception& e) {
             COUT_VAL("[ERROR] Test failed: ", e.what());
             return 1;

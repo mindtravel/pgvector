@@ -3,6 +3,8 @@
 
 #include "../fusion_cos_topk/fusion_cos_topk.cuh"
 #include "../fine_screen_top_n/fine_screen_top_n.cuh"
+#include "../cudatimer.h"
+#include "../../unit_tests/common/test_utils.cuh"
 
 #include <algorithm>
 #include <cstring>
@@ -12,48 +14,24 @@
 #include <unordered_map>
 #include <vector>
 
-namespace {
-
-inline void _check_cuda_last_error(const char* file, int line) {
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        throw std::runtime_error(
-            std::string("[CUDA Last Error]: ") + cudaGetErrorString(err) +
-            " (" + file + ":" + std::to_string(line) + ")");
-    }
-}
-
-#define CHECK_CUDA_ERRORS _check_cuda_last_error(__FILE__, __LINE__);
-
-inline void flatten_query_batch(float** query_batch,
-                                int n_query,
-                                int n_dim,
-                                std::vector<float>& buffer) {
-    buffer.resize(static_cast<size_t>(n_query) * n_dim);
-    for (int i = 0; i < n_query; ++i) {
-        if (!query_batch || !query_batch[i]) {
-            throw std::invalid_argument("query_batch contains null pointer");
-        }
-        std::memcpy(&buffer[static_cast<size_t>(i) * n_dim],
-                    query_batch[i],
-                    static_cast<size_t>(n_dim) * sizeof(float));
-    }
-}
-
-}  // namespace
-
 void batch_search_pipeline(float** query_batch,
                            int* cluster_size,
-                           float** cluster_data,
-                           float* cluster_center_data,
+                           float*** cluster_data,
+                           float** cluster_center_data,
+                           
                            float** topk_dist,
                            int** topk_index,
                            int* n_isnull,
+
+                           int** coarse_indices,
+                           float** coarse_dists,
+
                            int n_query,
                            int n_dim,
                            int n_total_cluster,
-                           int n_cluster_per_query,
+                           int n_probes,
                            int k,
+
                            bool use_balanced_blocks,
                            const int* cluster2block_offset,
                            const int* cluster2block_ids,
@@ -80,44 +58,42 @@ void batch_search_pipeline(float** query_batch,
     if (!cluster_center_data) {
         throw std::invalid_argument("cluster_center_data must not be null for coarse search");
     }
-    if (n_cluster_per_query <= 0 || n_cluster_per_query > n_total_cluster) {
-        throw std::invalid_argument("invalid n_cluster_per_query");
+    if (n_probes <= 0 || n_probes > n_total_cluster) {
+        throw std::invalid_argument("invalid n_probes");
     }
 
-    std::vector<float> h_query_flat;
-    flatten_query_batch(query_batch, n_query, n_dim, h_query_flat);
+    // std::vector<float> h_query_flat;
+    // flatten_query_batch(query_batch, n_query, n_dim, h_query_flat);
 
     float* d_queries = nullptr;
-    std::vector<float*> d_clusters(n_total_cluster, nullptr);
+    float** d_clusters = (float**)malloc(n_total_cluster * sizeof(float*));
 
     auto cleanup = [&]() {
         if (d_queries) {
             cudaFree(d_queries);
             d_queries = nullptr;
         }
-        for (float*& ptr : d_clusters) {
-            if (ptr) {
-                cudaFree(ptr);
-                ptr = nullptr;
+        if (d_clusters) {
+            for (int i = 0; i < n_total_cluster; ++i) {
+                if (d_clusters[i]) {
+                    cudaFree(d_clusters[i]);
+                    d_clusters[i] = nullptr;
+                }
             }
+            free(d_clusters);
+            d_clusters = nullptr;
         }
     };
 
     try {
-        const size_t query_bytes = h_query_flat.size() * sizeof(float);
-        cudaMalloc(&d_queries, query_bytes);
-        cudaMemcpy(d_queries, h_query_flat.data(), query_bytes, cudaMemcpyHostToDevice);
+        cudaMalloc(&d_queries, n_query * n_dim * sizeof(float));
+        cudaMemcpy(d_queries, query_batch[0], n_query * n_dim * sizeof(float), cudaMemcpyHostToDevice);
 
         for (int cluster_id = 0; cluster_id < n_total_cluster; ++cluster_id) {
-            const int vec_count = cluster_size[cluster_id];
-            if (vec_count <= 0 || !cluster_data[cluster_id]) {
-                continue;
-            }
-            const size_t bytes = static_cast<size_t>(vec_count) * n_dim * sizeof(float);
-            cudaMalloc(&d_clusters[cluster_id], bytes);
+            cudaMalloc(&d_clusters[cluster_id], cluster_size[cluster_id] * n_dim * sizeof(float));
             cudaMemcpy(d_clusters[cluster_id],
-                       cluster_data[cluster_id],
-                       bytes,
+                       cluster_data[cluster_id][0],
+                       cluster_size[cluster_id] * n_dim * sizeof(float),
                        cudaMemcpyHostToDevice);
         }
         CHECK_CUDA_ERRORS
@@ -125,174 +101,328 @@ void batch_search_pipeline(float** query_batch,
         // ------------------------------------------------------------------
         // Step 1. 粗筛：调用 warpsort 融合算子，得到 query -> cluster mapping
         // ------------------------------------------------------------------
-        std::vector<float*> query_ptrs(n_query);
-        for (int qi = 0; qi < n_query; ++qi) {
-            if (!query_batch || !query_batch[qi]) {
-                throw std::invalid_argument("query_batch contains null pointer");
-            }
-            query_ptrs[qi] = query_batch[qi];
+        // 注意：data_index 在 cuda_cos_topk_warpsort 内部使用 CUDA kernel 自动生成顺序索引 [0, 1, 2, ..., n_total_cluster-1]
+        {
+            CUDATimer timer("Step 1: Coarse Search (cuda_cos_topk_warpsort)");
+            cuda_cos_topk_warpsort(
+                query_batch,
+                cluster_center_data,
+                coarse_indices,
+                coarse_dists,
+                n_query,
+                n_total_cluster,
+                n_dim,
+                n_probes
+            );
+            cudaDeviceSynchronize();
+            CHECK_CUDA_ERRORS
         }
-
-        std::vector<float*> cluster_center_ptrs(n_total_cluster);
-        for (int cid = 0; cid < n_total_cluster; ++cid) {
-            cluster_center_ptrs[cid] = cluster_center_data + static_cast<size_t>(cid) * n_dim;
-        }
-
-        // data_index 描述每个 query 对 n_total_cluster 个候选的全局 ID
-        std::vector<int> data_index_storage(static_cast<size_t>(n_query) * n_total_cluster);
-        std::vector<int*> data_index_ptrs(n_query);
-        for (int qi = 0; qi < n_query; ++qi) {
-            data_index_ptrs[qi] = data_index_storage.data() + static_cast<size_t>(qi) * n_total_cluster;
-            for (int cid = 0; cid < n_total_cluster; ++cid) {
-                data_index_ptrs[qi][cid] = cid;
-            }
-        }
-
-        std::vector<int> coarse_index_storage(static_cast<size_t>(n_query) * n_cluster_per_query);
-        std::vector<int*> coarse_index_ptrs(n_query);
-        for (int qi = 0; qi < n_query; ++qi) {
-            coarse_index_ptrs[qi] = coarse_index_storage.data() + static_cast<size_t>(qi) * n_cluster_per_query;
-        }
-
-        std::vector<float> coarse_dist_storage(static_cast<size_t>(n_query) * n_cluster_per_query, 0.0f);
-        std::vector<float*> coarse_dist_ptrs(n_query);
-        for (int qi = 0; qi < n_query; ++qi) {
-            coarse_dist_ptrs[qi] = coarse_dist_storage.data() + static_cast<size_t>(qi) * n_cluster_per_query;
-        }
-
-        cuda_cos_topk_warpsort(
-            query_ptrs.data(),
-            cluster_center_ptrs.data(),
-            data_index_ptrs.data(),
-            coarse_index_ptrs.data(),
-            coarse_dist_ptrs.data(),
-            n_query,
-            n_total_cluster,
-            n_dim,
-            n_cluster_per_query
-        );
-        CHECK_CUDA_ERRORS
+        
+        // // 输出GPU粗筛结果（仅在小规模测试时）
+        // if (n_query <= 4) {
+        //     printf("=== GPU Coarse Search Results ===\n");
+        //     for (int qi = 0; qi < n_query; ++qi) {
+        //         printf("Query %d coarse clusters: ", qi);
+        //         for (int k = 0; k < n_probes; ++k) {
+        //             printf("(cluster=%d dist=%.6f) ", 
+        //                    coarse_indices[qi][k], 
+        //                    coarse_dists[qi][k]);
+        //         }
+        //         printf("\n");
+        //     }
+        // }
 
         // ------------------------------------------------------------------
         // Step 2. 将 query→cluster 粗筛结果转成 block 序列
+        // 同时构建 query->probe 映射和 probe 在 query 中的索引
         // ------------------------------------------------------------------
-        std::unordered_map<int, int> block_id_to_compact;
-        std::vector<int> compact_block_ids;
         std::vector<float*> compact_block_host_ptrs;
         std::vector<int> compact_block_sizes;
-        std::vector<std::vector<int>> block_to_queries;
+        int active_block_count = 0;
+        int* block_query_offset;
+        int* block_query_data;
+        int* block_query_probe_indices;  // 新增：每个block-query对中probe在query中的索引
 
-        auto acquire_block_slot = [&](int global_block_id,
-                                      float* host_ptr,
-                                      int vec_count) -> int {
-            auto [it, inserted] =
-                block_id_to_compact.emplace(global_block_id,
-                                            static_cast<int>(compact_block_ids.size()));
-            if (inserted) {
-                compact_block_ids.push_back(global_block_id);
-                compact_block_host_ptrs.push_back(host_ptr);
-                compact_block_sizes.push_back(vec_count);
-                block_to_queries.emplace_back();
-                return static_cast<int>(compact_block_ids.size()) - 1;
-            }
-            return it->second;
-        };
+        {
+            CUDATimer timer("Step 2: Convert query→cluster to block sequence", true, false);
+            std::unordered_map<int, int> block_id_to_compact;
+            std::vector<int> compact_block_ids;
+            std::vector<std::vector<int>> block_to_queries;
+            std::vector<std::vector<int>> block_query_probe_indices_vec;  // 新增：存储probe索引
 
-        for (int qi = 0; qi < n_query; ++qi) {
-            const int* cluster_list = coarse_index_ptrs[qi];
-            for (int rank = 0; rank < n_cluster_per_query; ++rank) {
-                int cluster_id = cluster_list[rank];
-                if (cluster_id < 0 || cluster_id >= n_total_cluster) continue;
-                if (use_balanced_blocks) {
-                    int start = cluster2block_offset[cluster_id];
-                    int end = cluster2block_offset[cluster_id + 1];
-                    for (int idx = start; idx < end; ++idx) {
-                        int block_id = cluster2block_ids[idx];
-                        if (block_id < 0 || block_id >= n_blocks) {
-                            throw std::out_of_range("balanced block id out of range");
+            // 构建 query->probe 映射（用于计算 probe 在 query 中的索引）
+            std::vector<std::vector<int>> query_probe_list(n_query);
+            std::vector<std::unordered_map<int, int>> query_probe_index_map(n_query);  // query_id -> (probe_id -> index)
+
+            auto acquire_block_slot = [&](int global_block_id,
+                                          float* host_ptr,
+                                          int vec_count) -> int {
+                auto [it, inserted] =
+                    block_id_to_compact.emplace(global_block_id,
+                                                static_cast<int>(compact_block_ids.size()));
+                if (inserted) {
+                    compact_block_ids.push_back(global_block_id);
+                    compact_block_host_ptrs.push_back(host_ptr);
+                    compact_block_sizes.push_back(vec_count);
+                    block_to_queries.emplace_back();
+                    block_query_probe_indices_vec.emplace_back();  // 新增
+                    return static_cast<int>(compact_block_ids.size()) - 1;
+                }
+                return it->second;
+            };
+
+            for (int qi = 0; qi < n_query; ++qi) {
+                // const int* cluster_list = coarse_indices[qi];
+                for (int rank = 0; rank < n_probes; ++rank) {
+                    int cluster_id = coarse_indices[qi][rank];
+
+
+                    if (cluster_id < 0 || cluster_id >= n_total_cluster) continue;
+                    if (use_balanced_blocks) {
+                        int start = cluster2block_offset[cluster_id];
+                        int end = cluster2block_offset[cluster_id + 1];
+                        for (int idx = start; idx < end; ++idx) {
+                            int block_id = cluster2block_ids[idx];
+                            if (block_id < 0 || block_id >= n_blocks) {
+                                throw std::out_of_range("balanced block id out of range");
+                            }
+                            int local_offset = cluster2block_local_offsets[idx];
+                            float* cluster_base = cluster_data[cluster_id][0];
+                            if (!cluster_base) {
+                                throw std::runtime_error("cluster data pointer is null");
+                            }
+                            float* block_ptr = cluster_base + static_cast<size_t>(local_offset) * n_dim;
+                            int vec_count = block_vector_counts[block_id];
+                            int compact_idx = acquire_block_slot(block_id, block_ptr, vec_count);
+                            
+                            // 计算probe在query中的索引
+                            int probe_index_in_query = -1;
+                            auto& probe_map = query_probe_index_map[qi];
+                            auto map_it = probe_map.find(compact_idx);
+                            if (map_it == probe_map.end()) {
+                                // 第一次遇到这个probe，添加到query的probe列表
+                                probe_index_in_query = static_cast<int>(query_probe_list[qi].size());
+                                query_probe_list[qi].push_back(compact_idx);
+                                probe_map[compact_idx] = probe_index_in_query;
+                            } else {
+                                // 已经存在，使用已有索引
+                                probe_index_in_query = map_it->second;
+                            }
+                            
+                            block_to_queries[compact_idx].push_back(qi);
+                            block_query_probe_indices_vec[compact_idx].push_back(probe_index_in_query);
                         }
-                        int local_offset = cluster2block_local_offsets[idx];
-                        float* cluster_base = cluster_data[cluster_id];
-                        if (!cluster_base) {
+                    }
+
+
+                    else {
+                        float* block_ptr = cluster_data[cluster_id][0];
+                        if (!block_ptr) {
                             throw std::runtime_error("cluster data pointer is null");
                         }
-                        float* block_ptr = cluster_base + static_cast<size_t>(local_offset) * n_dim;
-                        int vec_count = block_vector_counts[block_id];
-                        int compact_idx = acquire_block_slot(block_id, block_ptr, vec_count);
+                        int vec_count = cluster_size[cluster_id];
+                        int compact_idx = acquire_block_slot(cluster_id, block_ptr, vec_count);
+                        
+                        // 计算probe在query中的索引
+                        int probe_index_in_query = -1;
+                        auto& probe_map = query_probe_index_map[qi];
+                        auto map_it = probe_map.find(compact_idx);
+                        if (map_it == probe_map.end()) {
+                            // 第一次遇到这个probe，添加到query的probe列表
+                            probe_index_in_query = static_cast<int>(query_probe_list[qi].size());
+                            query_probe_list[qi].push_back(compact_idx);
+                            probe_map[compact_idx] = probe_index_in_query;
+                        } else {
+                            // 已经存在，使用已有索引
+                            probe_index_in_query = map_it->second;
+                        }
+                        
                         block_to_queries[compact_idx].push_back(qi);
+                        block_query_probe_indices_vec[compact_idx].push_back(probe_index_in_query);
                     }
-                } else {
-                    float* block_ptr = cluster_data[cluster_id];
-                    if (!block_ptr) {
-                        throw std::runtime_error("cluster data pointer is null");
-                    }
-                    int vec_count = cluster_size[cluster_id];
-                    int compact_idx = acquire_block_slot(cluster_id, block_ptr, vec_count);
-                    block_to_queries[compact_idx].push_back(qi);
                 }
+            }
+
+            active_block_count = static_cast<int>(compact_block_ids.size());
+            block_query_offset = (int*)malloc((active_block_count + 1) * sizeof(int));
+
+            int total_entries = 0;
+            for (int block_idx = 0; block_idx < active_block_count; ++block_idx) {
+                block_query_offset[block_idx] = total_entries;
+                total_entries += block_to_queries[block_idx].size();
+            }
+            block_query_offset[active_block_count] = total_entries;
+            block_query_data = (int*)malloc(total_entries * sizeof(int));
+            block_query_probe_indices = (int*)malloc(total_entries * sizeof(int));  // 新增
+            int cursor = 0;
+            for (int block_idx = 0; block_idx < active_block_count; ++block_idx) {
+                const auto& qlist = block_to_queries[block_idx];
+                const auto& probe_indices = block_query_probe_indices_vec[block_idx];
+                memcpy(block_query_data + cursor, qlist.data(), qlist.size() * sizeof(int));
+                memcpy(block_query_probe_indices + cursor, probe_indices.data(), probe_indices.size() * sizeof(int));  // 新增
+                cursor += qlist.size();
+            }
+            
+            // 输出 Step 2 结果，验证是否由粗筛结果转换而来
+            if (n_query <= 4 && n_probes <= 8) {
+                // printf("\n=== Step 2: Block Sequence Conversion Results ===\n");
+                
+                // // 1. 输出粗筛结果（输入）
+                // printf("--- Coarse Search Results (Input) ---\n");
+                // for (int qi = 0; qi < n_query; ++qi) {
+                //     printf("Query %d selected clusters: ", qi);
+                //     for (int rank = 0; rank < n_probes; ++rank) {
+                //         int cluster_id = coarse_indices[qi][rank];
+                //         if (cluster_id >= 0 && cluster_id < n_total_cluster) {
+                //             printf("%d ", cluster_id);
+                //         } else {
+                //             printf("(invalid:%d) ", cluster_id);
+                //         }
+                //     }
+                //     printf("\n");
+                // }
+                
+                // // 2. 输出 Step 2 生成的 block 列表和对应的 query 列表
+                // printf("\n--- Step 2 Output: Block -> Query Mapping ---\n");
+                // printf("Total active blocks: %d\n", active_block_count);
+                // for (int block_idx = 0; block_idx < active_block_count; ++block_idx) {
+                //     int global_block_id = compact_block_ids[block_idx];
+                //     const auto& qlist = block_to_queries[block_idx];
+                //     printf("Block[%d] (global_id=%d, vec_count=%d) -> queries: [", 
+                //            block_idx, global_block_id, compact_block_sizes[block_idx]);
+                //     for (size_t i = 0; i < qlist.size(); ++i) {
+                //         printf("%d", qlist[i]);
+                //         if (i < qlist.size() - 1) printf(", ");
+                //     }
+                //     printf("] (%zu queries)\n", qlist.size());
+                // }
+                
+                // // 3. 验证：检查每个 query 的 cluster 是否都对应到了 block
+                // printf("\n--- Verification: Query -> Block Mapping ---\n");
+
+                bool all_match = true;
+                for (int qi = 0; qi < n_query; ++qi) {
+                    // printf("Query %d: ", qi);
+                    std::vector<int> expected_blocks;
+                    for (int rank = 0; rank < n_probes; ++rank) {
+                        int cluster_id = coarse_indices[qi][rank];
+                        if (cluster_id < 0 || cluster_id >= n_total_cluster) continue;
+                        
+                        if (use_balanced_blocks) {
+                            int start = cluster2block_offset[cluster_id];
+                            int end = cluster2block_offset[cluster_id + 1];
+                            for (int idx = start; idx < end; ++idx) {
+                                int block_id = cluster2block_ids[idx];
+                                if (block_id >= 0 && block_id < n_blocks) {
+                                    expected_blocks.push_back(block_id);
+                                }
+                            }
+                        } else {
+                            expected_blocks.push_back(cluster_id);
+                        }
+                    }
+                    
+                    // // 检查这些 block 是否都在 Step 2 的输出中，并且包含 query qi
+                    // printf("expected blocks: [");
+                    // for (size_t i = 0; i < expected_blocks.size(); ++i) {
+                    //     printf("%d", expected_blocks[i]);
+                    //     if (i < expected_blocks.size() - 1) printf(", ");
+                    // }
+                    // printf("] -> ");
+                    
+                    std::vector<int> found_blocks;
+                    for (int block_idx = 0; block_idx < active_block_count; ++block_idx) {
+                        const auto& qlist = block_to_queries[block_idx];
+                        if (std::find(qlist.begin(), qlist.end(), qi) != qlist.end()) {
+                            found_blocks.push_back(compact_block_ids[block_idx]);
+                        }
+                    }
+                    // printf("found in blocks: [");
+                    // for (size_t i = 0; i < found_blocks.size(); ++i) {
+                    //     printf("%d", found_blocks[i]);
+                    //     if (i < found_blocks.size() - 1) printf(", ");
+                    // }
+                    // printf("]");
+                    
+                    // 验证是否匹配
+                    if (expected_blocks.size() != found_blocks.size()) {
+                        all_match = false;
+                    } else {
+                        std::sort(expected_blocks.begin(), expected_blocks.end());
+                        std::sort(found_blocks.begin(), found_blocks.end());
+                        all_match &= (expected_blocks == found_blocks);
+                    }
+                }
+                printf("step 2 all_match: %s\n", all_match ? "true" : "false");
             }
         }
 
-        const int active_block_count = static_cast<int>(compact_block_ids.size());
-        std::vector<int> block_query_offset(active_block_count + 1, 0);
-        std::vector<int> block_query_data;
-        block_query_data.reserve(static_cast<size_t>(n_query) * n_cluster_per_query);
-
-        size_t total_entries = 0;
-        for (int block_idx = 0; block_idx < active_block_count; ++block_idx) {
-            block_query_offset[block_idx] = static_cast<int>(total_entries);
-            total_entries += block_to_queries[block_idx].size();
-        }
-        block_query_offset[active_block_count] = static_cast<int>(total_entries);
-        block_query_data.resize(total_entries);
-        size_t cursor = 0;
-        for (int block_idx = 0; block_idx < active_block_count; ++block_idx) {
-            const auto& qlist = block_to_queries[block_idx];
-            std::copy(qlist.begin(), qlist.end(), block_query_data.begin() + cursor);
-            cursor += qlist.size();
-        }
+        COUT_ENDL("n_query: ", n_query, "n_probes: ", n_probes, "k: ", k);
+        int** candidate_index = (int**)malloc_vector_list(n_query, n_probes * k, sizeof(int));
+        float** candidate_dist = (float**)malloc_vector_list(n_query, n_probes * k, sizeof(float));
+        // table_2D("candidate_index", candidate_index, n_query, n_probes * k);
+        // table_2D("candidate_dist", candidate_dist, n_query, n_probes * k);
 
         // ------------------------------------------------------------------
         // Step 3. 精筛：上传 block 向量 + block 查询映射，调用 GPU kernel
         // ------------------------------------------------------------------
+        COUT_ENDL("Step 3: Fine Search (fine_screen_top_n_blocks)");
         if (active_block_count > 0) {
-            std::vector<int> fine_topn_index(static_cast<size_t>(n_query) * k);
-            std::vector<float> fine_topn_dist(static_cast<size_t>(n_query) * k);
+            {
+                CUDATimer timer("Step 3: Fine Search (fine_screen_top_n_blocks)");
+                // 调用固定probe版本的精筛
+                fine_screen_top_n_blocks(
+                    query_batch[0],
 
-            // TODO: fine_screen_top_n_blocks 函数尚未实现，暂时注释掉
-            // fine_screen_top_n_blocks(
-            //     h_query_flat.data(),
-            //     n_query,
-            //     n_dim,
-            //     k,
-            //     compact_block_host_ptrs.data(),
-            //     compact_block_sizes.data(),
-            //     active_block_count,
-            //     block_query_offset.data(),
-            //     block_query_data.data(),
-            //     fine_topn_index.data(),
-            //     fine_topn_dist.data()
-            // );
-            // 暂时使用空实现
-            printf("Warning: fine_screen_top_n_blocks is not implemented, skipping fine screening\n");
-            std::fill(fine_topn_index.begin(), fine_topn_index.end(), -1);
-            std::fill(fine_topn_dist.begin(), fine_topn_dist.end(), FLT_MAX);
-            CHECK_CUDA_ERRORS
+                    compact_block_host_ptrs.data(),
+                    compact_block_sizes.data(),
+                    block_query_offset,
+                    block_query_data,
+                    block_query_probe_indices,  // 新增：probe在query中的索引
 
-            if (topk_index) {
-                for (int qi = 0; qi < n_query; ++qi) {
-                    if (topk_index[qi]) {
-                        std::copy_n(&fine_topn_index[static_cast<size_t>(qi) * k], k, topk_index[qi]);
-                    }
-                }
+                    topk_index[0],
+                    topk_dist[0],
+                
+                    candidate_dist,
+                    candidate_index,
+
+                    n_query,
+                    active_block_count,
+                    n_dim,
+                    k
+                );
+                CHECK_CUDA_ERRORS
             }
-            if (topk_dist) {
-                for (int qi = 0; qi < n_query; ++qi) {
-                    if (topk_dist[qi]) {
-                        std::copy_n(&fine_topn_dist[static_cast<size_t>(qi) * k], k, topk_dist[qi]);
-                    }
-                }
+            
+            // 释放Step 2中分配的内存
+            if (block_query_offset) {
+                free(block_query_offset);
+                block_query_offset = nullptr;
             }
+            if (block_query_data) {
+                free(block_query_data);
+                block_query_data = nullptr;
+            }
+            if (block_query_probe_indices) {
+                free(block_query_probe_indices);
+                block_query_probe_indices = nullptr;
+            }
+
+        // 输出GPU精筛结果
+        if (n_query <= 4) {
+            printf("=== GPU Fine Search Results ===\n");
+            for (int qi = 0; qi < n_query; ++qi) {
+                printf("Query %d: ", qi);
+                for (int t = 0; t < k; ++t) {
+                    printf("(idx=%d, dist=%.6f) ", 
+                           topk_index[qi][t],
+                           topk_dist[qi][t]);
+                }
+                printf("\n");
+            }
+        }
+            
+
             if (n_isnull) {
                 std::fill(n_isnull, n_isnull + n_query, 0);
             }
@@ -307,12 +437,14 @@ void batch_search_pipeline(float** query_batch,
                 }
             }
         }
+        
+        // 正常执行完成，清理资源
+        cleanup();
     } catch (...) {
+        // 异常发生时，清理已分配的资源
         cleanup();
         throw;
     }
-
-    cleanup();
 }
 
 void run_integrate_pipeline() {

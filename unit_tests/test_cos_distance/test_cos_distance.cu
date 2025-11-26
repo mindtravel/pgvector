@@ -13,22 +13,10 @@ void cpu_cosine_distance(float** query_vectors, float** data_vectors, float** co
     float* data_norms = (float*)malloc(n_batch * sizeof(float));
     
     // 计算query向量的L2范数
-    for (int i = 0; i < n_query; i++) {
-        float sum = 0.0f;
-        for (int j = 0; j < n_dim; j++) {
-            sum += query_vectors[i][j] * query_vectors[i][j];
-        }
-        query_norms[i] = sqrt(sum);
-    }
+    compute_l2_norms_batch(query_vectors, query_norms, n_query, n_dim);
     
     // 计算data向量的L2范数
-    for (int i = 0; i < n_batch; i++) {
-        float sum = 0.0f;
-        for (int j = 0; j < n_dim; j++) {
-            sum += data_vectors[i][j] * data_vectors[i][j];
-        }
-        data_norms[i] = sqrt(sum);
-    }
+    compute_l2_norms_batch(data_vectors, data_norms, n_batch, n_dim);
     
     // 计算余弦距离矩阵
     for (int i = 0; i < n_query; i++) {

@@ -118,15 +118,6 @@ __global__ void indexed_inner_product_with_topk_kernel_v2_static(
         int vec_idx = iter * kWarpSize + lane;
         bool has_valid_vec = (vec_idx < n_selected_vectors);
 
-        // if (iter + 1 < max_iterations) {
-        //     int next_vec_idx = (iter + 1) * kWarpSize + lane;
-        //     if (next_vec_idx < n_selected_vectors) {
-        //         const float* next_vec_ptr = d_cluster_vector + next_vec_idx * Dim;
-        //         prefetch_l2(next_vec_ptr);
-        //         prefetch_l2(d_cluster_vector_norm + next_vec_idx);
-        //     }
-        // }
-
         if (!has_valid_vec) {
             queue.add(dummy_val, -1);
         } else {

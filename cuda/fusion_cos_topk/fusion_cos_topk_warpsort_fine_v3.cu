@@ -46,8 +46,8 @@ void cuda_cos_topk_warpsort_fine_v3(
     // 配置kernel launch
     // v3版本：每个block处理8个query，每个warp处理一个query
     // block需要至少8*32=256个线程
-    constexpr int kQueriesPerBlock = 8;
-    dim3 block(256);  // 8个warp，每个warp 32个线程
+    constexpr int kQueriesPerBlock = 4;
+    dim3 block(128);  // 8个warp，每个warp 32个线程
     
     {
         CUDATimer timer_kernel("Indexed Inner Product with TopK Kernel (v3)", ENABLE_CUDA_TIMING);
