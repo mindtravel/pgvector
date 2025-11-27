@@ -358,10 +358,6 @@ void batch_search_pipeline(float** query_batch,
         }
 
         COUT_ENDL("n_query: ", n_query, "n_probes: ", n_probes, "k: ", k);
-        int** candidate_index = (int**)malloc_vector_list(n_query, n_probes * k, sizeof(int));
-        float** candidate_dist = (float**)malloc_vector_list(n_query, n_probes * k, sizeof(float));
-        // table_2D("candidate_index", candidate_index, n_query, n_probes * k);
-        // table_2D("candidate_dist", candidate_dist, n_query, n_probes * k);
 
         // ------------------------------------------------------------------
         // Step 3. 精筛：上传 block 向量 + block 查询映射，调用 GPU kernel
@@ -382,9 +378,6 @@ void batch_search_pipeline(float** query_batch,
 
                     topk_index[0],
                     topk_dist[0],
-                
-                    candidate_dist,
-                    candidate_index,
 
                     n_query,
                     active_block_count,

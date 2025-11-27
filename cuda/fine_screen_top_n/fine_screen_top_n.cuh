@@ -15,9 +15,6 @@ void fine_screen_top_n_blocks(
     int* h_query_topn_index,
     float* h_query_topn_dist,
 
-    float** candidate_dist,
-    int** candidate_index,
-
     int n_query,
     int n_probes,
     int n_dim,

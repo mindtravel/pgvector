@@ -14,7 +14,7 @@ using namespace pgvector::warpsort_topk;
 /**
  * Kernel: 初始化输出内存为无效值（FLT_MAX 和 -1）
  */
-__global__ void init_invalid_values_kernel(
+__global__ static void init_invalid_values_kernel(
     float* __restrict__ d_topk_dist_probe,  // [n_query][n_probes][k] - 输出，初始化为 FLT_MAX
     int* __restrict__ d_topk_index_probe,  // [n_query][n_probes][k] - 输出，初始化为 -1
     int total_size  // n_query * n_probes * k
@@ -29,7 +29,7 @@ __global__ void init_invalid_values_kernel(
 /**
  * Kernel: 映射候选索引回原始向量索引
  */
-__global__ void map_candidate_indices_kernel(
+__global__ static void map_candidate_indices_kernel(
     const int* __restrict__ d_candidate_indices,  // [n_query][n_probes * k]
     int* __restrict__ d_topk_index,  // [n_query][k] - 输入是候选位置，输出是原始索引
     int n_query,
@@ -73,6 +73,7 @@ __global__ void map_candidate_indices_kernel(
  * @param d_probe_query_probe_indices 每个probe-query对中probe在query中的索引 [total_queries_in_probes]
  * @param d_topk_index [out] 每个query的topk索引 [n_query][k]（最终结果，已规约）
  * @param d_topk_dist [out] 每个query的topk距离 [n_query][k]（最终结果，已规约）
+
  * @param n_query query数量
  * @param n_total_clusters cluster数量
  * @param n_probes probe数量
@@ -117,72 +118,82 @@ void cuda_cos_topk_warpsort_fine_v3_fixed_probe(
         printf("Error: k (%d) exceeds maximum capacity (%d)\n", k, kMaxCapacity);
         return;
     }
-    
-    // 选择合适的Capacity（必须是2的幂，且 > k）
-    int capacity = 32;
-    while (capacity < k) capacity <<= 1;
-    capacity = std::min(capacity, kMaxCapacity);
-    
-    CHECK_CUDA_ERRORS;
-    
-    // 配置kernel launch
-    // 固定probe版本：每个block处理一个probe的多个query
-    constexpr int kQueriesPerBlock = 8;
-    dim3 block(256);  // 8个warp，每个warp 32个线程
-    
-    // 计算max_queries_per_probe用于launch函数（用于计算grid配置）
-    // 注意：d_probe_query_offsets 的大小是 n_total_clusters + 1，因为每个 cluster 都是一个 probe
-    int* probe_query_offsets_host = (int*)malloc((n_total_clusters + 1) * sizeof(int));
-    cudaMemcpy(probe_query_offsets_host, d_probe_query_offsets, (n_total_clusters + 1) * sizeof(int), cudaMemcpyDeviceToHost);
-    int max_queries_per_probe = 0;
-    for (int i = 0; i < n_total_clusters; ++i) {
-        int n_queries = probe_query_offsets_host[i + 1] - probe_query_offsets_host[i];
-        max_queries_per_probe = std::max(max_queries_per_probe, n_queries);
-    }
-    CHECK_CUDA_ERRORS;
 
+    int capacity = 32;
+
+    int* probe_query_offsets_host = nullptr;
+    constexpr int kQueriesPerBlock = 8;
     float* d_topk_dist_probe = nullptr;
     int* d_topk_index_probe = nullptr;
     
-    // 缓冲区：按query组织的结果 [n_query][n_probes][k]
-    // kernel会直接写入这个格式，不需要重组
-    cudaError_t alloc_err1 = cudaMalloc(&d_topk_dist_probe, n_query * n_probes * k * sizeof(float));
-    cudaError_t alloc_err2 = cudaMalloc(&d_topk_index_probe, n_query * n_probes * k * sizeof(int));
+    // 配置kernel launch
+    // 固定probe版本：每个block处理一个probe的多个query
+    dim3 block(256);  // 8个warp，每个warp 32个线程
+
+    int max_queries_per_probe = 0;
+
+    {
+        CUDATimer timer_init("Init Invalid Values Kernel", ENABLE_CUDA_TIMING);
+
+        // 选择合适的Capacity（必须是2的幂，且 > k）
+        while (capacity < k) capacity <<= 1;
+        capacity = std::min(capacity, kMaxCapacity);
+        
+        CHECK_CUDA_ERRORS;
+        
+
+        
+        // 计算max_queries_per_probe用于launch函数（用于计算grid配置）
+        // 注意：d_probe_query_offsets 的大小是 n_total_clusters + 1，因为每个 cluster 都是一个 probe
+        probe_query_offsets_host = (int*)malloc((n_total_clusters + 1) * sizeof(int));
+        cudaMemcpy(probe_query_offsets_host, d_probe_query_offsets, (n_total_clusters + 1) * sizeof(int), cudaMemcpyDeviceToHost);
+
+        for (int i = 0; i < n_total_clusters; ++i) {
+            int n_queries = probe_query_offsets_host[i + 1] - probe_query_offsets_host[i];
+            max_queries_per_probe = std::max(max_queries_per_probe, n_queries);
+        }
+        CHECK_CUDA_ERRORS;
+
+        // 缓冲区：按query组织的结果 [n_query][n_probes][k]
+        // kernel会直接写入这个格式，不需要重组
+        cudaError_t alloc_err1 = cudaMalloc(&d_topk_dist_probe, n_query * n_probes * k * sizeof(float));
+        cudaError_t alloc_err2 = cudaMalloc(&d_topk_index_probe, n_query * n_probes * k * sizeof(int));
+        
+        if (alloc_err1 != cudaSuccess || alloc_err2 != cudaSuccess) {
+            printf("[ERROR] Failed to allocate device memory: dist_err=%s, idx_err=%s\n",
+                cudaGetErrorString(alloc_err1), cudaGetErrorString(alloc_err2));
+            if (d_topk_dist_probe) cudaFree(d_topk_dist_probe);
+            if (d_topk_index_probe) cudaFree(d_topk_index_probe);
+            return;
+        }
     
-    if (alloc_err1 != cudaSuccess || alloc_err2 != cudaSuccess) {
-        printf("[ERROR] Failed to allocate device memory: dist_err=%s, idx_err=%s\n",
-               cudaGetErrorString(alloc_err1), cudaGetErrorString(alloc_err2));
-        if (d_topk_dist_probe) cudaFree(d_topk_dist_probe);
-        if (d_topk_index_probe) cudaFree(d_topk_index_probe);
-        return;
+        // 初始化输出内存为无效值（FLT_MAX 和 -1）
+        dim3 init_block(512);
+        int init_grid_size = (n_query * n_probes * k + init_block.x - 1) / init_block.x;
+        
+        // // 检查 grid 大小是否超过 CUDA 限制（65535）
+        // if (init_grid_size > 65535) {
+        //     printf("[ERROR] Grid size too large: %d (max 65535), total_size=%d\n", 
+        //            init_grid_size, total_size);
+        //     cudaFree(d_topk_dist_probe);
+        //     cudaFree(d_topk_index_probe);
+        //     return;
+        // }
+        
+        dim3 init_grid(init_grid_size);
+        init_invalid_values_kernel<<<init_grid, init_block>>>(
+            d_topk_dist_probe,
+            d_topk_index_probe,
+            n_query * n_probes * k
+        );
     }
-    
-    // 初始化输出内存为无效值（FLT_MAX 和 -1）
-    dim3 init_block(256);
-    int init_grid_size = (n_query * n_probes * k + init_block.x - 1) / init_block.x;
-    
-    // // 检查 grid 大小是否超过 CUDA 限制（65535）
-    // if (init_grid_size > 65535) {
-    //     printf("[ERROR] Grid size too large: %d (max 65535), total_size=%d\n", 
-    //            init_grid_size, total_size);
-    //     cudaFree(d_topk_dist_probe);
-    //     cudaFree(d_topk_index_probe);
-    //     return;
-    // }
-    
-    dim3 init_grid(init_grid_size);
-    init_invalid_values_kernel<<<init_grid, init_block>>>(
-        d_topk_dist_probe,
-        d_topk_index_probe,
-        n_query * n_probes * k
-    );
-    
+    int max_query_batches = 0;
     {
         CUDATimer timer_kernel("Indexed Inner Product with TopK Kernel (v3 fixed probe)", ENABLE_CUDA_TIMING);
         
         // 验证 grid 配置
         // grid.x 使用 n_total_clusters，因为每个 cluster 都是一个 probe
-        int max_query_batches = (max_queries_per_probe + kQueriesPerBlock - 1) / kQueriesPerBlock;
+        max_query_batches = (max_queries_per_probe + kQueriesPerBlock - 1) / kQueriesPerBlock;
         dim3 grid(n_total_clusters, max_query_batches, 1);
         
     //     // 检查 grid 大小是否超过 CUDA 限制

@@ -42,9 +42,6 @@ void fine_screen_top_n_blocks(
     int* h_query_topn_index,
     float* h_query_topn_dist,
 
-    float** candidate_dist,
-    int** candidate_index,
-
     int n_query,
     int n_probes,
     int n_dim,
@@ -93,18 +90,10 @@ void fine_screen_top_n_blocks(
     int* d_probe_queries = nullptr;
     int* d_probe_query_offsets = nullptr;
     
-    // cudaError_t err1 = cudaMalloc(&d_probe_vector_offset, n_probes * sizeof(int));
-    // cudaError_t err2 = cudaMalloc(&d_probe_vector_count, n_probes * sizeof(int));
-    // cudaError_t err3 = cudaMalloc(&d_probe_query_offsets, (n_probes + 1) * sizeof(int));
+    cudaMalloc(&d_probe_vector_offset, n_probes * sizeof(int));
+    cudaMalloc(&d_probe_vector_count, n_probes * sizeof(int));
+    cudaMalloc(&d_probe_query_offsets, (n_probes + 1) * sizeof(int));
     
-    // if (err1 != cudaSuccess || err2 != cudaSuccess || err3 != cudaSuccess) {
-    //     printf("[ERROR] Failed to allocate probe metadata: err1=%s, err2=%s, err3=%s\n",
-    //            cudaGetErrorString(err1), cudaGetErrorString(err2), cudaGetErrorString(err3));
-    //     return;
-    // }
-    
-    // printf("[DEBUG] Allocated d_probe_query_offsets=%p, size=%zu bytes\n", 
-    //        d_probe_query_offsets, (n_probes + 1) * sizeof(int));
     
     cudaMemcpy(d_probe_vector_offset, block_vector_offset, 
                n_probes * sizeof(int), cudaMemcpyHostToDevice);
@@ -112,19 +101,10 @@ void fine_screen_top_n_blocks(
                n_probes * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_probe_query_offsets, h_block_query_offset, 
                (n_probes + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    CHECK_CUDA_ERRORS;
     
     int total_queries_in_blocks = h_block_query_offset[n_probes];
-    cudaError_t err4 = cudaMalloc(&d_probe_queries, total_queries_in_blocks * sizeof(int));
-    // if (err4 != cudaSuccess) {
-    //     printf("[ERROR] Failed to allocate d_probe_queries: %s\n", cudaGetErrorString(err4));
-    //     cudaFree(d_probe_vector_offset);
-    //     cudaFree(d_probe_vector_count);
-    //     cudaFree(d_probe_query_offsets);
-    //     return;
-    // }
-    
-    // printf("[DEBUG] Allocated d_probe_queries=%p, size=%zu bytes\n", 
-    //        d_probe_queries, total_queries_in_blocks * sizeof(int));
+    cudaMalloc(&d_probe_queries, total_queries_in_blocks * sizeof(int));
     
     cudaMemcpy(d_probe_queries, h_block_query_data, 
                total_queries_in_blocks * sizeof(int), cudaMemcpyHostToDevice);
@@ -153,33 +133,6 @@ void fine_screen_top_n_blocks(
     // 分配最终输出缓冲区
     float* d_topk_dist_final = nullptr;
     int* d_topk_index_final = nullptr;
-
-    // cudaError_t err_dist = cudaMalloc(&d_topk_dist_final, n_query * k * sizeof(float));
-    // cudaError_t err_index = cudaMalloc(&d_topk_index_final, n_query * k * sizeof(int));
-    // if (err_dist != cudaSuccess || err_index != cudaSuccess) {
-    //     printf("[ERROR] Failed to allocate final output buffers: dist_err=%s, index_err=%s\n",
-    //            cudaGetErrorString(err_dist), cudaGetErrorString(err_index));
-    //     // 清理已分配的内存
-    //     if (d_topk_dist_final) cudaFree(d_topk_dist_final);
-    //     if (d_topk_index_final) cudaFree(d_topk_index_final);
-    //     // 清理其他已分配的内存
-    //     cudaFree(d_cluster_vector);
-    //     cudaFree(d_query_group);
-    //     cudaFree(d_probe_vector_offset);
-    //     cudaFree(d_probe_vector_count);
-    //     cudaFree(d_probe_queries);
-    //     cudaFree(d_probe_query_offsets);
-    //     cudaFree(d_probe_query_probe_indices);
-    //     cudaFree(d_query_norm);
-    //     cudaFree(d_cluster_vector_norm);
-    //     free(block_vector_offset);
-    //     return;
-    // }
-
-    // printf("[DEBUG] Before calling cuda_cos_topk_warpsort_fine_v3_fixed_probe:\n");
-    // printf("[DEBUG]   d_probe_query_offsets=%p\n", d_probe_query_offsets);
-    // printf("[DEBUG]   d_probe_queries=%p\n", d_probe_queries);
-    // fflush(stdout);
     
     cuda_cos_topk_warpsort_fine_v3_fixed_probe(
         d_query_group,
@@ -197,8 +150,8 @@ void fine_screen_top_n_blocks(
         d_topk_index_final,  // 最终输出：[n_query][k]
         d_topk_dist_final,   // 最终输出：[n_query][k]
         
-        candidate_dist,
-        candidate_index,
+        nullptr,
+        nullptr,
 
         n_query,
         total_vectors,  // n_total_clusters

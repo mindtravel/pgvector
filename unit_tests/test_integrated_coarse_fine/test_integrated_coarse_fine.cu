@@ -129,10 +129,8 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
                                    int n_cluster_per_query,
                                    int nprobes,
                                    int** out_index,
-                                   float** out_dist,
-
-                                   int** coarse_indices,
-                                   float** coarse_dists) {
+                                   float** out_dist
+                                ) {
     const int n_query = config.n_query;
     const int n_dim = config.vector_dim;
     const int n_clusters = config.n_clusters;
@@ -152,10 +150,6 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
             }
             std::partial_sort(tmp.begin(), tmp.begin() + n_cluster_per_query, tmp.end(),
                               [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
-            for (int k = 0; k < n_cluster_per_query; ++k) {
-                coarse_indices[qi][k] = tmp[k].idx;
-                coarse_dists[qi][k] = tmp[k].dist;
-            }
 
             // fine: iterate vectors inside selected clusters
             fine_buffer.clear();
@@ -239,12 +233,7 @@ static std::vector<double> run_case(const BenchmarkCase& config, int total_vecto
     // 注意：输出大小应该是 topk（最终输出的topk数量），不是 nprobes（粗筛的cluster数）
     int** cpu_idx = (int**)malloc_vector_list(config.n_query, config.topk, sizeof(int));
     float** cpu_dist = (float**)malloc_vector_list(config.n_query, config.topk, sizeof(float));
-    
-    // CPU 粗筛结果
-    int** cpu_coarse_indices = (int**)malloc_vector_list(config.n_query, config.nprobes, sizeof(int));
-    float** cpu_coarse_dists = (float**)malloc_vector_list(config.n_query, config.nprobes, sizeof(float));
-    int** gpu_coarse_indices = (int**)malloc_vector_list(config.n_query, config.nprobes, sizeof(int));
-    float** gpu_coarse_dists = (float**)malloc_vector_list(config.n_query, config.nprobes, sizeof(float));
+
 
     double cpu_ms = 0.0;
     MEASURE_MS_AND_SAVE("cpu耗时:", cpu_ms,
@@ -253,24 +242,9 @@ static std::vector<double> run_case(const BenchmarkCase& config, int total_vecto
                                config.topk,     // nprobes: 最终输出的topk数量
                                cpu_idx,
                                cpu_dist,
-
-                               cpu_coarse_indices,
-                               cpu_coarse_dists
         );
     );
     
-    // 输出CPU粗筛结果
-    // if (config.n_query <= 4) {
-    //     COUT_ENDL("=== CPU Coarse Search Results ===");
-    //     for (int qi = 0; qi < config.n_query; ++qi) {
-    //         COUT_VAL("Query ", qi, " coarse clusters: ");
-    //         for (int k = 0; k < config.nprobes; ++k) {
-    //             COUT_VAL("(cluster=", cpu_coarse_indices[qi][k], " dist=", cpu_coarse_dists[qi][k], ") ");
-    //         }
-    //         COUT_ENDL();
-    //     }
-    // }
-
     auto run_pipeline = [&](bool use_balance, const char* tag, int** topk_index,
                             float** topk_dist) -> double {
         int* n_isnull = static_cast<int*>(malloc(config.n_query * sizeof(int)));
@@ -286,9 +260,6 @@ static std::vector<double> run_case(const BenchmarkCase& config, int total_vecto
                 topk_dist,
                 topk_index,
                 n_isnull,
-                
-                gpu_coarse_indices,
-                gpu_coarse_dists,
 
                 config.n_query,
                 config.vector_dim,
@@ -354,9 +325,7 @@ static std::vector<double> run_case(const BenchmarkCase& config, int total_vecto
             // COUT_ENDL();
         }
     }
-    bool pass_coarse = compare_set_2D<int>(cpu_coarse_indices, gpu_coarse_indices, config.n_query, config.nprobes, 0.0f) &&
-                       compare_set_2D<float>(cpu_coarse_dists, gpu_coarse_dists, config.n_query, config.nprobes, 1e-3f);
-    printf("pass_coarse: %d\n", pass_coarse);
+    
     bool pass_unbalanced = compare_set_2D<int>(cpu_idx, gpu_idx_unbalanced, config.n_query, config.topk, 0.0f) &&
                           compare_set_2D<float>(cpu_dist, gpu_dist_unbalanced, config.n_query, config.topk, 1e-3f);
     // bool pass_balanced = compare_set_2D<int>(cpu_idx, gpu_idx_balanced, config.n_query, config.topk, 0.0f) &&
@@ -373,11 +342,6 @@ static std::vector<double> run_case(const BenchmarkCase& config, int total_vecto
     free_vector_list((void**)gpu_dist_unbalanced);
     // free_vector_list((void**)gpu_idx_balanced);
     // free_vector_list((void**)gpu_dist_balanced);
-
-    free_vector_list((void**)cpu_coarse_indices);
-    free_vector_list((void**)cpu_coarse_dists);
-    free_vector_list((void**)gpu_coarse_indices);
-    free_vector_list((void**)gpu_coarse_dists);
 
     double speedup_unbalanced = (gpu_ms_unbalanced > 1e-6) ? (cpu_ms / gpu_ms_unbalanced) : 0.0;
     // double speedup_balanced = (gpu_ms_balanced > 1e-6) ? (cpu_ms / gpu_ms_balanced) : 0.0;
