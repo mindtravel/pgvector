@@ -69,21 +69,21 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
     HeapTuple tuple;
     
 
-    elog(LOG, "batch_vector_search_c: 开始批量向量搜索");
+    // elog(LOG, "batch_vector_search_c: 开始批量向量搜索");
     
     /* 获取参数 */
     index_oid           = PG_GETARG_OID(0);
     query_vectors_array = PG_GETARG_ARRAYTYPE_P(1);
     k                   = PG_GETARG_INT32(2);
 
-    elog(LOG, "batch_vector_search_c: 参数获取完成 - index_oid=%u, k=%d", index_oid, k);
+    // elog(LOG, "batch_vector_search_c: 参数获取完成 - index_oid=%u, k=%d", index_oid, k);
     
     /* 解析查询向量数组结构，获取向量数量 */
     n_querys = ArrayGetNItems(
         ARR_NDIM(query_vectors_array),
         ARR_DIMS(query_vectors_array)
     );
-    elog(LOG, "batch_vector_search_c: 向量数量 = %d", n_querys);
+    // elog(LOG, "batch_vector_search_c: 向量数量 = %d", n_querys);
     
     /* 解析向量内容，获取向量维度 */
     get_typlenbyvalalign(
@@ -98,7 +98,7 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
 
     if (nelems > 0 && !nulls[0]) {
         vec_dim = DatumGetVector(elems[0])->dim;
-        elog(LOG, "batch_vector_search_c: 向量维度 = %d", vec_dim);
+        // elog(LOG, "batch_vector_search_c: 向量维度 = %d", vec_dim);
     } else {
         elog(ERROR, "batch_vector_search_c: 无法获取向量维度，数组为空或第一个向量为NULL");
     }
@@ -132,7 +132,7 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         
         /* 设置批量键指向的数据区域 */ 
         ScanKeyBatchAddData(batch_keys, elems, nulls, nelems);
-        elog(LOG, "batch_vector_search_c: 所有向量添加完成");
+        // elog(LOG, "batch_vector_search_c: 所有向量添加完成");
         
         // 创建索引扫描
         index = index_open(index_oid, AccessShareLock);
@@ -142,7 +142,7 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
             /* batch_keys 由 SRF 内存上下文自动清理 */
             elog(ERROR, "batch_vector_search_c: ivfflatbatchbeginscan 失败");
         }
-        elog(LOG, "batch_vector_search_c: 索引扫描创建完成");
+        // elog(LOG, "batch_vector_search_c: 索引扫描创建完成");
         
         // 一次性获取所有查询的所有结果
         max_results = k * n_querys; // 每个查询k个结果 × 查询数量
@@ -151,14 +151,14 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         result_nulls = palloc(max_values * sizeof(bool));
         returned_tuples = 0;
         
-        elog(LOG, "batch_vector_search_c: 开始批量处理，预期最大结果数: %d", max_results);
+        // elog(LOG, "batch_vector_search_c: 开始批量处理，预期最大结果数: %d", max_results);
         
         // 调用批量扫描函数，一次性处理所有查询
         ivfflatbatchgettuple(scan, ForwardScanDirection, 
                             result_values, result_nulls, 
                             max_values, &returned_tuples, k);
         
-        elog(LOG, "batch_vector_search_c: 批量处理完成，返回结果数: %d", returned_tuples);
+        // elog(LOG, "batch_vector_search_c: 批量处理完成，返回结果数: %d", returned_tuples);
         
         // 保存结果数据到状态中
         state->result_values = result_values;
@@ -178,7 +178,7 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
             elog(ERROR, "return type must be a row type");
         funcctx->tuple_desc = BlessTupleDesc(funcctx->tuple_desc);
         
-        elog(LOG, "batch_vector_search_c: 初始化完成，准备返回 %d 个结果", returned_tuples);
+        // elog(LOG, "batch_vector_search_c: 初始化完成，准备返回 %d 个结果", returned_tuples);
     }
     
     // 每次调用返回一个结果
@@ -212,8 +212,8 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         tuple_nulls[1] = state->result_nulls[base_idx + 1];
         tuple_nulls[2] = state->result_nulls[base_idx + 2];
         
-        elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=%d, distance=%.6f", 
-             state->current_result, DatumGetInt32(values[0]), DatumGetInt32(values[1]), DatumGetFloat8(values[2]));
+        // elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=%d, distance=%.6f", 
+        //      state->current_result, DatumGetInt32(values[0]), DatumGetInt32(values[1]), DatumGetFloat8(values[2]));
     } else {
         // 处理null结果
         values[0] = (Datum)0;

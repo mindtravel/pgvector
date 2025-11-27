@@ -374,65 +374,9 @@ __global__ __launch_bounds__(256, 1) void indexed_inner_product_with_topk_kernel
     queue.store(row_dist, row_idx);
 }
 
-// 显式实例化：v3版本（一个block处理8个query）
-// Capacity 64, QueriesPerBlock=8
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 96, 4>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 128, 4>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 200, 4>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-// Capacity 128, QueriesPerBlock=8
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 96, 4>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 128, 4>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 200, 4>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-// Capacity 256, QueriesPerBlock=8
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 96, 4>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 128, 4>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 200, 4>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
-
-// Generic版本，QueriesPerBlock=8
+// 显式实例化（已禁用，只使用v3_fixed_probe版本）
+/*
+// QueriesPerBlock=4
 template __global__ void indexed_inner_product_with_topk_kernel_v3_generic<64, true, 4>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
@@ -451,65 +395,7 @@ template __global__ void indexed_inner_product_with_topk_kernel_v3_generic<256, 
     int, int, int, int,
     float* __restrict__, int* __restrict__);
 
-// 显式实例化：v3_32版本（一个block处理16个query）
-// Capacity 64, QueriesPerBlock=16
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 96, 16>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 128, 16>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<64, true, 200, 16>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-// Capacity 128, QueriesPerBlock=16
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 96, 16>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 128, 16>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<128, true, 200, 16>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-// Capacity 256, QueriesPerBlock=16
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 96, 16>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 128, 16>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
- 
-template __global__ void indexed_inner_product_with_topk_kernel_v3_static<256, true, 200, 16>(
-    float* __restrict__, float* __restrict__, int* __restrict__,
-    float* __restrict__, float* __restrict__,
-    int, int, int,
-    float* __restrict__, int* __restrict__);
-
-// Generic版本，QueriesPerBlock=16
+// QueriesPerBlock=16
 template __global__ void indexed_inner_product_with_topk_kernel_v3_generic<64, true, 16>(
     float* __restrict__, float* __restrict__, int* __restrict__,
     float* __restrict__, float* __restrict__,
@@ -527,6 +413,7 @@ template __global__ void indexed_inner_product_with_topk_kernel_v3_generic<256, 
     float* __restrict__, float* __restrict__,
     int, int, int, int,
     float* __restrict__, int* __restrict__);
+*/
 
 
 

@@ -223,21 +223,21 @@ int main(int argc, char** argv) {
     // metrics.set_num_repeats(1);
     
     // 只测试 warpsort 版本
-    test_cos_distance_topk_with_algorithm(1024, 128, 512, 16, WARP_SORT); /*warmup*/
+        test_cos_distance_topk_with_algorithm(1024, 128, 512, 16, WARP_SORT); /*warmup*/
 
-    COUT_ENDL("测试算法: 全寄存器 Topk");
-    PARAM_3D(n_query, (8, 32, 128, 512, 2048), 
-            n_batch, (128, 512, 2048), /* n_batch < k */
-            n_dim, (512, 1024))   
-    {
-        auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
-            auto result = test_cos_distance_topk_with_algorithm(n_query, n_batch, n_dim, 100, WARP_SORT);
-            all_pass &= (result[0] == 1.0);  // 检查 pass 字段
-            return result;
-        });
-    }
+        COUT_ENDL("测试算法: 全寄存器 Topk");
+        PARAM_3D(n_query, (8, 32, 128, 512, 2048), 
+                n_batch, (128, 512, 2048), /* n_batch < k */
+                n_dim, (512, 1024))   
+        {
+            auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
+                auto result = test_cos_distance_topk_with_algorithm(n_query, n_batch, n_dim, 100, WARP_SORT);
+                all_pass &= (result[0] == 1.0);  // 检查 pass 字段
+                return result;
+            });
+        }
 
-    test_cos_distance_topk_with_algorithm(2048, 2048, 1024, 100, WARP_SORT); /*warmup*/
+        test_cos_distance_topk_with_algorithm(2048, 2048, 1024, 100, WARP_SORT); /*warmup*/
 
     metrics.print_table();
 

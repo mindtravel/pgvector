@@ -56,9 +56,9 @@ IvfflatInit(void)
 #ifdef USE_CUDA
 	// 验证cuda代码是否被正确编译
 	if(!cuda_is_available()){
-		elog(LOG, "CUDA is not available, GPU features will be disabled!");
+		// elog(LOG, "CUDA is not available, GPU features will be disabled!");
 	} else {
-		elog(LOG, "CUDA is available, GPU features are enabled!");
+		// elog(LOG, "CUDA is available, GPU features are enabled!");
 	}
 #endif
 	MarkGUCPrefixReserved("ivfflat");

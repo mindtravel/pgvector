@@ -346,8 +346,9 @@ void cuda_cos_topk_warpsort_fine_v3_fixed_probe(
     float** candidate_dist,
     int** candidate_index,
 
-    int n_probes,
     int n_query,
+    int n_total_clusters,
+    int n_probes,
     int n_dim,
     int k
 );

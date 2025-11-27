@@ -79,7 +79,7 @@ __global__ void select_k_kernel(
         
         /* 如果索引有效，则添加到队列；否则添加 dummy 值 */
         if (i < len) {
-            queue.add(row_input[i], static_cast<IdxT>(i));
+        queue.add(row_input[i], static_cast<IdxT>(i));
         } else {
             /* 使用 WarpSort 基类的静态方法获取正确的dummy值 */
             using BaseWarpSort = WarpSort<Capacity, Ascending, T, IdxT>;
@@ -95,9 +95,9 @@ __global__ void select_k_kernel(
     __syncwarp();
     
     /* 将 queue 中的数存储到显存中（所有线程都要调用）*/
-    T* row_out_val = output_vals + row * k;
-    IdxT* row_out_idx = output_idx + row * k;
-    queue.store(row_out_val, row_out_idx);
+        T* row_out_val = output_vals + row * k;
+        IdxT* row_out_idx = output_idx + row * k;
+        queue.store(row_out_val, row_out_idx);
 }
 
 /**

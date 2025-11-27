@@ -148,69 +148,20 @@ inline void launch_indexed_inner_product_with_topk_kernel_v2(
     int* __restrict__ d_topk_index,
     cudaStream_t stream = 0) {
 
-    auto launch_generic = [&]() {
-        indexed_inner_product_with_topk_kernel_v2_generic<Capacity, Ascending><<<grid, block, 0, stream>>>(
-            d_query_group,
-            d_cluster_vector,
-            d_query_index,
-            d_query_norm,
-            d_cluster_vector_norm,
-            n_selected_querys,
-            n_selected_vectors,
-            n_dim,
-            k,
-            d_topk_dist,
-            d_topk_index
-        );
-    };
-
-    switch (n_dim) {
-        case 96:
-            indexed_inner_product_with_topk_kernel_v2_static<Capacity, Ascending, 96><<<grid, block, 0, stream>>>(
-                d_query_group,
-                d_cluster_vector,
-                d_query_index,
-                d_query_norm,
-                d_cluster_vector_norm,
-                n_selected_querys,
-                n_selected_vectors,
-                k,
-                d_topk_dist,
-                d_topk_index
-            );
-            break;
-        case 128:
-            indexed_inner_product_with_topk_kernel_v2_static<Capacity, Ascending, 128><<<grid, block, 0, stream>>>(
-                d_query_group,
-                d_cluster_vector,
-                d_query_index,
-                d_query_norm,
-                d_cluster_vector_norm,
-                n_selected_querys,
-                n_selected_vectors,
-                k,
-                d_topk_dist,
-                d_topk_index
-            );
-            break;
-        case 200:
-            indexed_inner_product_with_topk_kernel_v2_static<Capacity, Ascending, 200><<<grid, block, 0, stream>>>(
-                d_query_group,
-                d_cluster_vector,
-                d_query_index,
-                d_query_norm,
-                d_cluster_vector_norm,
-                n_selected_querys,
-                n_selected_vectors,
-                k,
-                d_topk_dist,
-                d_topk_index
-            );
-            break;
-        default:
-            launch_generic();
-            break;
-    }
+    // 统一使用 generic 版本，支持任意维度
+    indexed_inner_product_with_topk_kernel_v2_generic<Capacity, Ascending><<<grid, block, 0, stream>>>(
+        d_query_group,
+        d_cluster_vector,
+        d_query_index,
+        d_query_norm,
+        d_cluster_vector_norm,
+        n_selected_querys,
+        n_selected_vectors,
+        n_dim,
+        k,
+        d_topk_dist,
+        d_topk_index
+    );
 }
 
 /**
@@ -246,69 +197,20 @@ inline void launch_indexed_inner_product_with_topk_kernel_v3(
     /* 计算grid配置：每个block处理QueriesPerBlock个query */
     dim3 grid(1, (n_selected_querys + QueriesPerBlock - 1) / QueriesPerBlock, 1);
 
-    auto launch_generic = [&]() {
-        indexed_inner_product_with_topk_kernel_v3_generic<Capacity, Ascending, QueriesPerBlock><<<grid, block, 0, stream>>>(
-            d_query_group,
-            d_cluster_vector,
-            d_query_index,
-            d_query_norm,
-            d_cluster_vector_norm,
-            n_selected_querys,
-            n_selected_vectors,
-            n_dim,
-            k,
-            d_topk_dist,
-            d_topk_index
-        );
-    };
-
-    switch (n_dim) {
-        case 96:
-            indexed_inner_product_with_topk_kernel_v3_static<Capacity, Ascending, 96, QueriesPerBlock><<<grid, block, 0, stream>>>(
-                d_query_group,
-                d_cluster_vector,
-                d_query_index,
-                d_query_norm,
-                d_cluster_vector_norm,
-                n_selected_querys,
-                n_selected_vectors,
-                k,
-                d_topk_dist,
-                d_topk_index
-            );
-            break;
-        case 128:
-            indexed_inner_product_with_topk_kernel_v3_static<Capacity, Ascending, 128, QueriesPerBlock><<<grid, block, 0, stream>>>(
-                d_query_group,
-                d_cluster_vector,
-                d_query_index,
-                d_query_norm,
-                d_cluster_vector_norm,
-                n_selected_querys,
-                n_selected_vectors,
-                k,
-                d_topk_dist,
-                d_topk_index
-            );
-            break;
-        case 200:
-            indexed_inner_product_with_topk_kernel_v3_static<Capacity, Ascending, 200, QueriesPerBlock><<<grid, block, 0, stream>>>(
-                d_query_group,
-                d_cluster_vector,
-                d_query_index,
-                d_query_norm,
-                d_cluster_vector_norm,
-                n_selected_querys,
-                n_selected_vectors,
-                k,
-                d_topk_dist,
-                d_topk_index
-            );
-            break;
-        default:
-            launch_generic();
-            break;
-    }
+    // 统一使用 generic 版本，支持任意维度
+    indexed_inner_product_with_topk_kernel_v3_generic<Capacity, Ascending, QueriesPerBlock><<<grid, block, 0, stream>>>(
+        d_query_group,
+        d_cluster_vector,
+        d_query_index,
+        d_query_norm,
+        d_cluster_vector_norm,
+        n_selected_querys,
+        n_selected_vectors,
+        n_dim,
+        k,
+        d_topk_dist,
+        d_topk_index
+    );
 }
 
 /**
@@ -356,7 +258,8 @@ void launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe(
     int* __restrict__ d_probe_query_probe_indices,
     float* __restrict__ d_query_norm,
     float* __restrict__ d_cluster_vector_norm,
-    int n_probes,
+    int n_total_clusters,  // 总的cluster数量（用于grid.x和检查probe_id）
+    int n_probes,  // 每个query的probe数量（用于检查probe_index_in_query和计算输出位置）
     int max_queries_per_probe,
     int k,
     float* __restrict__ d_topk_dist,
@@ -364,4 +267,5 @@ void launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe(
     cudaStream_t stream);
 
 #endif
+
 

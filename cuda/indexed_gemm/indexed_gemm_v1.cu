@@ -459,7 +459,8 @@ __global__ void indexed_inner_product_with_topk_kernel(
     }
 }
 
-// 显式实例化
+// 显式实例化（已禁用，只使用v3_fixed_probe版本）
+/*
 template __global__ void indexed_inner_product_with_topk_kernel<64, true>(
     const float* __restrict__, const float* __restrict__, const int* __restrict__, const int* __restrict__,
     const int* __restrict__, const int* __restrict__, const float* __restrict__, const float* __restrict__,
@@ -477,3 +478,4 @@ template __global__ void indexed_inner_product_with_topk_kernel<256, true>(
     const int* __restrict__, const int* __restrict__, const float* __restrict__, const float* __restrict__,
     int, int, int, int, int,
     float* __restrict__, int* __restrict__);
+*/

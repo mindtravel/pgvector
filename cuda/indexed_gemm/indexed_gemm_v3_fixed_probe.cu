@@ -160,151 +160,6 @@ __device__ __forceinline__ float dot_product_accumulate(
 }
 
 /**
- * 固定 probe 版本的流式内积计算 + top-k选择kernel
- * 
- * 核心设计：
- * - gridDim.x = n_probes（每个 block 处理一个 probe）
- * - gridDim.y = query batch 数量（每个 block 处理一个 probe 的一个 query batch）
- * - 每个 warp 处理该 probe 的一个 query
- * - 利用 L2 cache：多个 query 访问相同的 probe 向量数据
- * 
- * @tparam Capacity warp-sort queue的容量
- * @tparam Ascending 是否升序
- * @tparam Dim 向量维度（编译期常量）
- * @tparam QueriesPerBlock 每个 block 处理的 query 数量
- */
-template<int Capacity, bool Ascending, int Dim, int QueriesPerBlock>
-__global__ __launch_bounds__(256, 1) 
-void indexed_inner_product_with_topk_kernel_v3_fixed_probe_static(
-    float* __restrict__ d_query_group,
-    float* __restrict__ d_cluster_vector,
-    
-    // Probe 信息
-    int* __restrict__ d_probe_vector_offset,     // [n_probes] - 每个 probe 在 d_cluster_vector 中的起始位置
-    int* __restrict__ d_probe_vector_count,      // [n_probes] - 每个 probe 的向量数量
-    
-    // Probe-Query 映射（CSR 格式）
-    int* __restrict__ d_probe_queries,           // [total_queries] - 所有 probe 的 query 列表连续存储
-    int* __restrict__ d_probe_query_offsets,    // [n_probes + 1] - 每个 probe 的 query 列表起始位置
-    int* __restrict__ d_probe_query_probe_indices, // [total_queries] - 每个probe-query对中probe在query中的索引
-    
-    float* __restrict__ d_query_norm,
-    float* __restrict__ d_cluster_vector_norm,
-    
-    int n_probes,
-    int max_queries_per_probe,
-    int k,
-    
-    float* __restrict__ d_topk_dist,  // [n_query][n_probes][k]
-    int* __restrict__ d_topk_index     // [n_query][n_probes][k]
-) {
-    static_assert((Dim % 4) == 0, "Dim must be multiple of 4 for aligned loads");
-    static_assert(QueriesPerBlock > 0 && QueriesPerBlock <= 32, 
-                  "QueriesPerBlock must be between 1 and 32");
-    
-    // Shared memory 缓存 query norm
-    __shared__ float s_query_norm[QueriesPerBlock];
-    
-    // 1. 获取 probe_id
-    const int probe_id = blockIdx.x;
-    if (probe_id >= n_probes) return;
-    
-    // 2. 获取 probe 的向量范围
-    const int vector_offset = d_probe_vector_offset[probe_id];
-    const int vector_count = d_probe_vector_count[probe_id];
-    
-    // 3. 获取 probe 的 query 列表范围
-    const int probe_query_start = d_probe_query_offsets[probe_id];
-    const int probe_query_end = d_probe_query_offsets[probe_id + 1];
-    const int probe_n_queries = probe_query_end - probe_query_start;
-    
-    // 4. 计算当前 batch 在 probe 的 query 列表中的位置
-    const int query_batch_id = blockIdx.y;
-    const int batch_query_start = query_batch_id * QueriesPerBlock;
-    const int batch_query_end = min(batch_query_start + QueriesPerBlock, probe_n_queries);
-    
-    // 5. 获取当前 warp 对应的 query
-    const int warp_id = threadIdx.x / kWarpSize;
-    const int lane = laneId();
-    const int local_query_idx = batch_query_start + warp_id;
-    
-    // 边界检查：当前 warp 是否在有效范围内
-    if (local_query_idx >= batch_query_end) return;
-    
-    // 6. 获取 query 的全局 ID 和 probe 在 query 中的索引
-    const int probe_query_idx = probe_query_start + local_query_idx;
-    const int query_global_id = d_probe_queries[probe_query_idx];
-    const int probe_index_in_query = d_probe_query_probe_indices[probe_query_idx];
-    
-    // 边界检查
-    if (probe_index_in_query < 0 || probe_index_in_query >= n_probes) {
-        return;  // 无效的probe索引
-    }
-    
-    // 7. 加载 query norm 到 shared memory
-    if (warp_id < QueriesPerBlock && lane == 0) {
-        s_query_norm[warp_id] = d_query_norm[query_global_id];
-    }
-    __syncthreads();
-    
-    // 检查 query norm 是否有效（所有线程都需要检查）
-    if (warp_id < QueriesPerBlock && s_query_norm[warp_id] < 1e-6f) {
-        // 如果 norm 无效，输出 dummy 值
-        // 输出位置：[n_query][n_probes][k]
-        float* row_dist = d_topk_dist + (query_global_id * n_probes + probe_index_in_query) * k;
-        int* row_idx = d_topk_index + (query_global_id * n_probes + probe_index_in_query) * k;
-        if (lane == 0) {
-            for (int i = 0; i < k; ++i) {
-                row_dist[i] = FLT_MAX;
-                row_idx[i] = -1;
-            }
-        }
-        return;
-    }
-    
-    const float* query_global_ptr = d_query_group + query_global_id * Dim;
-    
-    using WarpSortBase = pgvector::warpsort::WarpSort<Capacity, Ascending, float, int>;
-    const float dummy_val = WarpSortBase::kDummy();
-    
-    WarpSortFiltered<Capacity, Ascending, float, int> queue(k);
-    
-    // 8. 处理当前 probe 的所有向量（从 vector_offset 开始，共 vector_count 个）
-    int max_iterations = (vector_count + kWarpSize - 1) / kWarpSize;
-    
-    for (int iter = 0; iter < max_iterations; ++iter) {
-        int vec_idx = vector_offset + iter * kWarpSize + lane;
-        bool has_valid_vec = (vec_idx < vector_offset + vector_count);
-        
-        if (!has_valid_vec) {
-            queue.add(dummy_val, -1);
-        } else {
-            const float* vec_ptr = d_cluster_vector + vec_idx * Dim;
-            float dot_product = dot_product_tiled<Dim>(query_global_ptr, vec_ptr);
-            
-            float data_norm = d_cluster_vector_norm[vec_idx];
-            if (data_norm < 1e-6f) {
-                queue.add(dummy_val, -1);
-            } else {
-                float cos_similarity = dot_product / (s_query_norm[warp_id] * data_norm);
-                float cos_distance = 1.0f - cos_similarity;
-                queue.add(cos_distance, vec_idx);
-            }
-        }
-    }
-    
-    __syncwarp();
-    queue.done();
-    __syncwarp();
-    
-    // 9. 输出位置：[n_query][n_probes][k]
-    // 每个probe的结果写入独立位置，避免冲突
-    float* row_dist = d_topk_dist + (query_global_id * n_probes + probe_index_in_query) * k;
-    int* row_idx = d_topk_index + (query_global_id * n_probes + probe_index_in_query) * k;
-    queue.store(row_dist, row_idx);
-}
-
-/**
  * Generic 版本（支持运行时维度）
  */
 template<int Capacity, bool Ascending, int QueriesPerBlock>
@@ -319,7 +174,8 @@ void indexed_inner_product_with_topk_kernel_v3_fixed_probe_generic(
     int* __restrict__ d_probe_query_probe_indices,
     float* __restrict__ d_query_norm,
     float* __restrict__ d_cluster_vector_norm,
-    int n_probes,
+    int n_total_clusters,  // 总的cluster数量（用于检查probe_id）
+    int n_probes,  // 每个query的probe数量（用于检查probe_index_in_query）
     int max_queries_per_probe,
     int n_dim,
     int k,
@@ -329,7 +185,7 @@ void indexed_inner_product_with_topk_kernel_v3_fixed_probe_generic(
     __shared__ float s_query_norm[QueriesPerBlock];
     
     const int probe_id = blockIdx.x;
-    if (probe_id >= n_probes) return;
+    if (probe_id >= n_total_clusters) return;
     
     const int vector_offset = d_probe_vector_offset[probe_id];
     const int vector_count = d_probe_vector_count[probe_id];
@@ -352,7 +208,7 @@ void indexed_inner_product_with_topk_kernel_v3_fixed_probe_generic(
     const int query_global_id = d_probe_queries[probe_query_idx];
     const int probe_index_in_query = d_probe_query_probe_indices[probe_query_idx];
     
-    // 边界检查
+    // 边界检查：probe_index_in_query 应该在 [0, n_probes) 范围内
     if (probe_index_in_query < 0 || probe_index_in_query >= n_probes) {
         return;  // 无效的probe索引
     }
@@ -460,7 +316,8 @@ void launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe(
     int* __restrict__ d_probe_query_probe_indices,
     float* __restrict__ d_query_norm,
     float* __restrict__ d_cluster_vector_norm,
-    int n_probes,
+    int n_total_clusters,  // 总的cluster数量（用于grid.x和检查probe_id）
+    int n_probes,  // 每个query的probe数量（用于检查probe_index_in_query和计算输出位置）
     int max_queries_per_probe,
     int k,
     float* __restrict__ d_topk_dist,
@@ -471,100 +328,37 @@ void launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe(
     // 直接从 max_queries_per_probe 计算，避免 host-device 数据复制
     int max_query_batches = (max_queries_per_probe + QueriesPerBlock - 1) / QueriesPerBlock;
     
-    dim3 grid(n_probes, max_query_batches, 1);
+    dim3 grid(n_total_clusters, max_query_batches, 1);
     
-    auto launch_generic = [&]() {
-        indexed_inner_product_with_topk_kernel_v3_fixed_probe_generic<Capacity, Ascending, QueriesPerBlock>
-            <<<grid, block, 0, stream>>>(
-            d_query_group,
-            d_cluster_vector,
-            d_probe_vector_offset,
-            d_probe_vector_count,
-            d_probe_queries,
-            d_probe_query_offsets,
-            d_probe_query_probe_indices,
-            d_query_norm,
-            d_cluster_vector_norm,
-            n_probes,
-            max_queries_per_probe,
-            n_dim,
-            k,
-            d_topk_dist,
-            d_topk_index
-        );
-    };
-    
-    switch (n_dim) {
-        case 96:
-            indexed_inner_product_with_topk_kernel_v3_fixed_probe_static<Capacity, Ascending, 96, QueriesPerBlock>
-                <<<grid, block, 0, stream>>>(
-                d_query_group,
-                d_cluster_vector,
-                d_probe_vector_offset,
-                d_probe_vector_count,
-                d_probe_queries,
-                d_probe_query_offsets,
-                d_probe_query_probe_indices,
-                d_query_norm,
-                d_cluster_vector_norm,
-                n_probes,
-                max_queries_per_probe,
-                k,
-                d_topk_dist,
-                d_topk_index
-            );
-            break;
-        case 128:
-            indexed_inner_product_with_topk_kernel_v3_fixed_probe_static<Capacity, Ascending, 128, QueriesPerBlock>
-                <<<grid, block, 0, stream>>>(
-                d_query_group,
-                d_cluster_vector,
-                d_probe_vector_offset,
-                d_probe_vector_count,
-                d_probe_queries,
-                d_probe_query_offsets,
-                d_probe_query_probe_indices,
-                d_query_norm,
-                d_cluster_vector_norm,
-                n_probes,
-                max_queries_per_probe,
-                k,
-                d_topk_dist,
-                d_topk_index
-            );
-            break;
-        case 200:
-            indexed_inner_product_with_topk_kernel_v3_fixed_probe_static<Capacity, Ascending, 200, QueriesPerBlock>
-                <<<grid, block, 0, stream>>>(
-                d_query_group,
-                d_cluster_vector,
-                d_probe_vector_offset,
-                d_probe_vector_count,
-                d_probe_queries,
-                d_probe_query_offsets,
-                d_probe_query_probe_indices,
-                d_query_norm,
-                d_cluster_vector_norm,
-                n_probes,
-                max_queries_per_probe,
-                k,
-                d_topk_dist,
-                d_topk_index
-            );
-            break;
-        default:
-            launch_generic();
-            break;
-    }
+    // 统一使用 generic 版本，支持任意维度
+    indexed_inner_product_with_topk_kernel_v3_fixed_probe_generic<Capacity, Ascending, QueriesPerBlock>
+        <<<grid, block, 0, stream>>>(
+        d_query_group,
+        d_cluster_vector,
+        d_probe_vector_offset,
+        d_probe_vector_count,
+        d_probe_queries,
+        d_probe_query_offsets,
+        d_probe_query_probe_indices,
+        d_query_norm,
+        d_cluster_vector_norm,
+        n_total_clusters,
+        n_probes,
+        max_queries_per_probe,
+        n_dim,
+        k,
+        d_topk_dist,
+        d_topk_index
+    );
 }
 
 // 显式实例化常用的模板参数组合
 template void launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe<64, true, 8>(
-    dim3, int, float*, float*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
+    dim3, int, float*, float*, int*, int*, int*, int*, int*, float*, float*, int, int, int, int, float*, int*, cudaStream_t);
 
 template void launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe<128, true, 8>(
-    dim3, int, float*, float*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
+    dim3, int, float*, float*, int*, int*, int*, int*, int*, float*, float*, int, int, int, int, float*, int*, cudaStream_t);
 
 template void launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe<256, true, 8>(
-    dim3, int, float*, float*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
+    dim3, int, float*, float*, int*, int*, int*, int*, int*, float*, float*, int, int, int, int, float*, int*, cudaStream_t);
 

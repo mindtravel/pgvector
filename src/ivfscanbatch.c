@@ -25,7 +25,7 @@ ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys)
     IvfflatBatchScanOpaque so;
     MemoryContext tmpCtx;
 
-    elog(LOG, "ivfflatbatchbeginscan: 开始批量扫描, nkeys=%d", batch_keys->nkeys);
+    // elog(LOG, "ivfflatbatchbeginscan: 开始批量扫描, nkeys=%d", batch_keys->nkeys);
 
     /* 创建扫描描述符 */
     scan = RelationGetIndexScan(index, batch_keys->nkeys, norderbys);
@@ -74,7 +74,7 @@ ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys)
     /* 设置scan->opaque */
     scan->opaque = so;
 
-    elog(LOG, "ivfflatbatchbeginscan: 批量扫描初始化完成");
+    // elog(LOG, "ivfflatbatchbeginscan: 批量扫描初始化完成");
     return scan;
 }
 
@@ -154,7 +154,7 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
         }
     }
     
-    elog(LOG, "ProcessBatchQueriesGPU: 生成了 %d 个假结果", so->result_buffer->total_results);
+    // elog(LOG, "ProcessBatchQueriesGPU: 生成了 %d 个假结果", so->result_buffer->total_results);
 }
 
 void
@@ -163,8 +163,8 @@ GetBatchResults(BatchBuffer* buffer, int query_index, int k, Datum* values, bool
     int i;
     int count = 0;
     
-    elog(LOG, "GetBatchResults: buffer=%p, query_index=%d, k=%d, total_results=%d", 
-         buffer, query_index, k, buffer ? buffer->total_results : 0);
+    // elog(LOG, "GetBatchResults: buffer=%p, query_index=%d, k=%d, total_results=%d", 
+    //      buffer, query_index, k, buffer ? buffer->total_results : 0);
     
     if (buffer == NULL || buffer->total_results == 0) {
         *returned_count = 0;

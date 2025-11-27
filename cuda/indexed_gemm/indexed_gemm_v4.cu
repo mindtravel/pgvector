@@ -308,7 +308,8 @@ void launch_indexed_inner_product_with_topk_kernel_v4(
     }
 }
 
-// 显式实例化v4版本的launch函数
+// 显式实例化（已禁用，只使用v3_fixed_probe版本）
+/*
 template void launch_indexed_inner_product_with_topk_kernel_v4<64, true, 4>(
     dim3 block,
     int n_dim,
@@ -353,4 +354,5 @@ template void launch_indexed_inner_product_with_topk_kernel_v4<256, true, 4>(
     float* __restrict__ d_topk_dist,
     int* __restrict__ d_topk_index,
     cudaStream_t stream);
+*/
 
