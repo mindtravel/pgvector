@@ -9,9 +9,9 @@ set(SOURCES
 # 创建可执行文件
 add_executable(test_fusion_cos_topk ${SOURCES})
 
-# 链接共享库
+# 链接共享库（只链接粗筛库，不需要精筛代码）
 target_link_libraries(test_fusion_cos_topk 
-    fusion_cos_topk_warpsort_lib
+    fusion_cos_topk_warpsort_coarse_lib
     l2norm_lib
 )
 

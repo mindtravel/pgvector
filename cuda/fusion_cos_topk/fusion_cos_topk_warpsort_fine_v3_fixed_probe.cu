@@ -156,16 +156,8 @@ void cuda_cos_topk_warpsort_fine_v3_fixed_probe(
 
         // 缓冲区：按query组织的结果 [n_query][n_probes][k]
         // kernel会直接写入这个格式，不需要重组
-        cudaError_t alloc_err1 = cudaMalloc(&d_topk_dist_probe, n_query * n_probes * k * sizeof(float));
-        cudaError_t alloc_err2 = cudaMalloc(&d_topk_index_probe, n_query * n_probes * k * sizeof(int));
-        
-        if (alloc_err1 != cudaSuccess || alloc_err2 != cudaSuccess) {
-            printf("[ERROR] Failed to allocate device memory: dist_err=%s, idx_err=%s\n",
-                cudaGetErrorString(alloc_err1), cudaGetErrorString(alloc_err2));
-            if (d_topk_dist_probe) cudaFree(d_topk_dist_probe);
-            if (d_topk_index_probe) cudaFree(d_topk_index_probe);
-            return;
-        }
+        cudaMalloc(&d_topk_dist_probe, n_query * n_probes * k * sizeof(float));
+        cudaMalloc(&d_topk_index_probe, n_query * n_probes * k * sizeof(int));
     
         // 初始化输出内存为无效值（FLT_MAX 和 -1）
         dim3 init_block(512);
@@ -195,15 +187,6 @@ void cuda_cos_topk_warpsort_fine_v3_fixed_probe(
         // grid.x 使用 n_total_clusters，因为每个 cluster 都是一个 probe
         max_query_batches = (max_queries_per_probe + kQueriesPerBlock - 1) / kQueriesPerBlock;
         dim3 grid(n_total_clusters, max_query_batches, 1);
-        
-    //     // 检查 grid 大小是否超过 CUDA 限制
-    //     if (grid.x > 2147483647 || grid.y > 65535 || grid.z > 65535) {
-    //         printf("[ERROR] Grid size too large: grid=(%d, %d, %d), n_probes=%d, max_queries_per_probe=%d, max_query_batches=%d\n",
-    //                grid.x, grid.y, grid.z, n_probes, max_queries_per_probe, max_query_batches);
-    //         cudaFree(d_topk_dist_probe);
-    //         cudaFree(d_topk_index_probe);
-    //         return;
-    //     }
         
         // 根据capacity选择kernel实例
         if (capacity <= 32) {

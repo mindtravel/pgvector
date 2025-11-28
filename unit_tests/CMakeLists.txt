@@ -64,8 +64,40 @@ set_target_properties(l2norm_lib PROPERTIES
     CUDA_ARCHITECTURES 70
 )
 
-# 创建共享的fusion_cos_topk_warpsort库，避免重复编译
-# 被test_fusion_cos_topk和test_integrated_coarse_fine使用
+# 创建共享的fusion_cos_topk_warpsort粗筛库（只包含粗筛实现）
+# 被以下测试使用：
+#   - test_fusion_cos_topk (只需要粗筛)
+# 
+# 包含的文件：
+#   - fusion_cos_topk_warpsort.cu: 粗筛实现
+add_library(fusion_cos_topk_warpsort_coarse_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
+)
+target_include_directories(fusion_cos_topk_warpsort_coarse_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+)
+set_target_properties(fusion_cos_topk_warpsort_coarse_lib PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    CUDA_ARCHITECTURES 70
+)
+target_link_libraries(fusion_cos_topk_warpsort_coarse_lib 
+    PUBLIC
+    l2norm_lib 
+    cublas
+)
+
+# 创建共享的fusion_cos_topk_warpsort完整库（包含粗筛和精筛）
+# 被以下测试使用：
+#   - test_fusion_cos_topk_fine_v3_fixed_probe
+#   - test_integrated_coarse_fine (通过fine_screen_top_n.cu间接使用)
+# 
+# 包含的文件：
+#   - fusion_cos_topk_warpsort.cu: 粗筛实现（已在coarse_lib中，但为了完整性也包含）
+#   - fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu: 固定probe版本的精筛实现
+#   - indexed_gemm_v3_fixed_probe.cu: 固定probe版本的索引矩阵乘法
+#   - warpsort_topk.cu: warp-level top-k选择
 add_library(fusion_cos_topk_warpsort_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu
@@ -76,13 +108,23 @@ target_include_directories(fusion_cos_topk_warpsort_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
     ${CMAKE_CURRENT_SOURCE_DIR}/common
 )
+# CUDA编译选项说明：
+#   CUDA_SEPARABLE_COMPILATION ON: 启用分离编译，允许增量编译和库化
+#   CUDA_RESOLVE_DEVICE_SYMBOLS ON: 在库中解析device符号，减少最终链接时间
+#   CUDA_ARCHITECTURES 70: 只编译SM 7.0，加快编译速度
 set_target_properties(fusion_cos_topk_warpsort_lib PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     CUDA_ARCHITECTURES 70
 )
-# 链接l2norm库和cublas（fusion_cos_topk_warpsort需要l2_norm_kernel和cublas）
-target_link_libraries(fusion_cos_topk_warpsort_lib l2norm_lib cublas)
+# 链接依赖库：
+#   - l2norm_lib: L2范数计算（fusion_cos_topk_warpsort需要l2_norm_kernel）
+#   - cublas: CUDA基础线性代数库（某些操作需要）
+target_link_libraries(fusion_cos_topk_warpsort_lib 
+    PUBLIC
+    l2norm_lib 
+    cublas
+)
 
 # 添加测试子目录
 add_subdirectory(test_vector_normalizer)
@@ -96,6 +138,7 @@ add_subdirectory(test_bitonic)
 add_subdirectory(test_stream_pass_data)
 add_subdirectory(test_final_topk)
 add_subdirectory(test_fusion_cos_topk_fine_v3_fixed_probe)
+add_subdirectory(test_fusion_cos_topk_warpsort_count)
 add_subdirectory(test_integrated_coarse_fine)
 add_subdirectory(test_select_k)
 

@@ -9,6 +9,7 @@
 #include <cfloat>
 #include <cmath>
 #include <random>
+#include <thread>
 
 #include "../../cuda/fusion_cos_topk/fusion_cos_topk.cuh"
 #include "../../cuda/pch.h"
@@ -19,13 +20,13 @@
 #define EPSILON 1e-2f
 
 /**
- * CPU版本余弦距离top-k计算（用于验证）
+ * CPU版本余弦距离top-k计算（用于验证）- 多线程版本
  * 
  * 对于 fixed_probe 版本，需要：
  * 1. 对每个 query，遍历所有 probe
  * 2. 对每个 probe，遍历该 probe 的所有向量
- * 3. 计算余弦距离并选择 top-k
- * 4. 合并所有 probe 的结果，选择全局 top-k
+ * 3. 计算余弦距离并选择 top-k（使用 partial_sort）
+ * 4. 合并所有 probe 的结果，选择全局 top-k（使用 partial_sort）
  */
 void cpu_cos_distance_topk_fine_v3_fixed_probe(
     float** query_vectors,
@@ -48,71 +49,112 @@ void cpu_cos_distance_topk_fine_v3_fixed_probe(
     int n_dim,
     int k
 ) {
-    // 为每个 query 收集所有候选
-    for (int q = 0; q < n_query; q++) {
-        // 为每个 probe 存储候选结果
-        std::vector<std::vector<std::pair<float, int>>> probe_candidates(n_probes);
-        std::vector<std::pair<float, int>> all_candidates;
-        
-        // 直接遍历每个query的每个probe，找到对应的cluster
-        for (int p = 0; p < n_probes; p++) {
-            int cluster_id = query_clusters[q * n_probes + p];
-            if (cluster_id < 0 || cluster_id >= n_total_clusters) continue;
+    // 获取可用线程数
+    unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+    num_threads = std::min(num_threads, static_cast<unsigned int>(n_query));
+    
+    // 每个线程处理一个或多个query
+    auto process_query_range = [&](int start_q, int end_q) {
+        for (int q = start_q; q < end_q; q++) {
+            // 为每个 probe 存储候选结果
+            std::vector<std::vector<std::pair<float, int>>> probe_candidates(n_probes);
+            std::vector<std::pair<float, int>> all_candidates;
             
-            // 遍历该 cluster 的所有向量
-            int vec_start = probe_vector_offset[cluster_id];
-            int vec_end = vec_start + probe_vector_count[cluster_id];
-            
-            float* query = query_vectors[q];
-            float query_n = query_norm[q];
-            
-            for (int v = vec_start; v < vec_end; v++) {
-                float dot_product = 0.0f;
-                const float* vec_ptr = cluster_vectors[v];
-                
-                for (int d = 0; d < n_dim; d++) {
-                    dot_product += query[d] * vec_ptr[d];
-                }
-                
-                float vec_n = cluster_vector_norm[v];
-                if (vec_n < 1e-6f || query_n < 1e-6f) continue;
-                
-                // query_n 和 vec_n 已经是开过根号的L2范数，不需要再开根号
-                float cos_similarity = dot_product / (query_n * vec_n);
-                float cos_distance = 1.0f - cos_similarity;
-                
-                probe_candidates[p].emplace_back(cos_distance, v);
-                all_candidates.emplace_back(cos_distance, v);
-            }
-        }
-        
-        // 为每个 probe 选择 top-k 候选
-        if (candidate_dist != nullptr && candidate_index != nullptr) {
+            // 直接遍历每个query的每个probe，找到对应的cluster
             for (int p = 0; p < n_probes; p++) {
-                std::sort(probe_candidates[p].begin(), probe_candidates[p].end());
-                const int topk_count = std::min(k, static_cast<int>(probe_candidates[p].size()));
-                for (int i = 0; i < topk_count; i++) {
-                    candidate_dist[q][p * k + i] = probe_candidates[p][i].first;
-                    candidate_index[q][p * k + i] = probe_candidates[p][i].second;
-                }
-                for (int i = topk_count; i < k; i++) {
-                    candidate_dist[q][p * k + i] = FLT_MAX;
-                    candidate_index[q][p * k + i] = -1;
+                int cluster_id = query_clusters[q * n_probes + p];
+                if (cluster_id < 0 || cluster_id >= n_total_clusters) continue;
+                
+                // 遍历该 cluster 的所有向量
+                int vec_start = probe_vector_offset[cluster_id];
+                int vec_end = vec_start + probe_vector_count[cluster_id];
+                
+                float* query = query_vectors[q];
+                float query_n = query_norm[q];
+                
+                for (int v = vec_start; v < vec_end; v++) {
+                    float dot_product = 0.0f;
+                    const float* vec_ptr = cluster_vectors[v];
+                    
+                    for (int d = 0; d < n_dim; d++) {
+                        dot_product += query[d] * vec_ptr[d];
+                    }
+                    
+                    float vec_n = cluster_vector_norm[v];
+                    if (vec_n < 1e-6f || query_n < 1e-6f) continue;
+                    
+                    // query_n 和 vec_n 已经是开过根号的L2范数，不需要再开根号
+                    float cos_similarity = dot_product / (query_n * vec_n);
+                    float cos_distance = 1.0f - cos_similarity;
+                    
+                    probe_candidates[p].emplace_back(cos_distance, v);
+                    all_candidates.emplace_back(cos_distance, v);
                 }
             }
+            
+            // 为每个 probe 选择 top-k 候选（使用 partial_sort）
+            if (candidate_dist != nullptr && candidate_index != nullptr) {
+                for (int p = 0; p < n_probes; p++) {
+                    int probe_size = static_cast<int>(probe_candidates[p].size());
+                    if (probe_size > 0) {
+                        int topk_count = std::min(k, probe_size);
+                        // 使用 partial_sort 只排序前 k 个元素
+                        std::partial_sort(
+                            probe_candidates[p].begin(),
+                            probe_candidates[p].begin() + topk_count,
+                            probe_candidates[p].end()
+                        );
+                        for (int i = 0; i < topk_count; i++) {
+                            candidate_dist[q][p * k + i] = probe_candidates[p][i].first;
+                            candidate_index[q][p * k + i] = probe_candidates[p][i].second;
+                        }
+                    }
+                    // 填充剩余位置为无效值
+                    for (int i = probe_size; i < k; i++) {
+                        candidate_dist[q][p * k + i] = FLT_MAX;
+                        candidate_index[q][p * k + i] = -1;
+                    }
+                }
+            }
+            
+            // 使用 partial_sort 选择全局 top-k
+            int all_size = static_cast<int>(all_candidates.size());
+            if (all_size > 0) {
+                int topk_count = std::min(k, all_size);
+                // 使用 partial_sort 只排序前 k 个元素
+                std::partial_sort(
+                    all_candidates.begin(),
+                    all_candidates.begin() + topk_count,
+                    all_candidates.end()
+                );
+                for (int i = 0; i < topk_count; i++) {
+                    topk_dist[q][i] = all_candidates[i].first;
+                    topk_index[q][i] = all_candidates[i].second;
+                }
+            }
+            // 填充剩余位置为无效值
+            for (int i = all_size; i < k; i++) {
+                topk_dist[q][i] = FLT_MAX;
+                topk_index[q][i] = -1;
+            }
         }
-        
-        // 排序并选择全局 top-k
-        std::sort(all_candidates.begin(), all_candidates.end());
-        const int topk_count = std::min(k, static_cast<int>(all_candidates.size()));
-        for (int i = 0; i < topk_count; i++) {
-            topk_dist[q][i] = all_candidates[i].first;
-            topk_index[q][i] = all_candidates[i].second;
+    };
+    
+    // 分配任务给各个线程
+    std::vector<std::thread> threads;
+    int queries_per_thread = (n_query + num_threads - 1) / num_threads;
+    
+    for (unsigned int t = 0; t < num_threads; t++) {
+        int start_q = t * queries_per_thread;
+        int end_q = std::min(start_q + queries_per_thread, n_query);
+        if (start_q < n_query) {
+            threads.emplace_back(process_query_range, start_q, end_q);
         }
-        for (int i = topk_count; i < k; i++) {
-            topk_dist[q][i] = FLT_MAX;
-            topk_index[q][i] = -1;
-        }
+    }
+    
+    // 等待所有线程完成
+    for (auto& thread : threads) {
+        thread.join();
     }
 }
 
@@ -179,34 +221,53 @@ std::vector<double> test_single_config(
     // 4. 构建 probe-query 映射（CSR 格式）
     // probe 在这里指的是 cluster，每个 cluster 对应一个 probe
     // 需要统计每个 cluster 被哪些 query 使用
-    std::map<int, std::vector<std::pair<int, int>>> cluster_queries;  // cluster_id -> [(query_id, probe_index_in_query)]
+    // 使用纯C数组实现，不使用C++容器
     
+    // 第一步：统计每个 cluster 有多少个 query 使用它
+    int* cluster_query_count = (int*)calloc(n_total_clusters, sizeof(int));  // 初始化为0
     for (int q = 0; q < n_query; q++) {
         for (int probe_idx = 0; probe_idx < n_probes; probe_idx++) {
             int cluster_id = query_clusters[q * n_probes + probe_idx];
-            cluster_queries[cluster_id].push_back({q, probe_idx});
+            if (cluster_id >= 0 && cluster_id < n_total_clusters) {
+                cluster_query_count[cluster_id]++;
+            }
         }
     }
     
-    // 5. 构建 probe-query 映射的 CSR 格式
-    // 先计算总大小
+    // 第二步：构建 CSR 格式的 offsets 数组
     int total_query_cluster_pairs = n_query * n_probes;
     int* probe_query_offsets = (int*)malloc((n_total_clusters + 1) * sizeof(int));
+    probe_query_offsets[0] = 0;
+    for (int c = 0; c < n_total_clusters; c++) {
+        probe_query_offsets[c + 1] = probe_query_offsets[c] + cluster_query_count[c];
+    }
+    
+    // 第三步：分配输出数组
     int* probe_queries = (int*)malloc(total_query_cluster_pairs * sizeof(int));
     int* probe_query_probe_indices = (int*)malloc(total_query_cluster_pairs * sizeof(int));
     
-    probe_query_offsets[0] = 0;
-    int current_idx = 0;
+    // 第四步：使用临时数组记录每个 cluster 当前写入位置
+    int* cluster_write_pos = (int*)malloc(n_total_clusters * sizeof(int));
     for (int c = 0; c < n_total_clusters; c++) {
-        if (cluster_queries.find(c) != cluster_queries.end()) {
-            for (const auto& pair : cluster_queries[c]) {
-                probe_queries[current_idx] = pair.first;  // query_id
-                probe_query_probe_indices[current_idx] = pair.second;  // probe_index_in_query
-                current_idx++;
+        cluster_write_pos[c] = probe_query_offsets[c];
+    }
+    
+    // 第五步：遍历所有 query-cluster 对，填充数据
+    for (int q = 0; q < n_query; q++) {
+        for (int probe_idx = 0; probe_idx < n_probes; probe_idx++) {
+            int cluster_id = query_clusters[q * n_probes + probe_idx];
+            if (cluster_id >= 0 && cluster_id < n_total_clusters) {
+                int write_pos = cluster_write_pos[cluster_id];
+                probe_queries[write_pos] = q;  // query_id
+                probe_query_probe_indices[write_pos] = probe_idx;  // probe_index_in_query
+                cluster_write_pos[cluster_id]++;
             }
         }
-        probe_query_offsets[c + 1] = current_idx;
     }
+    
+    // 清理临时数组
+    free(cluster_query_count);
+    free(cluster_write_pos);
     
     // 6. 构建 probe（cluster）向量映射
     int* probe_vector_offset = (int*)malloc(n_total_clusters * sizeof(int));

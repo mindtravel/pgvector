@@ -11,7 +11,7 @@
 #include "params_macros.cuh"
 #include "metrics_collector.cuh"
 
-#define DEBUG false /* debug模式：用于寻找正确输出和测试函数输出的差异 */
+#define DEBUG true /* debug模式：用于寻找正确输出和测试函数输出的差异 */
 #define QUIET false /* 静默模式：不打印日志（用于重复运行）*/
 /**
  * @brief 用宏简化计时语法，并将结果（毫秒）存入指定的变量。
