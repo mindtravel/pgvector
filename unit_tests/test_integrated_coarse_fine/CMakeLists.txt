@@ -19,15 +19,13 @@ set(SOURCES
     # ../../cuda/l2norm/l2norm.cu - 在 l2norm_lib 中
     # ../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu - 在 fusion_cos_topk_warpsort_lib 中
     # 需要编译fusion_cos_topk_warpsort_fine.cu（fine_screen_top_n.cu依赖它）
-    ../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine.cu
-    # 需要编译indexed_gemm.cu（fusion_cos_topk_warpsort_fine.cu依赖indexed_inner_product_kernel）
     ../../cuda/indexed_gemm/indexed_gemm.cu
     # 固定probe版本的精筛实现 - 已在 fusion_cos_topk_warpsort_lib 中，不再重复编译
     # ../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu
     # ../../cuda/indexed_gemm/indexed_gemm_v3_fixed_probe.cu - 已在 fusion_cos_topk_warpsort_lib 中
     # warpsort_topk 用于规约 - 已在 fusion_cos_topk_warpsort_lib 中
     # ../../cuda/warpsortfilter/warpsort_topk.cu
-    ../../cuda/fine_screen_top_n/fine_screen_top_n.cu
+    # ../../cuda/fine_screen_top_n/fine_screen_top_n.cu
     ../../cuda/integrate_screen/integrate_screen.cu
 )
 
@@ -38,7 +36,7 @@ target_link_libraries(test_integrated_coarse_fine
     cublas
     curand
     l2norm_lib
-    fusion_cos_topk_warpsort_lib
+    integrate_screen_lib  # 包含 fusion_cos_topk_warpsort, indexed_gemm_v3_fixed_probe 和 warpsort_topk（不包含 fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu）
 )
 
 set_target_properties(test_integrated_coarse_fine PROPERTIES

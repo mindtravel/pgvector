@@ -64,6 +64,27 @@ set_target_properties(l2norm_lib PROPERTIES
     CUDA_ARCHITECTURES 70
 )
 
+# 创建共享的utils库，避免重复编译
+# 被以下库使用：
+#   - fusion_cos_topk_warpsort_coarse_lib (generate_sequence_indices_kernel)
+#   - fusion_cos_topk_warpsort_lib (generate_sequence_indices_kernel)
+#   - integrate_screen_lib (多个utils函数)
+# 
+# 包含的文件：
+#   - utils.cu: 通用工具kernel和host函数
+add_library(utils_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/utils.cu
+)
+target_include_directories(utils_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+)
+set_target_properties(utils_lib PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    CUDA_ARCHITECTURES 70
+)
+
 # 创建共享的fusion_cos_topk_warpsort粗筛库（只包含粗筛实现）
 # 被以下测试使用：
 #   - test_fusion_cos_topk (只需要粗筛)
@@ -85,13 +106,13 @@ set_target_properties(fusion_cos_topk_warpsort_coarse_lib PROPERTIES
 target_link_libraries(fusion_cos_topk_warpsort_coarse_lib 
     PUBLIC
     l2norm_lib 
+    utils_lib
     cublas
 )
 
 # 创建共享的fusion_cos_topk_warpsort完整库（包含粗筛和精筛）
 # 被以下测试使用：
 #   - test_fusion_cos_topk_fine_v3_fixed_probe
-#   - test_integrated_coarse_fine (通过fine_screen_top_n.cu间接使用)
 # 
 # 包含的文件：
 #   - fusion_cos_topk_warpsort.cu: 粗筛实现（已在coarse_lib中，但为了完整性也包含）
@@ -123,6 +144,38 @@ set_target_properties(fusion_cos_topk_warpsort_lib PROPERTIES
 target_link_libraries(fusion_cos_topk_warpsort_lib 
     PUBLIC
     l2norm_lib 
+    utils_lib
+    cublas
+)
+
+# 创建共享的integrate_screen库（用于test_integrated_coarse_fine）
+# 被以下测试使用：
+#   - test_integrated_coarse_fine (integrate_screen.cu已展开实现，不再需要fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu)
+# 
+# 包含的文件：
+#   - fusion_cos_topk_warpsort.cu: 粗筛实现（integrate_screen.cu的Step 1需要）
+#   - indexed_gemm_v3_fixed_probe.cu: 固定probe版本的索引矩阵乘法（integrate_screen.cu需要launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe）
+#   - warpsort_topk.cu: warp-level top-k选择（integrate_screen.cu需要select_k）
+# 
+# 注意：utils.cu 已移到独立的 utils_lib 中，通过链接依赖引入
+add_library(integrate_screen_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/indexed_gemm/indexed_gemm_v3_fixed_probe.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
+)
+target_include_directories(integrate_screen_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+)
+set_target_properties(integrate_screen_lib PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    CUDA_ARCHITECTURES 70
+)
+target_link_libraries(integrate_screen_lib 
+    PUBLIC
+    l2norm_lib 
+    utils_lib
     cublas
 )
 
@@ -138,7 +191,6 @@ add_subdirectory(test_bitonic)
 add_subdirectory(test_stream_pass_data)
 add_subdirectory(test_final_topk)
 add_subdirectory(test_fusion_cos_topk_fine_v3_fixed_probe)
-add_subdirectory(test_fusion_cos_topk_warpsort_count)
 add_subdirectory(test_integrated_coarse_fine)
 add_subdirectory(test_select_k)
 

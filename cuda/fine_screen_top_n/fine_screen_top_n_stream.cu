@@ -245,3 +245,105 @@ void simple_dual_stream_pipeline(
     
     printf("All batches processed successfully!\n");
 }
+        int total_queries_in_blocks = h_block_query_offset[n_probes];
+        cudaMalloc(&d_probe_queries, total_queries_in_blocks * sizeof(int));
+        cudaMemcpyAsync(d_probe_queries, h_block_query_data, 
+                       total_queries_in_blocks * sizeof(int), 
+                       cudaMemcpyHostToDevice, upload_stream);
+        
+        cudaMalloc(&d_probe_query_offsets, (n_probes + 1) * sizeof(int));
+        cudaMemcpyAsync(d_probe_query_offsets, h_block_query_offset, 
+                       (n_probes + 1) * sizeof(int), 
+                       cudaMemcpyHostToDevice, upload_stream);
+        
+        cudaMalloc(&d_probe_query_probe_indices, total_queries_in_blocks * sizeof(int));
+        cudaMemcpyAsync(d_probe_query_probe_indices, h_block_query_probe_indices, 
+                       total_queries_in_blocks * sizeof(int), 
+                       cudaMemcpyHostToDevice, upload_stream);
+        
+        // 分配norm内存
+        cudaMalloc(&d_query_norm, n_query * sizeof(float));
+        cudaMalloc(&d_cluster_vector_norm, total_vectors * sizeof(float));
+        
+        // 分配输出内存
+        cudaMalloc(&d_topk_dist_final, n_query * k * sizeof(float));
+        cudaMalloc(&d_topk_index_final, n_query * k * sizeof(int));
+        
+        // 记录上传完成事件
+        cudaEventRecord(upload_done, upload_stream);
+        
+        // 流2：等待上传完成后进行计算
+        cudaStreamWaitEvent(compute_stream, upload_done, 0);
+        
+        // 计算L2 norm（在计算流中）
+        compute_l2_norm_gpu(d_query_group, d_query_norm, n_query, n_dim);
+        compute_l2_norm_gpu(d_cluster_vector, d_cluster_vector_norm, total_vectors, n_dim);
+        
+        // 调用 cuda_cos_topk_warpsort_fine_v3_fixed_probe（在计算流中）
+        cuda_cos_topk_warpsort_fine_v3_fixed_probe(
+            d_query_group,
+            d_cluster_vector,
+            d_probe_vector_offset,
+            d_probe_vector_count,
+            d_probe_queries,
+            d_probe_query_offsets,
+            d_probe_query_probe_indices,
+            d_query_norm,
+            d_cluster_vector_norm,
+            d_topk_index_final,
+            d_topk_dist_final,
+            nullptr,  // candidate_dist
+            nullptr,  // candidate_index
+            n_query,
+            n_probes,  // n_total_clusters (每个probe对应一个cluster)
+            n_probes,
+            n_dim,
+            k
+        );
+        
+        // 下载结果（在计算流中）
+        cudaMemcpyAsync(h_query_topn_index, d_topk_index_final, 
+                       n_query * k * sizeof(int), 
+                       cudaMemcpyDeviceToHost, compute_stream);
+        
+        cudaMemcpyAsync(h_query_topn_dist, d_topk_dist_final, 
+                       n_query * k * sizeof(float), 
+                       cudaMemcpyDeviceToHost, compute_stream);
+        
+        // 等待计算完成
+        cudaStreamSynchronize(compute_stream);
+        
+        // 清理GPU内存
+        cudaFree(d_cluster_vector);
+        cudaFree(d_query_group);
+        cudaFree(d_probe_vector_offset);
+        cudaFree(d_probe_vector_count);
+        cudaFree(d_probe_queries);
+        cudaFree(d_probe_query_offsets);
+        cudaFree(d_probe_query_probe_indices);
+        cudaFree(d_query_norm);
+        cudaFree(d_cluster_vector_norm);
+        cudaFree(d_topk_dist_final);
+        cudaFree(d_topk_index_final);
+        
+        // 清理主机内存
+        for (int i = 0; i < n_probes; i++) {
+            if (h_block_vectors[i]) {
+                free(h_block_vectors[i]);
+            }
+        }
+        free(h_block_vectors);
+        free(h_block_vector_counts);
+        free(h_block_query_offset);
+        free(block_vector_offset);
+        
+        printf("Batch %d completed\n", batch_idx + 1);
+    }
+    
+    // 清理流和事件
+    cudaStreamDestroy(upload_stream);
+    cudaStreamDestroy(compute_stream);
+    cudaEventDestroy(upload_done);
+    
+    printf("All batches processed successfully!\n");
+}

@@ -529,3 +529,45 @@ int main(int argc, char** argv) {
     return all_pass ? 0 : 1;
 }
 
+
+    // Warmup
+    test_single_config(8, 4, 16, 128, 10, 32);
+    
+    COUT_ENDL("测试算法: cuda_cos_topk_warpsort_fine_v3_fixed_probe");
+    metrics.set_num_repeats(1);
+
+    int n_dim = 128;
+    int n_total_clusters = 1024;  // 总聚类数
+    int vectors_per_cluster = 1024;  // 每个 cluster 的向量数
+
+    int n_total_vectors = n_total_clusters * vectors_per_cluster;
+    float** h_cluster_vectors = generate_vector_list(n_total_vectors, n_dim);
+    float* h_cluster_vector_norm = (float*)malloc(n_total_vectors * sizeof(float));
+    compute_l2_norms_batch(h_cluster_vectors, h_cluster_vector_norm, n_total_vectors, n_dim);
+
+    // 参数扫描
+    PARAM_3D(n_query, (10000),
+             n_probes, (1, 5, 10, 20, 40),
+             k, (100))
+    // PARAM_3D(n_query, (8, 32, 128),
+    //     n_probes, (1, 5, 10, 20, 40),
+    //     k, (10, 20))
+    {
+        COUT_ENDL("n_query: ", n_query, ", n_probes: ", n_probes, ", k: ", k);
+        auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
+            auto result = test_single_config(
+                n_query, n_probes, n_total_clusters, n_dim, k, vectors_per_cluster,
+                h_cluster_vectors, h_cluster_vector_norm
+            );
+            all_pass &= (result[0] == 1.0);  // 检查 pass 字段（topk结果）
+            all_pass &= (result[1] == 1.0);  // 检查 candidate_pass 字段（候选结果）
+            return result;
+        });
+    }
+    
+    metrics.print_table();
+    
+    COUT_ENDL(all_pass ? "✅ All tests passed!" : "❌ Some tests failed!");
+    return all_pass ? 0 : 1;
+}
+

@@ -26,13 +26,15 @@ void batch_search_pipeline(
     float*** cluster_data,
     float** cluster_center_data,
     float** topk_dist,
+    
     int** topk_index,
     int* n_isnull,
 
     int n_query,
     int n_dim,
     int n_total_cluster,
-    int n_cluster_per_query,
+    int n_total_vectors,
+    int n_probes,
     int k
 );
 #endif  // PGVECTOR_CUDA_INTEGRATE_SCREEN_CUH

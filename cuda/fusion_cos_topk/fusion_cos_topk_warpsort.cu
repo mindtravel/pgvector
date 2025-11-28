@@ -31,34 +31,9 @@
 #include "pch.h"
 #include "warpsortfilter/warpsort_utils.cuh"
 #include "warpsortfilter/warpsort.cuh"
+#include "../utils.cuh"
 
 #define ENABLE_CUDA_TIMING 0
-
-/**
- * Kernel: 并行生成顺序索引
- * 为每个query生成 [0, 1, 2, ..., n_batch-1] 的索引序列
- * 
- * 线程模型：
- * - gridDim.x = n_query (每个block处理一个query)
- * - blockDim.x = min(256, n_batch) (每个block的线程数)
- * - 每个线程处理多个索引位置（如果 n_batch > blockDim.x）
- */
-__global__ void generate_sequence_indices_kernel(
-    int* d_index,
-    int n_query,
-    int n_batch)
-{
-    const int query_id = blockIdx.x;
-    if (query_id >= n_query) return;
-    
-    const int tid = threadIdx.x;
-    const int block_size = blockDim.x;
-    
-    // 每个线程处理多个索引位置（stride loop）
-    for (int idx = tid; idx < n_batch; idx += block_size) {
-        d_index[query_id * n_batch + idx] = idx;
-    }
-}
 
 namespace pgvector {
 namespace fusion_cos_topk_warpsort {
@@ -194,7 +169,7 @@ cudaError_t fusion_cos_topk_warpsort(
     int batch_size, int len, int k,
     T* output_vals, IdxT* output_idx,
     bool select_min,
-    cudaStream_t stream = 0
+    cudaStream_t stream  // 默认参数在头文件中声明，这里不重复
 )
 {
     if (k > kMaxCapacity) {

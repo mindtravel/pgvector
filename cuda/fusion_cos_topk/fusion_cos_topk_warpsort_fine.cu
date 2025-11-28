@@ -117,7 +117,7 @@ cudaError_t fusion_cos_topk_warpsort(
     int batch_size, int len, int k,
     T* output_vals, IdxT* output_idx,
     bool select_min,
-    cudaStream_t stream = 0
+    cudaStream_t stream  // 默认参数在头文件中声明，这里不重复
 )
 {
     if (k > kMaxCapacity) {
