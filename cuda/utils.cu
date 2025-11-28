@@ -176,26 +176,38 @@ __global__ void map_candidate_indices_kernel(
  * 
  * 使用 Thrust::exclusive_scan 进行高效计算
  */
-void compute_prefix_sum(
-    const int* d_count,  // [n] 输入：每个元素的计数值
-    int* d_offset,  // [n+1] 输出：前缀和，offset[0] = 0
-    int n,  // 元素数量
+
+ void compute_prefix_sum(
+    const int* d_count,  // [n] 输入
+    int* d_offset,       // [n+1] 输出
+    int n,               // 元素数量
     cudaStream_t stream)
 {
-    // 初始化 offset[0] = 0
+    // 1. 手动将 offset[0] 设为 0
+    // 这是 CSR 格式或者 exclusive scan 的起始要求
     cudaMemsetAsync(d_offset, 0, sizeof(int), stream);
     
-    // 使用 Thrust 的 exclusive_scan 计算前缀和
-    // exclusive_scan: output[i] = sum(input[0..i-1])
-    thrust::device_ptr<const int> count_ptr = thrust::device_pointer_cast(d_count);
-    thrust::device_ptr<int> offset_ptr = thrust::device_pointer_cast(d_offset + 1);  // offset[1..n]
+    if (n <= 0) return;
+
+    // 2. 使用 inclusive_scan，并将结果输出到 d_offset + 1 的位置
+    // 逻辑如下：
+    // Input:  [10, 20, 30]
+    // Output 目标地址: &d_offset[1]
+    // 
+    // d_offset[0] = 0 (由上面 Memset 设置)
+    // d_offset[1] = 10 (inclusive scan 第1个结果)
+    // d_offset[2] = 10 + 20 = 30
+    // d_offset[3] = 10 + 20 + 30 = 60
+    // 
+    // 最终 d_offset = [0, 10, 30, 60]，长度为 n+1，完美符合要求
     
-    thrust::exclusive_scan(
+    thrust::device_ptr<const int> count_ptr = thrust::device_pointer_cast(d_count);
+    thrust::device_ptr<int> offset_ptr = thrust::device_pointer_cast(d_offset);
+
+    thrust::inclusive_scan(
         thrust::cuda::par.on(stream),
         count_ptr,
         count_ptr + n,
-        offset_ptr,
-        0  // 初始值
+        offset_ptr + 1 // 关键点：输出偏移 +1
     );
 }
-

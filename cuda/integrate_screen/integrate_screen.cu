@@ -241,7 +241,7 @@ void batch_search_pipeline(float** query_batch,
             CHECK_CUDA_ERRORS;
             
             // 调试输出：检查粗筛结果
-            {
+            if(false){
                 int* h_top_nprobe_index = (int*)malloc(n_query * n_probes * sizeof(int));
                 float* h_top_nprobe_dist = (float*)malloc(n_query * n_probes * sizeof(float));
                 cudaMemcpy(h_top_nprobe_index, d_top_nprobe_index, 
@@ -321,7 +321,7 @@ void batch_search_pipeline(float** query_batch,
         CHECK_CUDA_ERRORS;
         
         // 调试：检查 d_cluster_query_count 的值
-        {
+        if(false){
             int* h_cluster_query_count_debug = (int*)malloc(n_total_clusters * sizeof(int));
             cudaMemcpy(h_cluster_query_count_debug, d_cluster_query_count, 
                        n_total_clusters * sizeof(int), cudaMemcpyDeviceToHost);
@@ -343,7 +343,7 @@ void batch_search_pipeline(float** query_batch,
         CHECK_CUDA_ERRORS;
         
         // 调试：检查前缀和计算后的 offset 数组
-        {
+        if(false){
             int* h_cluster_query_offset_debug = (int*)malloc((n_total_clusters + 1) * sizeof(int));
             cudaMemcpy(h_cluster_query_offset_debug, d_cluster_query_offset, 
                        (n_total_clusters + 1) * sizeof(int), cudaMemcpyDeviceToHost);
@@ -370,7 +370,7 @@ void batch_search_pipeline(float** query_batch,
         CHECK_CUDA_ERRORS;
         
         // 调试：检查 d_cluster_write_pos 的初始值
-        {
+        if(false){
             int* h_cluster_write_pos_debug = (int*)malloc(n_total_clusters * sizeof(int));
             cudaMemcpy(h_cluster_write_pos_debug, d_cluster_write_pos, 
                        n_total_clusters * sizeof(int), cudaMemcpyDeviceToHost);
@@ -391,7 +391,7 @@ void batch_search_pipeline(float** query_batch,
         CHECK_CUDA_ERRORS;
         
         // 调试：检查 d_top_nprobe_index 的值
-        {
+        if(false){
             int* h_top_nprobe_index_debug = (int*)malloc(n_query * n_probes * sizeof(int));
             cudaMemcpy(h_top_nprobe_index_debug, d_top_nprobe_index, 
                        n_query * n_probes * sizeof(int), cudaMemcpyDeviceToHost);
@@ -418,7 +418,7 @@ void batch_search_pipeline(float** query_batch,
         CHECK_CUDA_ERRORS;
         
         // 调试输出：检查Step 2的cluster-query映射
-        {
+        if(false){
             int* h_cluster_query_offset = (int*)malloc((n_total_clusters + 1) * sizeof(int));
             cudaMemcpy(h_cluster_query_offset, d_cluster_query_offset, 
                        (n_total_clusters + 1) * sizeof(int), cudaMemcpyDeviceToHost);
@@ -603,30 +603,13 @@ void batch_search_pipeline(float** query_batch,
         {
             CUDATimer timer_reduce("Reduce probe results to query top-k", ENABLE_CUDA_TIMING);
             
-            for(int i = 0; i < n_query; i++) {
-                for(int j = 0; j < n_probes; j++) {
-                    for(int k = 0; k < k; k++) {
-                        printf("d_topk_dist_candidate[%d][%d][%d] = %f\n", i, j, k, d_topk_dist_candidate[i * n_probes * k + j * k + k]);
-                        printf("d_topk_index_candidate[%d][%d][%d] = %d\n", i, j, k, d_topk_index_candidate[i * n_probes * k + j * k + k]);
-                    }
-                }
-            }
-
             select_k<float, int>(
                 d_topk_dist_candidate, n_query, n_probes * k, k,
                 d_topk_dist, d_topk_index, true, 0
             );
-
             cudaDeviceSynchronize();
             CHECK_CUDA_ERRORS;
-
-            for(int i = 0; i < n_query; i++) {
-                for(int j = 0; j < k; j++) {
-                    printf("d_topk_dist[%d][%d] = %f\n", i, j, d_topk_dist[i * k + j]);
-                    printf("d_topk_index[%d][%d] = %d\n", i, j, d_topk_index[i * k + j]);
-                }
-            }
-
+            
             // 2. 映射回原始向量索引
             // select_k返回的索引是候选数组中的位置，需要映射回原始向量索引
             dim3 map_block(256);
