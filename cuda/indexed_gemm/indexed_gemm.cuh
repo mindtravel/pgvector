@@ -266,6 +266,46 @@ void launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe(
     int* __restrict__ d_topk_index,
     cudaStream_t stream);
 
+/**
+ * Launch函数：v5 entry-based版本（按entry组织，每个entry包含一个cluster和一组query）
+ * 
+ * 核心设计：
+ * - 每个block处理一个entry（一个cluster + 一组query，8个或4个）
+ * - grid维度 = n_entry（只处理有query的cluster，避免空block）
+ * - 不需要统计max_queries_per_probe，grid维度就是实际entry数量
+ * 
+ * @tparam Capacity warp-sort queue的容量
+ * @tparam Ascending 是否升序
+ * @tparam QueriesPerBlock 每个block处理的query数量（建议为8或4）
+ * 
+ * @param d_entry_cluster_id 每个entry对应的cluster_id [n_entry]
+ * @param d_entry_query_start 每个entry的query起始位置 [n_entry]
+ * @param d_entry_query_count 每个entry的query数量 [n_entry]
+ * @param d_entry_queries 所有entry的query列表（扁平化）[total_queries_in_entries]
+ * @param d_entry_probe_indices 每个entry-query对中probe在query中的索引 [total_queries_in_entries]
+ */
+template<int Capacity, bool Ascending, int QueriesPerBlock>
+void launch_indexed_inner_product_with_topk_kernel_v5_entry_based(
+    dim3 block,
+    int n_dim,
+    float* __restrict__ d_query_group,
+    float* __restrict__ d_cluster_vector,
+    int* __restrict__ d_probe_vector_offset,
+    int* __restrict__ d_probe_vector_count,
+    int* __restrict__ d_entry_cluster_id,  // [n_entry]
+    int* __restrict__ d_entry_query_start,  // [n_entry]
+    int* __restrict__ d_entry_query_count,  // [n_entry]
+    int* __restrict__ d_entry_queries,  // [total_queries_in_entries]
+    int* __restrict__ d_entry_probe_indices,  // [total_queries_in_entries]
+    float* __restrict__ d_query_norm,
+    float* __restrict__ d_cluster_vector_norm,
+    int n_entry,  // entry总数
+    int n_probes,  // 每个query的probe数量
+    int k,
+    float* __restrict__ d_topk_dist,
+    int* __restrict__ d_topk_index,
+    cudaStream_t stream);
+
 #endif
 
 

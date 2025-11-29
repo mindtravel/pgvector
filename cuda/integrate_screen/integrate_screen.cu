@@ -78,6 +78,10 @@ void batch_search_pipeline(float** query_batch,
     int* d_probe_vector_offset = nullptr;
     int* d_probe_vector_count = nullptr;
 
+    dim3 queryDim(n_query);
+    dim3 dataDim(n_total_clusters);
+    dim3 vectorDim(n_dim);
+    dim3 probeDim(n_probes);
 
     {
         CUDATimer timer("Step 0: Data Preparation");
@@ -106,21 +110,22 @@ void batch_search_pipeline(float** query_batch,
                    n_total_clusters * sizeof(int), cudaMemcpyDeviceToHost);
         cudaDeviceSynchronize();  // 确保数据复制完成
         CHECK_CUDA_ERRORS;
-        
-        // 复制cluster向量到GPU，并使用GPU计算的offset
-        // 确保所有复制操作完成后再继续
-        for (int i = 0; i < n_total_clusters; ++i) {
-            if (cluster_size[i] > 0) {  // 只复制非空的cluster
-                // cluster_vectors 是 float***，所以 cluster_vectors[i] 是 float**，cluster_vectors[i][0] 是 float*
-                float* cluster_start = d_cluster_vectors + probe_vector_offset_host[i] * n_dim;
-                cudaMemcpy(cluster_start, cluster_vectors[i][0], cluster_size[i] * n_dim * sizeof(float), cudaMemcpyHostToDevice);
-                d_cluster_vector_ptr[i] = cluster_start;
+        {
+            CUDATimer timer("Step 0: Copy Cluster Data");
+            // 复制cluster向量到GPU，并使用GPU计算的offset
+            // 确保所有复制操作完成后再继续
+            for (int i = 0; i < n_total_clusters; ++i) {
+                if (cluster_size[i] > 0) {  // 只复制非空的cluster
+                    // cluster_vectors 是 float***，所以 cluster_vectors[i] 是 float**，cluster_vectors[i][0] 是 float*
+                    float* cluster_start = d_cluster_vectors + probe_vector_offset_host[i] * n_dim;
+                    cudaMemcpy(cluster_start, cluster_vectors[i][0], cluster_size[i] * n_dim * sizeof(float), cudaMemcpyHostToDevice);
+                    d_cluster_vector_ptr[i] = cluster_start;
+                }
             }
+            cudaDeviceSynchronize();  // 确保所有复制完成
+            CHECK_CUDA_ERRORS;
+            free(probe_vector_offset_host);
         }
-        cudaDeviceSynchronize();  // 确保所有复制完成
-        CHECK_CUDA_ERRORS;
-        free(probe_vector_offset_host);
-    
         cudaMalloc(&d_cluster_centers, n_total_clusters * n_dim * sizeof(float));
         cudaMemcpy(d_cluster_centers, cluster_center_data[0], n_total_clusters * n_dim * sizeof(float), cudaMemcpyHostToDevice);
         CHECK_CUDA_ERRORS;
@@ -153,10 +158,6 @@ void batch_search_pipeline(float** query_batch,
         CUDATimer timer("Step 1: Coarse Search (cuda_cos_topk_warpsort)");
         float alpha = 1.0f; 
         float beta = 0.0f;
-    
-        dim3 queryDim(n_query);
-        dim3 dataDim(n_total_clusters);
-        dim3 vectorDim(n_dim);
         
         // cuBLAS句柄
         cublasHandle_t handle;
@@ -181,11 +182,8 @@ void batch_search_pipeline(float** query_batch,
     
             /* 使用 CUDA kernel 并行生成顺序索引 [0, 1, 2, ..., n_total_clusters-1] */
             // 线程模型：每个block处理一个query，每个block使用256个线程（或更少）
-            const int threads_per_block = 256;
-            dim3 block_dim((n_total_clusters < threads_per_block) ? n_total_clusters : threads_per_block);
-            dim3 grid_dim(n_query);
-            
-            generate_sequence_indices_kernel<<<grid_dim, block_dim>>>(
+            dim3 block_dim((n_total_clusters < 256) ? n_total_clusters : 256);
+            generate_sequence_indices_kernel<<<queryDim, block_dim>>>(
                 d_index, n_query, n_total_clusters);
             CHECK_CUDA_ERRORS;
     
@@ -201,9 +199,7 @@ void batch_search_pipeline(float** query_batch,
         }
     
         /* 核函数执行 */
-        {
-            // COUT_ENDL("begin_kernel");
-    
+        {    
             CUDATimer timer_compute("Step 1: Kernel Execution: matrix multiply");
 
             /**
@@ -220,11 +216,7 @@ void batch_search_pipeline(float** query_batch,
                 d_inner_product, n_total_clusters
             );    
             
-            cudaDeviceSynchronize(); 
-    
-            // print_cuda_2D("inner product", d_inner_product, n_query, n_total_clusters);    
-            // table_cuda_2D("topk index", d_topk_index, n_query, k);
-            // table_cuda_2D("topk cos distance", d_top_nprobe_dist, n_query, k);
+            cudaDeviceSynchronize();
         }
     
         {
@@ -281,18 +273,12 @@ void batch_search_pipeline(float** query_batch,
     
         cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS
-        
-        // 确保 d_top_nprobe_index 的数据已经写入完成
-        cudaDeviceSynchronize();
-        CHECK_CUDA_ERRORS
     }
 
     // ------------------------------------------------------------------
     // Step 2. 将 query→cluster 粗筛结果转成 cluster 序列
     // ------------------------------------------------------------------
     // 确保 Step 1 完全完成后再开始 Step 2
-    cudaDeviceSynchronize();
-    CHECK_CUDA_ERRORS
     int* d_cluster_query_offset = nullptr;
     int* d_cluster_query_data = nullptr;
     int* d_cluster_query_probe_indices = nullptr;
@@ -308,9 +294,7 @@ void batch_search_pipeline(float** query_batch,
         cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
         
-        dim3 count_block_dim(n_probes);  // 每个block处理一个query的n_probes个probe
-        dim3 count_grid_dim(n_query);    // 每个block处理一个query
-        count_cluster_queries_kernel<<<count_grid_dim, count_block_dim>>>(
+        count_cluster_queries_kernel<<<probeDim, queryDim>>>(
             d_top_nprobe_index,
             d_cluster_query_count,
             n_query,
@@ -404,7 +388,7 @@ void batch_search_pipeline(float** query_batch,
         }
         
         // 第四步：在GPU上构建CSR格式的数据
-        build_cluster_query_mapping_kernel<<<count_grid_dim, count_block_dim>>>(
+        build_cluster_query_mapping_kernel<<<queryDim, probeDim>>>(
             d_top_nprobe_index,
             d_cluster_query_offset,
             d_cluster_query_data,

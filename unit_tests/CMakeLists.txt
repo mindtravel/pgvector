@@ -113,16 +113,21 @@ target_link_libraries(fusion_cos_topk_warpsort_coarse_lib
 # 创建共享的fusion_cos_topk_warpsort完整库（包含粗筛和精筛）
 # 被以下测试使用：
 #   - test_fusion_cos_topk_fine_v3_fixed_probe
+#   - test_fusion_cos_topk_fine_v5
 # 
 # 包含的文件：
 #   - fusion_cos_topk_warpsort.cu: 粗筛实现（已在coarse_lib中，但为了完整性也包含）
 #   - fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu: 固定probe版本的精筛实现
+#   - fusion_cos_topk_warpsort_fine_v5.cu: v5 entry-based版本的精筛实现
 #   - indexed_gemm_v3_fixed_probe.cu: 固定probe版本的索引矩阵乘法
+#   - indexed_gemm_v5.cu: v5 entry-based版本的索引矩阵乘法
 #   - warpsort_topk.cu: warp-level top-k选择
 add_library(fusion_cos_topk_warpsort_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v5.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/indexed_gemm/indexed_gemm_v3_fixed_probe.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/indexed_gemm/indexed_gemm_v5.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
 )
 target_include_directories(fusion_cos_topk_warpsort_lib PUBLIC
@@ -191,6 +196,7 @@ add_subdirectory(test_bitonic)
 add_subdirectory(test_stream_pass_data)
 add_subdirectory(test_final_topk)
 add_subdirectory(test_fusion_cos_topk_fine_v3_fixed_probe)
+add_subdirectory(test_fusion_cos_topk_fine_v5)
 add_subdirectory(test_integrated_coarse_fine)
 add_subdirectory(test_select_k)
 
@@ -205,6 +211,7 @@ add_custom_target(run_all_tests
         test_fusion_cos_topk
         test_fusion_cos_topk_fine
         test_fusion_cos_topk_fine_v3_fixed_probe
+        test_fusion_cos_topk_fine_v5
         test_warpsort
         test_bitonic
         test_stream_pass_data

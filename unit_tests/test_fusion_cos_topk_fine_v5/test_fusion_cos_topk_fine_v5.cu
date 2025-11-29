@@ -358,7 +358,7 @@ std::vector<double> test_single_config(
     double gpu_duration_ms = 0;
 
     MEASURE_MS_AND_SAVE("GPU fine search", gpu_duration_ms,
-        cuda_cos_topk_warpsort_fine_v3_fixed_probe(
+        cuda_cos_topk_warpsort_fine_v5(
             d_query_group,
             d_cluster_vector,
             d_probe_vector_offset,
@@ -491,7 +491,7 @@ int main(int argc, char** argv) {
     // Warmup
     test_single_config(8, 4, 16, 128, 10, 32);
     
-    COUT_ENDL("测试算法: cuda_cos_topk_warpsort_fine_v3_fixed_probe");
+    COUT_ENDL("测试算法: cuda_cos_topk_warpsort_fine_v5 (entry-based)");
     metrics.set_num_repeats(1);
 
     int n_dim = 128;
@@ -528,3 +528,4 @@ int main(int argc, char** argv) {
     COUT_ENDL(all_pass ? "✅ All tests passed!" : "❌ Some tests failed!");
     return all_pass ? 0 : 1;
 }
+

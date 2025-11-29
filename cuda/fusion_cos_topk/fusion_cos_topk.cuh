@@ -390,5 +390,55 @@ void cuda_cos_topk_warpsort_fine_v3_fixed_probe(
     int k
 );
 
+/**
+ * v5版本：Entry-based线程模型的流式融合余弦距离top-k计算
+ * 
+ * 核心设计：
+ * - 每个 block 处理一个 entry（一个 cluster + 一组 query，8个或4个）
+ * - grid维度 = n_entry（只处理有query的cluster，避免空block）
+ * - 不需要统计max_queries_per_probe，grid维度就是实际entry数量
+ * - 好处：不会涉及不需要的cluster，提高并行性
+ * 
+ * @param d_query_group query向量 [n_query * n_dim]
+ * @param d_cluster_vector 所有向量数据（连续存储）[n_total_vectors * n_dim]
+ * @param d_probe_vector_offset 每个probe在d_cluster_vector中的起始位置 [n_probes]
+ * @param d_probe_vector_count 每个probe的向量数量 [n_probes]
+ * @param d_probe_queries probe对应的query列表（CSR格式）[total_queries]
+ * @param d_probe_query_offsets probe的query列表起始位置（CSR格式）[n_probes + 1]
+ * @param d_probe_query_probe_indices 每个probe-query对中probe在query中的索引 [total_queries_in_probes]
+ * @param d_query_norm query的l2norm [n_query]
+ * @param d_cluster_vector_norm 所有向量的l2norm [n_total_vectors]
+ * @param d_topk_index [out] 每个query的topk索引 [n_query][k]（最终结果，已规约）
+ * @param d_topk_dist [out] 每个query的topk距离 [n_query][k]（最终结果，已规约）
+ *
+ * @param n_query query数量
+ * @param n_total_clusters cluster数量
+ * @param n_probes probe数量
+ * @param n_dim 向量维度
+ * @param k topk数量
+ */
+void cuda_cos_topk_warpsort_fine_v5(
+    float* d_query_group,
+    float* d_cluster_vector,
+    int* d_probe_vector_offset,
+    int* d_probe_vector_count,
+    int* d_probe_queries,
+    int* d_probe_query_offsets,
+    int* d_probe_query_probe_indices,
+    float* d_query_norm,
+    float* d_cluster_vector_norm,
+    int* d_topk_index,
+    float* d_topk_dist,
+
+    float** candidate_dist,
+    int** candidate_index,
+
+    int n_query,
+    int n_total_clusters,
+    int n_probes,
+    int n_dim,
+    int k
+);
+
 
 #endif
