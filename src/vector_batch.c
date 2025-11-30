@@ -167,7 +167,7 @@ vector_batch_in(PG_FUNCTION_ARGS)
 
 	result = InitVectorBatch(count, dim);
 
-	elog(LOG, "DEBUG: vector_batch_in: 接收到 %d 个向量，每个向量 %d 维", count, dim);
+	// elog(LOG, "DEBUG: vector_batch_in: 接收到 %d 个向量，每个向量 %d 维", count, dim);
 
 	/* 解析每个向量 */
 	ptr = str + 1;
@@ -263,7 +263,7 @@ vector_batch_recv(PG_FUNCTION_ARGS)
 	count = pq_getmsgint(buf, sizeof(int16));
 	dim = pq_getmsgint(buf, sizeof(int16));
 	
-	elog(LOG, "DEBUG: vector_batch_recv: 接收到 %d 个向量，每个向量 %d 维", count, dim);
+	// elog(LOG, "DEBUG: vector_batch_recv: 接收到 %d 个向量，每个向量 %d 维", count, dim);
 
 	result = InitVectorBatch(count, dim);
 
@@ -328,7 +328,7 @@ vector_batch_from_array(PG_FUNCTION_ARGS)
 	int dim;
 	Vector *vec;
 
-	elog(LOG, "vector_batch_from_array: 开始执行");
+	// elog(LOG, "vector_batch_from_array: 开始执行");
 
 	if (ARR_NDIM(array) != 1)
 		ereport(ERROR,
@@ -379,8 +379,8 @@ batch_l2_distance(PG_FUNCTION_ARGS)
 	int			i;
 
 	/* 调试输出：显示接收到的向量个数和维度 */
-	elog(LOG, "batch_l2_distance: 开始执行，查询向量数量=%d，维度=%d", 
-		 queries->count, queries->dim);
+	// elog(LOG, "batch_l2_distance: 开始执行，查询向量数量=%d，维度=%d", 
+	//      queries->count, queries->dim);
 
 	if (queries->dim != target->dim)
 		ereport(ERROR,
@@ -464,14 +464,14 @@ batch_l2_distance(PG_FUNCTION_ARGS)
 		pfree(target_data);
 		pfree(gpu_distances);
 	} else {
-		elog(LOG, "batch_l2_distance: CUDA不可用，使用CPU计算");
+		// elog(LOG, "batch_l2_distance: CUDA不可用，使用CPU计算");
 	}
 #else
-	elog(LOG, "batch_l2_distance: 未编译CUDA支持，使用CPU计算");
+	// elog(LOG, "batch_l2_distance: 未编译CUDA支持，使用CPU计算");
 #endif
 
 	/* CPU计算（回退方案） */
-	elog(LOG, "batch_l2_distance: 开始CPU计算");
+	// elog(LOG, "batch_l2_distance: 开始CPU计算");
 	distances = palloc(sizeof(Datum) * queries->count);
 
 	for (i = 0; i < queries->count; i++)
@@ -493,7 +493,7 @@ batch_l2_distance(PG_FUNCTION_ARGS)
 							 sizeof(float8), FLOAT8PASSBYVAL, 'd');
 
 	pfree(distances);
-	elog(LOG, "batch_l2_distance: CPU计算完成，返回结果");
+	// elog(LOG, "batch_l2_distance: CPU计算完成，返回结果");
 	PG_RETURN_ARRAYTYPE_P(result);
 }
 

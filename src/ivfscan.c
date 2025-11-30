@@ -284,7 +284,7 @@ static int UploadCentersToGPU(IndexScanDesc scan)
 	}
 	
 	// elog(LOG, "UploadCentersToGPU: 维度=%d, cuda_ctx=%p, use_gpu=%s", 
-	// 	 so->dimensions, so->cuda_ctx, so->use_gpu ? "是" : "否");
+	//      so->dimensions, so->cuda_ctx, so->use_gpu ? "是" : "否");
 	
 	totalLists = 0;
 	center_idx = 0;
@@ -396,10 +396,10 @@ static int UploadCentersToGPU(IndexScanDesc scan)
 		return -1;
 	}
 	
-	elog(LOG, "CUDA上下文信息 - 聚类中心数: %d, 维度: %d, 零拷贝: %s, 已初始化: %s", 
-		 ctx->num_centers, ctx->dimensions, 
-		 ctx->use_zero_copy ? "是" : "否",
-		 ctx->initialized ? "是" : "否");
+	// elog(LOG, "CUDA上下文信息 - 聚类中心数: %d, 维度: %d, 零拷贝: %s, 已初始化: %s", 
+	//      ctx->num_centers, ctx->dimensions, 
+	//      ctx->use_zero_copy ? "是" : "否",
+	//      ctx->initialized ? "是" : "否");
 	
 	if (!ctx->initialized) {
 		elog(ERROR, "CUDA上下文未初始化");
@@ -743,8 +743,10 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 					so->cuda_ctx = NULL;
 				}
 				
-				/* 注意：不要在这里清理CUDA上下文，因为后续还需要使用 */
-				// elog(LOG, "CUDA 上下文保留用于后续使用");
+				/* 清理 */
+				cuda_center_search_cleanup(so->cuda_ctx);
+				so->cuda_ctx = NULL;
+				// elog(LOG, "CUDA 上下文清理完成");
 			} else {
 				// elog(LOG, "CUDA 上下文初始化失败");
 			}
@@ -752,7 +754,7 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 			elog(ERROR, "CUDA 基本功能测试失败");
 		}
 	} else {
-		elog(LOG, "CUDA 不可用");
+		// elog(LOG, "CUDA 不可用");
 	}
 	
 	/* 启用 GPU 支持 */
@@ -765,7 +767,7 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 			cuda_center_search_cleanup(so->cuda_ctx);
 			so->cuda_ctx = NULL;
 		} else {
-			elog(LOG, "GPU聚类中心搜索已启用（标准模式）");
+			// elog(LOG, "GPU聚类中心搜索已启用（标准模式）");
 		}
 	} else {
 		so->use_gpu = false;

@@ -4,12 +4,16 @@
 set(SOURCES
     test_cos_distance.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/experiments/distances.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/l2norm.cu
+    # 使用共享库，不再重复编译l2norm.cu
+    # ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/l2norm/l2norm.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/test_utils.cu
 )
 
 # 创建可执行文件
 add_executable(test_cos_distance ${SOURCES})
+
+# 链接共享的l2norm库
+target_link_libraries(test_cos_distance l2norm_lib)
 
 # 设置包含目录
 target_include_directories(test_cos_distance PRIVATE

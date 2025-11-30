@@ -1,4 +1,4 @@
-#include "l2norm.cuh"
+#include "../l2norm/l2norm.cuh"
 #include "normalize.h"
 #include "pch.h"
 

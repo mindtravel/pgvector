@@ -2,7 +2,7 @@
 #include <type_traits>
 #include <math_constants.h>
 
-#include "../l2norm.cuh"
+#include "../l2norm/l2norm.cuh"
 #include "../pch.h"
 #include "warpsort_utils.cuh"
 #include "warpsort.cuh"
@@ -50,21 +50,54 @@ __global__ void select_k_kernel(
     /* 在一个warp中，建立一个长度为k的队列 */
     WarpSortFiltered<Capacity, Ascending, T, IdxT> queue(k); 
     
+    /* 确保所有线程都执行到这里 */
+    __syncwarp();
+    
+    /* 
+     * 关键修复：使用固定次数的循环，确保所有线程执行相同次数的迭代
+     * 这对于 WarpSortFiltered 的 any() 和 __any_sync() 同步是必需的
+     * 
+     * 问题：原来的条件循环 `for (int i = ...; i < len; i += ...)` 导致不同线程
+     * 执行不同次数的迭代，使得 queue.add() 的调用不同步，导致 __any_sync() 死锁
+     * 
+     * 解决方案：计算最大迭代次数，所有线程执行相同次数的循环，
+     * 每个迭代都同步调用 queue.add()（无论是否有有效数据）
+     */
+    
+    /* 计算最大迭代次数：ceil(len / (n_warps * kWarpSize)) */
+    int max_iter = (len + n_warps * kWarpSize - 1) / (n_warps * kWarpSize);
+    
     /* 按照 laneId 访问数据 */
     const T* row_input = input + row * len;
-    for (int i = warp_id * kWarpSize + lane; i < len; i += n_warps * kWarpSize) {
+    
+    for (int iter = 0; iter < max_iter; iter++) {
+        /* 在每个迭代开始时同步 */
+        __syncwarp();
+        
+        /* 计算当前迭代处理的索引 */
+        int i = warp_id * kWarpSize + lane + iter * n_warps * kWarpSize;
+        
+        /* 如果索引有效，则添加到队列；否则添加 dummy 值 */
+        if (i < len) {
         queue.add(row_input[i], static_cast<IdxT>(i));
+        } else {
+            /* 使用 WarpSort 基类的静态方法获取正确的dummy值 */
+            using BaseWarpSort = WarpSort<Capacity, Ascending, T, IdxT>;
+            const T dummy_val = BaseWarpSort::kDummy();
+            queue.add(dummy_val, static_cast<IdxT>(-1));
+        }
     }
     
     /* 把 buffer 中剩余数合并到 queue 中 */
     queue.done();
     
+    /* 同步 warp，确保 done() 完成后再 store */
+    __syncwarp();
+    
     /* 将 queue 中的数存储到显存中（所有线程都要调用）*/
-    if (warp_id == 0) {
         T* row_out_val = output_vals + row * k;
         IdxT* row_out_idx = output_idx + row * k;
         queue.store(row_out_val, row_out_idx);
-    }
 }
 
 /**
@@ -82,7 +115,22 @@ cudaError_t select_k(
     bool select_min,
     cudaStream_t stream = 0)
 {
-    if (k > kMaxCapacity) {
+    // 参数验证
+    if (k <= 0 || k > kMaxCapacity) {
+        return cudaErrorInvalidValue;
+    }
+    if (batch_size <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    if (len <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    if (input == nullptr || output_vals == nullptr || output_idx == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    
+    // CUDA grid 维度限制检查
+    if (batch_size > 2147483647) {
         return cudaErrorInvalidValue;
     }
     
@@ -141,5 +189,5 @@ template cudaError_t select_k<float, int>(
 template cudaError_t select_k<float, uint32_t>(
     const float*, int, int, int, float*, uint32_t*, bool, cudaStream_t);
 
-} // namespace warpsort
+} // namespace warpsort_topk
 } // namespace pgvector

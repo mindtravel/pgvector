@@ -1,17 +1,19 @@
 # test_fusion_cos_topk的CMake配置
 
-# 源文件列表 - 包含所有算法版本
+# 源文件列表 - 只包含 warpsort 版本
 set(SOURCES
     test_fusion_cos_topk.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/l2norm.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/fusion_cos_topk/fusion_cos_topk_heap.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/fusion_cos_topk/fusion_cos_topk_heap_sharedmem.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/test_utils.cu
 )
 
 # 创建可执行文件
 add_executable(test_fusion_cos_topk ${SOURCES})
+
+# 链接共享库（只链接粗筛库，不需要精筛代码）
+target_link_libraries(test_fusion_cos_topk 
+    fusion_cos_topk_warpsort_coarse_lib
+    l2norm_lib
+)
 
 # 设置包含目录
 target_include_directories(test_fusion_cos_topk PRIVATE
