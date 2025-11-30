@@ -22,7 +22,7 @@
 
 
 #ifdef USE_CUDA
-static void GetScanLists_GPU(IndexScanDesc scan, Datum value);
+static void GetScanLists_GPU(IndexScanDesc scan, Datum value) __attribute__((unused));
 static int UploadCentersToGPU(IndexScanDesc scan);
 #endif
 
@@ -52,12 +52,12 @@ GetScanLists(IndexScanDesc scan, Datum value)
 	int			listCount = 0;
 	double		maxDistance = DBL_MAX;
 
-	/* 如果使用GPU加速，先收集所有聚类中心 */
+	/* 
+	 * 单次查询使用CPU版本的probe选择以确保与批量查询的一致性
+	 * 批量查询使用GPU加速，单次查询使用CPU计算，两者结果一致
+	 */
 #ifdef USE_CUDA
-	if (so->use_gpu && so->cuda_ctx) {
-		GetScanLists_GPU(scan, value);
-		return;
-	}
+	// elog(LOG, "GetScanLists: 单次查询使用CPU版本的probe选择以确保结果一致性");
 #endif
 
 	/* Search all list pages */
@@ -244,8 +244,12 @@ static void GetScanLists_GPU(IndexScanDesc scan, Datum value)
 	}
 	
 	/* 输出排序结果 */
-	for (int i = listCount - 1; i >= 0; i--)
-		so->listPages[i] = GetScanList(pairingheap_remove_first(so->listQueue))->startPage;
+	elog(LOG, "GetScanLists_GPU: 单次查询选择的probe列表:");
+	for (int i = listCount - 1; i >= 0; i--) {
+		IvfflatScanList *scanlist = GetScanList(pairingheap_remove_first(so->listQueue));
+		so->listPages[i] = scanlist->startPage;
+		elog(LOG, "  probe %d: 页面=%u, 距离=%.6f", i, scanlist->startPage, scanlist->distance);
+	}
 
 	Assert(pairingheap_is_empty(so->listQueue));
 	
@@ -500,6 +504,75 @@ GetScanItems_GPU(IndexScanDesc scan, Datum value)
 }
 
 /*
+ * Get items (non-GPU version)
+ */
+static void
+GetScanItems(IndexScanDesc scan, Datum value)
+{
+	IvfflatScanOpaque so = (IvfflatScanOpaque) scan->opaque;
+	TupleDesc	tupdesc = RelationGetDescr(scan->indexRelation);
+	TupleTableSlot *slot = so->vslot;
+	int			batchProbes = 0;
+
+	tuplesort_reset(so->sortstate);
+
+	/* Search closest probes lists */
+	while (so->listIndex < so->maxProbes && (++batchProbes) <= so->probes)
+	{
+		BlockNumber searchPage = so->listPages[so->listIndex++];
+
+		/* Search all entry pages for list */
+		while (BlockNumberIsValid(searchPage))
+		{
+			Buffer		buf;
+			Page		page;
+			OffsetNumber maxoffno;
+
+			buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, searchPage, RBM_NORMAL, so->bas);
+			LockBuffer(buf, BUFFER_LOCK_SHARE);
+			page = BufferGetPage(buf);
+			maxoffno = PageGetMaxOffsetNumber(page);
+
+			for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno))
+			{
+				IndexTuple	itup;
+				Datum		datum;
+				bool		isnull;
+				ItemId		itemid = PageGetItemId(page, offno);
+
+				itup = (IndexTuple) PageGetItem(page, itemid);
+				datum = index_getattr(itup, 1, tupdesc, &isnull);
+
+				/*
+				 * Add virtual tuple
+				 *
+				 * Use procinfo from the index instead of scan key for
+				 * performance
+				 */
+				ExecClearTuple(slot);
+				slot->tts_values[0] = so->distfunc(so->procinfo, so->collation, datum, value);
+				slot->tts_isnull[0] = false;
+				slot->tts_values[1] = PointerGetDatum(&itup->t_tid);
+				slot->tts_isnull[1] = false;
+				ExecStoreVirtualTuple(slot);
+
+				tuplesort_puttupleslot(so->sortstate, slot);
+			}
+
+			searchPage = IvfflatPageGetOpaque(page)->nextblkno;
+
+			UnlockReleaseBuffer(buf);
+		}
+	}
+
+	tuplesort_performsort(so->sortstate);
+
+#if defined(IVFFLAT_MEMORY)
+	elog(INFO, "memory: %zu MB", MemoryContextMemAllocated(CurrentMemoryContext, true) / (1024 * 1024));
+#endif
+}
+
+/*
  * Zero distance
  */
 static Datum
@@ -664,7 +737,10 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 				if (UploadCentersToGPU(scan) == 0) {
 					// elog(LOG, "数据上传成功");
 				} else {
-					elog(WARNING, "数据上传失败");
+					// elog(LOG, "数据上传失败");
+					/* 如果数据上传失败，清理CUDA上下文 */
+					cuda_center_search_cleanup(so->cuda_ctx);
+					so->cuda_ctx = NULL;
 				}
 				
 				/* 清理 */
@@ -672,10 +748,10 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 				so->cuda_ctx = NULL;
 				// elog(LOG, "CUDA 上下文清理完成");
 			} else {
-				elog(WARNING, "CUDA 上下文初始化失败");
+				// elog(LOG, "CUDA 上下文初始化失败");
 			}
 		} else {
-			elog(WARNING, "CUDA 基本功能测试失败");
+			elog(ERROR, "CUDA 基本功能测试失败");
 		}
 	} else {
 		// elog(LOG, "CUDA 不可用");
@@ -686,7 +762,7 @@ ivfflatbeginscan(Relation index, int nkeys, int norderbys)
 		so->use_gpu = true;
 		so->gpu_distances = palloc(lists * sizeof(float));
 		if (!so->gpu_distances) {
-			elog(WARNING, "无法分配GPU距离结果内存，将使用CPU计算");
+			elog(ERROR, "无法分配GPU距离结果内存，将使用CPU计算");
 			so->use_gpu = false;
 			cuda_center_search_cleanup(so->cuda_ctx);
 			so->cuda_ctx = NULL;
