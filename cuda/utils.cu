@@ -211,3 +211,93 @@ __global__ void map_candidate_indices_kernel(
         offset_ptr + 1 // 关键点：输出偏移 +1
     );
 }
+
+/**
+ * Kernel: 计算每个cluster会产生多少个entry（第一阶段：计算entry数量）
+ * 
+ * 线程模型：
+ * - gridDim.x = n_total_clusters (每个block处理一个cluster)
+ * - blockDim.x = 1 (单个线程)
+ * 
+ * 对于每个cluster，计算其query数量，然后计算需要多少个entry（每组kQueriesPerBlock个query）
+ */
+__global__ void count_entries_per_cluster_kernel(
+    const int* d_cluster_query_offset,  // [n_total_clusters + 1] CSR格式的offset
+    int* d_entry_count_per_cluster,  // [n_total_clusters] 输出：每个cluster产生的entry数量
+    int n_total_clusters,
+    int kQueriesPerBlock)
+{
+    const int cluster_id = blockIdx.x;
+    if (cluster_id >= n_total_clusters) return;
+    
+    int query_start = d_cluster_query_offset[cluster_id];
+    int query_end = d_cluster_query_offset[cluster_id + 1];
+    int n_queries = query_end - query_start;
+    
+    // 计算这个cluster需要多少个entry（每组kQueriesPerBlock个query）
+    int n_entries = (n_queries > 0) ? (n_queries + kQueriesPerBlock - 1) / kQueriesPerBlock : 0;
+    d_entry_count_per_cluster[cluster_id] = n_entries;
+}
+
+/**
+ * Kernel: 构建entry数据（第二阶段：填充entry数组）
+ * 
+ * 线程模型：
+ * - gridDim.x = n_total_clusters (每个block处理一个cluster)
+ * - blockDim.x = 1 (单个线程)
+ * 
+ * 对于每个cluster，将其query分组为entry，并写入entry数组
+ * 
+ * 注意：d_entry_queries 是扁平化的数组，包含所有 entry 的 query（按 entry 顺序排列）
+ * 需要计算每个 cluster 在 d_entry_queries 中的起始位置
+ */
+__global__ void build_entry_data_kernel(
+    const int* d_cluster_query_offset,  // [n_total_clusters + 1] CSR格式的offset
+    const int* d_cluster_query_data,  // [total_entries] CSR格式的data：query_id
+    const int* d_cluster_query_probe_indices,  // [total_entries] probe在query中的索引
+    const int* d_entry_offset,  // [n_total_clusters + 1] entry的offset（CSR格式）
+    const int* d_entry_query_offset,  // [n_total_clusters + 1] 每个cluster在d_entry_queries中的起始位置
+    int* d_entry_cluster_id,  // [n_entry] 输出：每个entry对应的cluster_id
+    int* d_entry_query_start,  // [n_entry] 输出：每个entry的query起始位置（在d_entry_queries中的偏移）
+    int* d_entry_query_count,  // [n_entry] 输出：每个entry的query数量
+    int* d_entry_queries,  // [total_queries_in_entries] 输出：所有entry的query列表
+    int* d_entry_probe_indices,  // [total_queries_in_entries] 输出：所有entry的probe_indices
+    int n_total_clusters,
+    int kQueriesPerBlock)
+{
+    const int cluster_id = blockIdx.x;
+    if (cluster_id >= n_total_clusters) return;
+    
+    int query_start = d_cluster_query_offset[cluster_id];
+    int query_end = d_cluster_query_offset[cluster_id + 1];
+    int n_queries = query_end - query_start;
+    
+    if (n_queries == 0) return;  // 跳过没有query的cluster
+    
+    int entry_start = d_entry_offset[cluster_id];
+    int entry_idx = entry_start;
+    
+    // 计算这个cluster在entry queries数组中的起始位置
+    int cluster_entry_query_start = d_entry_query_offset[cluster_id];
+    int current_query_offset = cluster_entry_query_start;
+    
+    // 将query分组为entry（每组kQueriesPerBlock个）
+    for (int batch_start = 0; batch_start < n_queries; batch_start += kQueriesPerBlock) {
+        int batch_size = min(kQueriesPerBlock, n_queries - batch_start);
+        
+        // 写入entry元数据
+        d_entry_cluster_id[entry_idx] = cluster_id;
+        d_entry_query_start[entry_idx] = current_query_offset;
+        d_entry_query_count[entry_idx] = batch_size;
+        
+        // 写入这个entry的query和probe_indices
+        for (int i = 0; i < batch_size; ++i) {
+            int query_idx = query_start + batch_start + i;
+            d_entry_queries[current_query_offset + i] = d_cluster_query_data[query_idx];
+            d_entry_probe_indices[current_query_offset + i] = d_cluster_query_probe_indices[query_idx];
+        }
+        
+        current_query_offset += batch_size;
+        entry_idx++;
+    }
+}

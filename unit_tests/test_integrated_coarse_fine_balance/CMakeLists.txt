@@ -17,18 +17,15 @@ set(SOURCES
     ../common/test_utils.cu
     # 使用共享库，不再重复编译
     # ../../cuda/l2norm/l2norm.cu - 在 l2norm_lib 中
-    # ../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu - 在 fusion_cos_topk_warpsort_lib 中
     # 需要编译fusion_cos_topk_warpsort_fine.cu（fine_screen_top_n.cu依赖它）
     ../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine.cu
-    # 需要编译indexed_gemm.cu（fusion_cos_topk_warpsort_fine.cu依赖indexed_inner_product_kernel）
+    # indexed_gemm.cu 为弃用版本，需要单独编译（不在 indexed_gemm_lib 中）
     ../../cuda/indexed_gemm/indexed_gemm.cu
-    # 固定probe版本的精筛实现 - 已在 fusion_cos_topk_warpsort_lib 中，不再重复编译
-    # ../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu
-    # ../../cuda/indexed_gemm/indexed_gemm_v3_fixed_probe.cu - 已在 fusion_cos_topk_warpsort_lib 中
-    # warpsort_topk 用于规约 - 已在 fusion_cos_topk_warpsort_lib 中
-    # ../../cuda/warpsortfilter/warpsort_topk.cu
+    # ../../cuda/integrate_screen/integrate_screen.cu - 在 integrate_screen_lib 中
+    # ../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu - 在 integrate_screen_lib 中
+    # indexed_gemm_v3_fixed_probe.cu, indexed_gemm_v5.cu - 在 indexed_gemm_lib 中
+    # warpsort_topk - 在 integrate_screen_lib 中
     ../../cuda/fine_screen_top_n/fine_screen_top_n.cu
-    ../../cuda/integrate_screen/integrate_screen.cu
 )
 
 add_executable(test_integrated_coarse_fine ${SOURCES})
@@ -38,6 +35,8 @@ target_link_libraries(test_integrated_coarse_fine
     cublas
     curand
     l2norm_lib
+    indexed_gemm_lib  # 包含 v3_fixed_probe 和 v5
+    integrate_screen_lib  # 包含 integrate_screen.cu, fusion_cos_topk_warpsort.cu, warpsort_topk.cu
     fusion_cos_topk_warpsort_lib
 )
 

@@ -30,6 +30,25 @@ static void GetScanLists_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys);
 static int UploadCentersToGPU_Batch(IndexScanDesc scan);
 static int UploadIndexTuplesToGPU_Batch(IndexScanDesc scan);
 static void GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys);
+
+/* batch_search_pipeline相关函数 */
+typedef struct {
+    int cluster_id;
+    int vector_index_in_cluster;
+    ItemPointerData tid;
+} VectorIndexMapping;
+
+static int PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_probes,
+                                       float*** query_batch_out, int** cluster_size_out,
+                                       float**** cluster_vectors_out, float*** cluster_center_data_out,
+                                       VectorIndexMapping*** mapping_table_out,
+                                       BlockNumber** cluster_pages_out,
+                                       int* n_total_clusters_out, int* n_total_vectors_out);
+static void ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_index,
+                                        int n_query, int k, BatchBuffer* result_buffer,
+                                        VectorIndexMapping* mapping_table, int* cluster_size,
+                                        BlockNumber* cluster_pages, int n_total_clusters);
+static void ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int k);
 #endif
 
 /*
@@ -206,33 +225,26 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
     
 #ifdef USE_CUDA
     if (so->cuda_ctx && so->cuda_ctx->initialized) {
+        /* 暂时使用旧的实现，等待integrate_screen编译问题解决 */
         /* 步骤1: 选择最近的列表（probes） */
-        // elog(LOG, "ProcessBatchQueriesGPU: 步骤1 - 选择最近的列表");
         GetScanLists_BatchGPU(scan, batch_keys);
         
         /* 步骤2: 上传probe候选数据到GPU（分离存储方案） */
-        // elog(LOG, "ProcessBatchQueriesGPU: 步骤2 - 上传probe候选数据（分离存储方案）");
         if (UploadIndexTuplesToGPU_Batch(scan) != 0) {
             elog(ERROR, "ProcessBatchQueriesGPU: 上传probe候选数据失败");
             return;
         }
         
         /* 步骤3: 从GPU获取结果并填充到result_buffer */
-        // elog(LOG, "ProcessBatchQueriesGPU: 步骤3 - 获取GPU结果");
-        /* 保存k值到扫描状态，供GetScanItems_BatchGPU使用 */
         if (so->result_buffer == NULL) {
             so->result_buffer = CreateBatchBuffer(nbatch, k, so->dimensions, so->tmpCtx);
         } else {
-            so->result_buffer->k = k;  /* 更新k值 */
+            so->result_buffer->k = k;
         }
         GetScanItems_BatchGPU(scan, batch_keys);
-        
-        // elog(LOG, "ProcessBatchQueriesGPU: GPU处理完成");
         return;
     }
 #endif
-    
-    // elog(LOG, "ProcessBatchQueriesGPU: 生成了 %d 个假结果", so->result_buffer->total_results);
 }
 
 void
@@ -836,4 +848,337 @@ UploadIndexTuplesToGPU_Batch(IndexScanDesc scan)
     //      total_candidates, nbatch, (float)total_candidates / nbatch);
     return 0;
 }
+
+/*
+ * 为batch_search_pipeline准备数据
+ * 从PostgreSQL索引读取所有cluster的数据并组织为pipeline需要的格式
+ */
+static int
+PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_probes,
+                            float*** query_batch_out, int** cluster_size_out,
+                            float**** cluster_vectors_out, float*** cluster_center_data_out,
+                            VectorIndexMapping*** mapping_table_out,
+                            BlockNumber** cluster_pages_out,
+                            int* n_total_clusters_out, int* n_total_vectors_out)
+{
+    IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
+    TupleDesc tupdesc = RelationGetDescr(scan->indexRelation);
+    MemoryContext oldCtx = MemoryContextSwitchTo(so->tmpCtx);
+    
+    int totalLists = 0;
+    IvfflatGetMetaPageInfo(scan->indexRelation, &totalLists, NULL);
+    
+    if (totalLists <= 0) {
+        MemoryContextSwitchTo(oldCtx);
+        return -1;
+    }
+    
+    int dimensions = so->dimensions;
+    int nbatch = batch_keys->nkeys;
+    
+    /* 第一次遍历：统计每个cluster的向量数量 */
+    int* cluster_sizes = (int*)palloc0(totalLists * sizeof(int));
+    BlockNumber* cluster_start_pages = (BlockNumber*)palloc(totalLists * sizeof(BlockNumber));
+    int* cluster_center_indices = (int*)palloc(totalLists * sizeof(int));
+    
+    BlockNumber nextblkno = IVFFLAT_HEAD_BLKNO;
+    int center_idx = 0;
+    
+    /* 收集cluster元数据 */
+    while (BlockNumberIsValid(nextblkno))
+    {
+        Buffer cbuf = ReadBuffer(scan->indexRelation, nextblkno);
+        LockBuffer(cbuf, BUFFER_LOCK_SHARE);
+        Page cpage = BufferGetPage(cbuf);
+        OffsetNumber maxoffno = PageGetMaxOffsetNumber(cpage);
+
+        for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno))
+        {
+            if (center_idx >= totalLists) {
+                UnlockReleaseBuffer(cbuf);
+                MemoryContextSwitchTo(oldCtx);
+                pfree(cluster_sizes);
+                pfree(cluster_start_pages);
+                pfree(cluster_center_indices);
+                return -1;
+            }
+            
+            IvfflatList list = (IvfflatList) PageGetItem(cpage, PageGetItemId(cpage, offno));
+            cluster_start_pages[center_idx] = list->startPage;
+            cluster_center_indices[center_idx] = center_idx;
+            center_idx++;
+        }
+
+        nextblkno = IvfflatPageGetOpaque(cpage)->nextblkno;
+        UnlockReleaseBuffer(cbuf);
+    }
+    
+    /* 统计每个cluster的向量数量 */
+    int total_vectors = 0;
+    for (int i = 0; i < totalLists; i++) {
+        BlockNumber searchPage = cluster_start_pages[i];
+        while (BlockNumberIsValid(searchPage)) {
+            Buffer buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, 
+                                          searchPage, RBM_NORMAL, NULL);
+            LockBuffer(buf, BUFFER_LOCK_SHARE);
+            Page page = BufferGetPage(buf);
+            OffsetNumber maxoffno = PageGetMaxOffsetNumber(page);
+            
+            for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno)) {
+                IndexTuple itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offno));
+                Datum vector_datum = index_getattr(itup, 1, tupdesc, NULL);
+                if (!DatumIsNull(vector_datum)) {
+                    cluster_sizes[i]++;
+                    total_vectors++;
+                }
+            }
+            
+            searchPage = IvfflatPageGetOpaque(page)->nextblkno;
+            UnlockReleaseBuffer(buf);
+        }
+    }
+    
+    /* 分配输出数据结构 */
+    float** query_batch = (float**)palloc(nbatch * sizeof(float*));
+    float* query_data_contiguous = (float*)palloc(nbatch * dimensions * sizeof(float));
+    
+    for (int i = 0; i < nbatch; i++) {
+        Datum vector_datum = ScanKeyBatchGetVector(batch_keys, i);
+        Vector *vec = DatumGetVector(vector_datum);
+        memcpy(query_data_contiguous + i * dimensions, &vec->x[0], dimensions * sizeof(float));
+        query_batch[i] = query_data_contiguous + i * dimensions;
+    }
+    
+    int* cluster_size = (int*)palloc(totalLists * sizeof(int));
+    memcpy(cluster_size, cluster_sizes, totalLists * sizeof(int));
+    
+    float*** cluster_vectors = (float***)palloc(totalLists * sizeof(float**));
+    float** cluster_vectors_data = (float**)palloc(totalLists * sizeof(float*));
+    
+    float** cluster_center_data = (float**)palloc(totalLists * sizeof(float*));
+    float* cluster_centers_contiguous = (float*)palloc(totalLists * dimensions * sizeof(float));
+    
+    VectorIndexMapping* mapping_table = (VectorIndexMapping*)palloc(total_vectors * sizeof(VectorIndexMapping));
+    int mapping_idx = 0;
+    
+    /* 第二次遍历：读取向量数据和cluster中心，构建映射表 */
+    nextblkno = IVFFLAT_HEAD_BLKNO;
+    center_idx = 0;
+    
+    while (BlockNumberIsValid(nextblkno))
+    {
+        Buffer cbuf = ReadBuffer(scan->indexRelation, nextblkno);
+        LockBuffer(cbuf, BUFFER_LOCK_SHARE);
+        Page cpage = BufferGetPage(cbuf);
+        OffsetNumber maxoffno = PageGetMaxOffsetNumber(cpage);
+
+        for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno))
+        {
+            IvfflatList list = (IvfflatList) PageGetItem(cpage, PageGetItemId(cpage, offno));
+            Vector *center_vector = &list->center;
+            
+            memcpy(cluster_centers_contiguous + center_idx * dimensions, 
+                   &center_vector->x[0], dimensions * sizeof(float));
+            cluster_center_data[center_idx] = cluster_centers_contiguous + center_idx * dimensions;
+            
+            if (cluster_sizes[center_idx] > 0) {
+                float* cluster_data = (float*)palloc(cluster_sizes[center_idx] * dimensions * sizeof(float));
+                cluster_vectors_data[center_idx] = cluster_data;
+                cluster_vectors[center_idx] = &cluster_vectors_data[center_idx];
+                
+                int vector_idx = 0;
+                BlockNumber searchPage = cluster_start_pages[center_idx];
+                while (BlockNumberIsValid(searchPage)) {
+                    Buffer buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, 
+                                                  searchPage, RBM_NORMAL, NULL);
+                    LockBuffer(buf, BUFFER_LOCK_SHARE);
+                    Page page = BufferGetPage(buf);
+                    OffsetNumber maxoffno_page = PageGetMaxOffsetNumber(page);
+                    
+                    for (OffsetNumber offno_page = FirstOffsetNumber; offno_page <= maxoffno_page; offno_page = OffsetNumberNext(offno_page)) {
+                        IndexTuple itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offno_page));
+                        Datum vector_datum = index_getattr(itup, 1, tupdesc, NULL);
+                        
+                        if (!DatumIsNull(vector_datum)) {
+                            Vector *vec = DatumGetVector(vector_datum);
+                            memcpy(cluster_data + vector_idx * dimensions, 
+                                   &vec->x[0], dimensions * sizeof(float));
+                            
+                            mapping_table[mapping_idx].cluster_id = center_idx;
+                            mapping_table[mapping_idx].vector_index_in_cluster = vector_idx;
+                            mapping_table[mapping_idx].tid = itup->t_tid;
+                            mapping_idx++;
+                            vector_idx++;
+                        }
+                    }
+                    
+                    searchPage = IvfflatPageGetOpaque(page)->nextblkno;
+                    UnlockReleaseBuffer(buf);
+                }
+            } else {
+                cluster_vectors[center_idx] = NULL;
+            }
+            
+            center_idx++;
+        }
+
+        nextblkno = IvfflatPageGetOpaque(cpage)->nextblkno;
+        UnlockReleaseBuffer(cbuf);
+    }
+    
+    *query_batch_out = query_batch;
+    *cluster_size_out = cluster_size;
+    *cluster_vectors_out = cluster_vectors;
+    *cluster_center_data_out = cluster_center_data;
+    *mapping_table_out = mapping_table;
+    *cluster_pages_out = cluster_start_pages;
+    *n_total_clusters_out = totalLists;
+    *n_total_vectors_out = total_vectors;
+    
+    pfree(cluster_sizes);
+    pfree(cluster_center_indices);
+    
+    MemoryContextSwitchTo(oldCtx);
+    return 0;
+}
+
+/*
+ * 将batch_search_pipeline的输出转换为BatchBuffer格式
+ * topk_index是全局向量索引（在所有向量中的索引，从0开始）
+ */
+static void
+ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_index,
+                            int n_query, int k, BatchBuffer* result_buffer,
+                            VectorIndexMapping* mapping_table, int* cluster_size,
+                            BlockNumber* cluster_pages, int n_total_clusters)
+{
+    int total_vectors = 0;
+    for (int i = 0; i < n_total_clusters; i++) {
+        total_vectors += cluster_size[i];
+    }
+    
+    int total_results = 0;
+    for (int query_idx = 0; query_idx < n_query; query_idx++) {
+        for (int i = 0; i < k; i++) {
+            int buffer_idx = query_idx * k + i;
+            int global_vector_idx = topk_index[query_idx][i];
+            
+            if (global_vector_idx >= 0 && global_vector_idx < total_vectors) {
+                /* 直接使用全局索引在mapping_table中查找 */
+                VectorIndexMapping* mapping = &mapping_table[global_vector_idx];
+                result_buffer->query_ids[buffer_idx] = query_idx;
+                result_buffer->vector_ids[buffer_idx] = mapping->tid;
+                result_buffer->distances[buffer_idx] = topk_dist[query_idx][i];
+                total_results++;
+            } else {
+                /* null值 */
+                result_buffer->query_ids[buffer_idx] = query_idx;
+                ItemPointerSetInvalid(&result_buffer->vector_ids[buffer_idx]);
+                result_buffer->distances[buffer_idx] = INFINITY;
+            }
+        }
+    }
+    
+    result_buffer->total_results = total_results > 0 ? total_results : n_query * k;
+}
+
+/* C++包装函数声明（在C++文件中实现，通过extern "C"导出） */
+extern int batch_search_pipeline_wrapper(float** query_batch, int* cluster_size,
+                                         float*** cluster_vectors, float** cluster_center_data,
+                                         float** topk_dist, int** topk_index, int* n_isnull,
+                                         int n_query, int n_dim, int n_total_cluster,
+                                         int n_total_vectors, int n_probes, int k);
+
+/*
+ * 使用batch_search_pipeline的新GPU处理流程
+ */
+static void
+ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
+{
+    IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
+    int nbatch = batch_keys->nkeys;
+    
+    /* 准备数据 */
+    float** query_batch = NULL;
+    int* cluster_size = NULL;
+    float*** cluster_vectors = NULL;
+    float** cluster_center_data = NULL;
+    VectorIndexMapping* mapping_table = NULL;
+    BlockNumber* cluster_pages = NULL;
+    int n_total_clusters = 0;
+    int n_total_vectors = 0;
+    
+    if (PrepareBatchDataForPipeline(scan, batch_keys, so->probes,
+                                    &query_batch, &cluster_size,
+                                    &cluster_vectors, &cluster_center_data,
+                                    &mapping_table, &cluster_pages,
+                                    &n_total_clusters, &n_total_vectors) != 0) {
+        elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 数据准备失败");
+        return;
+    }
+    
+    /* 准备输出缓冲区（使用malloc，因为batch_search_pipeline使用malloc） */
+    float** topk_dist = (float**)malloc(nbatch * sizeof(float*));
+    int** topk_index = (int**)malloc(nbatch * sizeof(int*));
+    int* n_isnull = (int*)malloc(nbatch * sizeof(int));
+    
+    if (!topk_dist || !topk_index || !n_isnull) {
+        elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配输出缓冲区");
+        return;
+    }
+    
+    for (int i = 0; i < nbatch; i++) {
+        topk_dist[i] = (float*)malloc(k * sizeof(float));
+        topk_index[i] = (int*)malloc(k * sizeof(int));
+        n_isnull[i] = 0;
+        if (!topk_dist[i] || !topk_index[i]) {
+            elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配输出缓冲区");
+            for (int j = 0; j < i; j++) {
+                free(topk_dist[j]);
+                free(topk_index[j]);
+            }
+            free(topk_dist);
+            free(topk_index);
+            free(n_isnull);
+            return;
+        }
+    }
+    
+    /* 调用batch_search_pipeline包装函数 */
+    int result = batch_search_pipeline_wrapper(query_batch, cluster_size, cluster_vectors,
+                                               cluster_center_data, topk_dist, topk_index, n_isnull,
+                                               nbatch, so->dimensions, n_total_clusters,
+                                               n_total_vectors, so->probes, k);
+    
+    if (result != 0) {
+        elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: batch_search_pipeline执行失败");
+        for (int i = 0; i < nbatch; i++) {
+            free(topk_dist[i]);
+            free(topk_index[i]);
+        }
+        free(topk_dist);
+        free(topk_index);
+        free(n_isnull);
+        return;
+    }
+    
+    /* 转换结果 */
+    if (so->result_buffer == NULL) {
+        so->result_buffer = CreateBatchBuffer(nbatch, k, so->dimensions, so->tmpCtx);
+    }
+    
+    ConvertBatchPipelineResults(scan, topk_dist, topk_index, nbatch, k,
+                                so->result_buffer, mapping_table, cluster_size,
+                                cluster_pages, n_total_clusters);
+    
+    /* 清理malloc分配的内存 */
+    for (int i = 0; i < nbatch; i++) {
+        free(topk_dist[i]);
+        free(topk_index[i]);
+    }
+    free(topk_dist);
+    free(topk_index);
+    free(n_isnull);
+}
+
 #endif

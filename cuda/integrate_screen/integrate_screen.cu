@@ -1,3 +1,8 @@
+/* 必须在任何头文件之前包含limits.h，以便Thrust可以使用CHAR_MIN等宏 */
+#ifndef _LIMITS_H_
+#define _LIMITS_H_
+#endif
+#include <limits.h>
 #include "../pch.h"
 #include "integrate_screen.cuh"
 
@@ -9,9 +14,6 @@
 #include "../../unit_tests/common/test_utils.cuh"
 #include "../l2norm/l2norm.cuh"
 #include "../utils.cuh"
-#include <thrust/device_ptr.h>
-#include <thrust/fill.h>
-#include <thrust/sequence.h>
 #include <algorithm>
 #include <cstring>
 #include <cfloat>
@@ -187,11 +189,14 @@ void batch_search_pipeline(float** query_batch,
                 d_index, n_query, n_total_clusters);
             CHECK_CUDA_ERRORS;
     
-            /* 初始化距离数组（为一个小于-1的负数） */
-            thrust::fill(
-                thrust::device_pointer_cast(d_top_nprobe_dist),/*使用pointer_cast不用创建临时对象*/
-                thrust::device_pointer_cast(d_top_nprobe_dist) + (n_query * n_probes),  /* 使用元素数量而非字节数 */
-                FLT_MAX
+            /* 初始化距离数组（使用fill kernel替代thrust::fill） */
+            dim3 fill_block(256);
+            int fill_grid_size = (n_query * n_probes + fill_block.x - 1) / fill_block.x;
+            dim3 fill_grid(fill_grid_size);
+            fill_kernel<<<fill_grid, fill_block>>>(
+                d_top_nprobe_dist,
+                FLT_MAX,
+                n_query * n_probes
             );
             // cudaMemset((void*)d_top_nprobe_dist, (int)0xEF, n_query * k * sizeof(float)) /*也可以投机取巧用memset，正好将数组为一个非常大的负数*/
             // table_cuda_2D("topk cos distance", d_top_nprobe_dist, n_query, k);    
@@ -276,74 +281,52 @@ void batch_search_pipeline(float** query_batch,
     }
 
     // ------------------------------------------------------------------
-    // Step 2. 将 query→cluster 粗筛结果转成 cluster 序列
+    // Step 2. 将 query→cluster 粗筛结果转成 entry 数据（v5 entry-based）
     // ------------------------------------------------------------------
     // 确保 Step 1 完全完成后再开始 Step 2
+    // 首先构建 cluster-query 映射（CSR格式），然后转换为 entry 数据
     int* d_cluster_query_offset = nullptr;
     int* d_cluster_query_data = nullptr;
     int* d_cluster_query_probe_indices = nullptr;
-    int total_entries = 0;  // 总条目数
+    
+    // Entry数据结构（GPU内存）
+    int* d_entry_cluster_id = nullptr;
+    int* d_entry_query_start = nullptr;
+    int* d_entry_query_count = nullptr;
+    int* d_entry_queries = nullptr;
+    int* d_entry_probe_indices = nullptr;
+    int n_entry = 0;
+    constexpr int kQueriesPerBlock = 8;
 
     {
-        CUDATimer timer("Step 2: Convert query→cluster to cluster sequence (GPU)");
+        CUDATimer timer("Step 2: Build entry data (GPU)");
         
         // 第一步：在GPU上统计每个cluster有多少个query使用它
         int* d_cluster_query_count = nullptr;
         cudaMalloc(&d_cluster_query_count, n_total_clusters * sizeof(int));
         cudaMemset(d_cluster_query_count, 0, n_total_clusters * sizeof(int));
-        cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
         
-        count_cluster_queries_kernel<<<probeDim, queryDim>>>(
+        count_cluster_queries_kernel<<<queryDim, probeDim>>>(
             d_top_nprobe_index,
             d_cluster_query_count,
             n_query,
             n_probes,
             n_total_clusters
         );
-        cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
-        
-        // 调试：检查 d_cluster_query_count 的值
-        if(false){
-            int* h_cluster_query_count_debug = (int*)malloc(n_total_clusters * sizeof(int));
-            cudaMemcpy(h_cluster_query_count_debug, d_cluster_query_count, 
-                       n_total_clusters * sizeof(int), cudaMemcpyDeviceToHost);
-            printf("[DEBUG GPU Step 2] d_cluster_query_count (first 10): ");
-            for (int i = 0; i < std::min(10, n_total_clusters); ++i) {
-                printf("c%d=%d ", i, h_cluster_query_count_debug[i]);
-            }
-            printf("\n");
-            free(h_cluster_query_count_debug);
-        }
         
         // 第二步：在GPU上构建CSR格式的offset数组（使用前缀和）
         cudaMalloc(&d_cluster_query_offset, (n_total_clusters + 1) * sizeof(int));
         CHECK_CUDA_ERRORS;
         
-        // 使用GPU前缀和计算offset数组
         compute_prefix_sum(d_cluster_query_count, d_cluster_query_offset, n_total_clusters, 0);
-        cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
         
-        // 调试：检查前缀和计算后的 offset 数组
-        if(false){
-            int* h_cluster_query_offset_debug = (int*)malloc((n_total_clusters + 1) * sizeof(int));
-            cudaMemcpy(h_cluster_query_offset_debug, d_cluster_query_offset, 
-                       (n_total_clusters + 1) * sizeof(int), cudaMemcpyDeviceToHost);
-            printf("[DEBUG GPU Step 2] d_cluster_query_offset after prefix_sum (first 11): ");
-            for (int i = 0; i < std::min(11, n_total_clusters + 1); ++i) {
-                printf("offset[%d]=%d ", i, h_cluster_query_offset_debug[i]);
-            }
-            printf("\n");
-            free(h_cluster_query_offset_debug);
-        }
-        
         // 获取总条目数（需要从GPU读取最后一个元素）
-        int total_entries_host = 0;
-        cudaMemcpy(&total_entries_host, d_cluster_query_offset + n_total_clusters, 
+        int total_entries = 0;
+        cudaMemcpy(&total_entries, d_cluster_query_offset + n_total_clusters, 
                    sizeof(int), cudaMemcpyDeviceToHost);
-        total_entries = total_entries_host;
         CHECK_CUDA_ERRORS;
         
         // 初始化写入位置数组（从offset复制，跳过最后一个元素）
@@ -353,41 +336,12 @@ void batch_search_pipeline(float** query_batch,
                    n_total_clusters * sizeof(int), cudaMemcpyDeviceToDevice);
         CHECK_CUDA_ERRORS;
         
-        // 调试：检查 d_cluster_write_pos 的初始值
-        if(false){
-            int* h_cluster_write_pos_debug = (int*)malloc(n_total_clusters * sizeof(int));
-            cudaMemcpy(h_cluster_write_pos_debug, d_cluster_write_pos, 
-                       n_total_clusters * sizeof(int), cudaMemcpyDeviceToHost);
-            printf("[DEBUG GPU Step 2] d_cluster_write_pos initial values (first 10): ");
-            for (int i = 0; i < std::min(10, n_total_clusters); ++i) {
-                printf("c%d=%d ", i, h_cluster_write_pos_debug[i]);
-            }
-            printf("\n");
-            free(h_cluster_write_pos_debug);
-        }
-        
-        // 第三步：在GPU上分配输出数组
+        // 第三步：在GPU上分配cluster-query映射数组
         cudaMalloc(&d_cluster_query_data, total_entries * sizeof(int));
         cudaMalloc(&d_cluster_query_probe_indices, total_entries * sizeof(int));
-        // 初始化输出数组为无效值（用于调试）
-        cudaMemset(d_cluster_query_data, 0xFF, total_entries * sizeof(int));
-        cudaMemset(d_cluster_query_probe_indices, 0xFF, total_entries * sizeof(int));
         CHECK_CUDA_ERRORS;
         
-        // 调试：检查 d_top_nprobe_index 的值
-        if(false){
-            int* h_top_nprobe_index_debug = (int*)malloc(n_query * n_probes * sizeof(int));
-            cudaMemcpy(h_top_nprobe_index_debug, d_top_nprobe_index, 
-                       n_query * n_probes * sizeof(int), cudaMemcpyDeviceToHost);
-            printf("[DEBUG GPU Step 2] d_top_nprobe_index for Query 0: ");
-            for (int p = 0; p < n_probes; ++p) {
-                printf("p%d=cluster%d ", p, h_top_nprobe_index_debug[p]);
-            }
-            printf("\n");
-            free(h_top_nprobe_index_debug);
-        }
-        
-        // 第四步：在GPU上构建CSR格式的数据
+        // 第四步：在GPU上构建CSR格式的cluster-query映射
         build_cluster_query_mapping_kernel<<<queryDim, probeDim>>>(
             d_top_nprobe_index,
             d_cluster_query_offset,
@@ -398,67 +352,99 @@ void batch_search_pipeline(float** query_batch,
             n_probes,
             n_total_clusters
         );
-        cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
         
-        // 调试输出：检查Step 2的cluster-query映射
-        if(false){
-            int* h_cluster_query_offset = (int*)malloc((n_total_clusters + 1) * sizeof(int));
-            cudaMemcpy(h_cluster_query_offset, d_cluster_query_offset, 
-                       (n_total_clusters + 1) * sizeof(int), cudaMemcpyDeviceToHost);
+        // 第五步：在GPU上计算每个cluster会产生多少个entry
+        int* d_entry_count_per_cluster = nullptr;
+        cudaMalloc(&d_entry_count_per_cluster, n_total_clusters * sizeof(int));
+        CHECK_CUDA_ERRORS;
+        
+        dim3 clusterDim(n_total_clusters);
+        dim3 blockDim_entry(1);
+        count_entries_per_cluster_kernel<<<clusterDim, blockDim_entry>>>(
+            d_cluster_query_offset,
+            d_entry_count_per_cluster,
+            n_total_clusters,
+            kQueriesPerBlock
+        );
+        CHECK_CUDA_ERRORS;
+        
+        // 第六步：计算entry的offset数组（使用前缀和）
+        int* d_entry_offset = nullptr;
+        cudaMalloc(&d_entry_offset, (n_total_clusters + 1) * sizeof(int));
+        CHECK_CUDA_ERRORS;
+        
+        compute_prefix_sum(d_entry_count_per_cluster, d_entry_offset, n_total_clusters, 0);
+        CHECK_CUDA_ERRORS;
+        
+        // 获取entry总数（从GPU读取最后一个元素）
+        cudaMemcpy(&n_entry, d_entry_offset + n_total_clusters, 
+                   sizeof(int), cudaMemcpyDeviceToHost);
+        CHECK_CUDA_ERRORS;
+        
+        // 第七步：计算每个cluster在entry queries数组中的起始位置
+        // 这等于 d_cluster_query_offset（因为每个cluster的query数量不变，只是被分组为entry）
+        int* d_entry_query_offset = nullptr;
+        cudaMalloc(&d_entry_query_offset, (n_total_clusters + 1) * sizeof(int));
+        cudaMemcpy(d_entry_query_offset, d_cluster_query_offset, 
+                   (n_total_clusters + 1) * sizeof(int), cudaMemcpyDeviceToDevice);
+        CHECK_CUDA_ERRORS;
+        
+        // 第八步：分配entry数据数组
+        if (n_entry > 0) {
+            cudaMalloc(&d_entry_cluster_id, n_entry * sizeof(int));
+            cudaMalloc(&d_entry_query_start, n_entry * sizeof(int));
+            cudaMalloc(&d_entry_query_count, n_entry * sizeof(int));
+            
+            // 计算总的query数量（等于total_entries，因为每个entry-query对对应一个query）
+            cudaMalloc(&d_entry_queries, total_entries * sizeof(int));
+            cudaMalloc(&d_entry_probe_indices, total_entries * sizeof(int));
             CHECK_CUDA_ERRORS;
             
-            printf("[DEBUG GPU Step 2] Cluster-query mapping (first 10 clusters, total_entries=%d):\n", total_entries);
-            for (int c = 0; c < std::min(10, n_total_clusters); ++c) {
-                int start = h_cluster_query_offset[c];
-                int end = h_cluster_query_offset[c + 1];
-                printf("  Cluster %d: offset=[%d, %d), count=%d\n", c, start, end, end - start);
-                if (end > start && end <= total_entries) {
-                    int* h_cluster_query_data = (int*)malloc((end - start) * sizeof(int));
-                    int* h_cluster_query_probe_indices = (int*)malloc((end - start) * sizeof(int));
-                    cudaMemcpy(h_cluster_query_data, d_cluster_query_data + start, 
-                               (end - start) * sizeof(int), cudaMemcpyDeviceToHost);
-                    cudaMemcpy(h_cluster_query_probe_indices, d_cluster_query_probe_indices + start, 
-                               (end - start) * sizeof(int), cudaMemcpyDeviceToHost);
-                    printf("    Data: [");
-                    for (int i = 0; i < std::min(5, end - start); ++i) {
-                        printf("(q=%d,p=%d) ", h_cluster_query_data[i], h_cluster_query_probe_indices[i]);
-                    }
-                    if (end - start > 5) printf("...");
-                    printf("]\n");
-                    free(h_cluster_query_data);
-                    free(h_cluster_query_probe_indices);
-                } else if (end > start) {
-                    printf("    [ERROR] end=%d > total_entries=%d\n", end, total_entries);
-                }
-            }
-            free(h_cluster_query_offset);
+            // 第九步：在GPU上构建entry数据
+            build_entry_data_kernel<<<clusterDim, blockDim_entry>>>(
+                d_cluster_query_offset,
+                d_cluster_query_data,
+                d_cluster_query_probe_indices,
+                d_entry_offset,
+                d_entry_query_offset,
+                d_entry_cluster_id,
+                d_entry_query_start,
+                d_entry_query_count,
+                d_entry_queries,
+                d_entry_probe_indices,
+                n_total_clusters,
+                kQueriesPerBlock
+            );
+            CHECK_CUDA_ERRORS;
         }
         
+        // 清理临时内存
+        cudaFree(d_entry_query_offset);
+        
+        // 清理临时内存
         cudaFree(d_cluster_query_count);
-        cudaFree(d_cluster_write_pos);        
+        cudaFree(d_cluster_write_pos);
+        cudaFree(d_entry_count_per_cluster);
+        cudaFree(d_entry_offset);
         cudaFree(d_top_nprobe_index);
         CHECK_CUDA_ERRORS;
     }
 
 
         // ------------------------------------------------------------------
-    // Step 3. 精筛：上传 cluster 向量 + cluster 查询映射，调用 GPU kernel
+    // Step 3. 精筛：使用 v5 entry-based 版本
         // ------------------------------------------------------------------
     {
-        CUDATimer timer("Step 3: Fine Search (fine_screen_top_n)");
+        CUDATimer timer("Step 3: Fine Search (v5 entry-based)");
 
         int capacity = 32;
-        int* probe_query_offsets_host = nullptr;
-        constexpr int kQueriesPerBlock = 8;
         float* d_topk_dist_candidate = nullptr;
         int* d_topk_index_candidate = nullptr;
         
         // 配置kernel launch
-        // 固定probe版本：每个block处理一个probe的多个query
+        // v5 entry-based版本：每个block处理一个entry（一个cluster + 一组query）
         dim3 block(kQueriesPerBlock * 32);  // 8个warp，每个warp 32个线程
-    
-        int max_queries_per_probe = 0;
     
         {
             CUDATimer timer_init("Init Invalid Values Kernel", ENABLE_CUDA_TIMING);
@@ -468,17 +454,6 @@ void batch_search_pipeline(float** query_batch,
             capacity = std::min(capacity, kMaxCapacity);
             
             CHECK_CUDA_ERRORS;
-            
-            // 计算max_queries_per_probe用于launch函数（用于计算grid配置）
-            // d_cluster_query_offset 的大小是 n_total_clusters + 1，因为每个 cluster 都是一个 probe
-            probe_query_offsets_host = (int*)malloc((n_total_clusters + 1) * sizeof(int));
-            cudaMemcpy(probe_query_offsets_host, d_cluster_query_offset, (n_total_clusters + 1) * sizeof(int), cudaMemcpyDeviceToHost);
-    
-            for (int i = 0; i < n_total_clusters; ++i) {
-                int n_queries = probe_query_offsets_host[i + 1] - probe_query_offsets_host[i];
-                max_queries_per_probe = std::max(max_queries_per_probe, n_queries);
-            }
-            CHECK_CUDA_ERRORS;
     
             // 按query组织的结果 [n_query][n_probes][k]
             cudaMalloc(&d_topk_dist_candidate, n_query * n_probes * k * sizeof(float));
@@ -487,98 +462,90 @@ void batch_search_pipeline(float** query_batch,
             // 初始化输出内存为无效值（FLT_MAX 和 -1）
             dim3 init_block(512);
             int init_grid_size = (n_query * n_probes * k + init_block.x - 1) / init_block.x;
-            
-            // // 检查 grid 大小是否超过 CUDA 限制（65535）
-            // if (init_grid_size > 65535) {
-            //     printf("[ERROR] Grid size too large: %d (max 65535), total_size=%d\n", 
-            //            init_grid_size, total_size);
-            //     cudaFree(d_topk_dist_candidate);
-            //     cudaFree(d_topk_index_candidate);
-            //     return;
-            // }
-            
             dim3 init_grid(init_grid_size);
             init_invalid_values_kernel<<<init_grid, init_block>>>(
                 d_topk_dist_candidate,
                 d_topk_index_candidate,
                 n_query * n_probes * k
             );
+            CHECK_CUDA_ERRORS;
         }
-        int max_query_batches = 0;
+        
         {
-            CUDATimer timer_kernel("Indexed Inner Product with TopK Kernel (v3 fixed probe)", ENABLE_CUDA_TIMING);
+            CUDATimer timer_kernel("Indexed Inner Product with TopK Kernel (v5 entry-based)", ENABLE_CUDA_TIMING);
             
-            // 验证 grid 配置
-            // grid.x 使用 n_total_clusters，因为每个 cluster 都是一个 probe
-            max_query_batches = (max_queries_per_probe + kQueriesPerBlock - 1) / kQueriesPerBlock;
-            dim3 grid(n_total_clusters, max_query_batches, 1);
-            
-            // 根据capacity选择kernel实例
-            if (capacity <= 32) {
-                launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe<64, true, kQueriesPerBlock>(
-                    block,
-                    n_dim,
-                    d_queries,
-                    d_cluster_vectors,
-                    d_probe_vector_offset,
-                    d_probe_vector_count,
-                    d_cluster_query_data,
-                    d_cluster_query_offset,
-                    d_cluster_query_probe_indices,
-                    d_query_norm,
-                    d_cluster_vector_norm,
-                    n_total_clusters,  // 传递总的 cluster 数量（用于grid.x和检查probe_id）
-                    n_probes,  // 传递每个query的probe数量（用于检查probe_index_in_query和计算输出位置）
-                    max_queries_per_probe,
-                    k,
-                    d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                    d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                    0
-                );
-            } else if (capacity <= 64) {
-                launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe<128, true, kQueriesPerBlock>(
-                    block,
-                    n_dim,
-                    d_queries,  // 修正：使用 d_queries 而不是 d_query_group
-                    d_cluster_vectors,  // 修正：使用 d_cluster_vectors 而不是 d_cluster_vector
-                    d_probe_vector_offset,
-                    d_probe_vector_count,
-                    d_cluster_query_data,
-                    d_cluster_query_offset,
-                    d_cluster_query_probe_indices,
-                    d_query_norm,
-                    d_cluster_vector_norm,
-                    n_total_clusters,  // 传递总的 cluster 数量（用于grid.x和检查probe_id）
-                    n_probes,  // 传递每个query的probe数量（用于检查probe_index_in_query和计算输出位置）
-                    max_queries_per_probe,
-                    k,
-                    d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                    d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                    0
-                );
+            if (n_entry == 0) {
+                // 没有entry，直接跳过（所有结果已经是FLT_MAX和-1）
             } else {
-                launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe<256, true, kQueriesPerBlock>(
-                    block,
-                    n_dim,
-                    d_queries, 
-                    d_cluster_vectors, 
-                    d_probe_vector_offset,
-                    d_probe_vector_count,
-                    d_cluster_query_data,
-                    d_cluster_query_offset,
-                    d_cluster_query_probe_indices,
-                    d_query_norm,
-                    d_cluster_vector_norm,
-                    n_total_clusters,  // 传递总的 cluster 数量（用于grid.x和检查probe_id）
-                    n_probes,  // 传递每个query的probe数量（用于检查probe_index_in_query和计算输出位置）
-                    max_queries_per_probe,
-                    k,
-                    d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                    d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                    0
-                );
+                // 根据capacity选择kernel实例
+                if (capacity <= 32) {
+                    launch_indexed_inner_product_with_topk_kernel_v5_entry_based<64, true, kQueriesPerBlock>(
+                        block,
+                        n_dim,
+                        d_queries,
+                        d_cluster_vectors,
+                        d_probe_vector_offset,
+                        d_probe_vector_count,
+                        d_entry_cluster_id,
+                        d_entry_query_start,
+                        d_entry_query_count,
+                        d_entry_queries,
+                        d_entry_probe_indices,
+                        d_query_norm,
+                        d_cluster_vector_norm,
+                        n_entry,
+                        n_probes,
+                        k,
+                        d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                        d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                        0
+                    );
+                } else if (capacity <= 64) {
+                    launch_indexed_inner_product_with_topk_kernel_v5_entry_based<128, true, kQueriesPerBlock>(
+                        block,
+                        n_dim,
+                        d_queries,
+                        d_cluster_vectors,
+                        d_probe_vector_offset,
+                        d_probe_vector_count,
+                        d_entry_cluster_id,
+                        d_entry_query_start,
+                        d_entry_query_count,
+                        d_entry_queries,
+                        d_entry_probe_indices,
+                        d_query_norm,
+                        d_cluster_vector_norm,
+                        n_entry,
+                        n_probes,
+                        k,
+                        d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                        d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                        0
+                    );
+                } else {
+                    launch_indexed_inner_product_with_topk_kernel_v5_entry_based<256, true, kQueriesPerBlock>(
+                        block,
+                        n_dim,
+                        d_queries,
+                        d_cluster_vectors,
+                        d_probe_vector_offset,
+                        d_probe_vector_count,
+                        d_entry_cluster_id,
+                        d_entry_query_start,
+                        d_entry_query_count,
+                        d_entry_queries,
+                        d_entry_probe_indices,
+                        d_query_norm,
+                        d_cluster_vector_norm,
+                        n_entry,
+                        n_probes,
+                        k,
+                        d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                        d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                        0
+                    );
+                }
             }
-            cudaDeviceSynchronize();
             CHECK_CUDA_ERRORS;
         }
             
@@ -625,7 +592,6 @@ void batch_search_pipeline(float** query_batch,
 
         cudaFree(d_cluster_vectors);
         cudaFree(d_cluster_vector_norm);
-        free(probe_query_offsets_host);
         CHECK_CUDA_ERRORS;
     }
     
@@ -633,6 +599,23 @@ void batch_search_pipeline(float** query_batch,
     cudaFree(d_cluster_query_offset);
     cudaFree(d_cluster_query_data);
     cudaFree(d_cluster_query_probe_indices);
+    
+    // 释放entry数据
+    if (d_entry_cluster_id != nullptr) {
+        cudaFree(d_entry_cluster_id);
+    }
+    if (d_entry_query_start != nullptr) {
+        cudaFree(d_entry_query_start);
+    }
+    if (d_entry_query_count != nullptr) {
+        cudaFree(d_entry_query_count);
+    }
+    if (d_entry_queries != nullptr) {
+        cudaFree(d_entry_queries);
+    }
+    if (d_entry_probe_indices != nullptr) {
+        cudaFree(d_entry_probe_indices);
+    }
 
     // 释放Step 0中分配的GPU内存
     cudaFree(d_probe_vector_offset);

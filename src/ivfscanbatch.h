@@ -12,6 +12,29 @@
 
 #ifdef USE_CUDA
 #include "cuda/cuda_wrapper.h"
+
+/* batch_search_pipeline函数声明 */
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern void batch_search_pipeline(
+    float** query_batch,
+    int* cluster_size,
+    float*** cluster_vectors,
+    float** cluster_center_data,
+    float** topk_dist,
+    int** topk_index,
+    int* n_isnull,
+    int n_query,
+    int n_dim,
+    int n_total_cluster,
+    int n_total_vectors,
+    int n_probes,
+    int k
+);
+#ifdef __cplusplus
+}
+#endif
 #endif
 
 /*

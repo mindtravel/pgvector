@@ -2,6 +2,7 @@
 #include "../indexed_gemm/indexed_gemm.cuh"
 #include "../pch.h"
 #include "../unit_tests/common/test_utils.cuh"
+#include "../utils.cuh"
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include "../warpsortfilter/warpsort_topk.cu"
 #include <algorithm>
@@ -10,48 +11,6 @@
 #define ENABLE_CUDA_TIMING 1
 using namespace pgvector::warpsort_utils;
 using namespace pgvector::warpsort_topk;
-
-/**
- * Kernel: 初始化输出内存为无效值（FLT_MAX 和 -1）
- */
-__global__ static void init_invalid_values_kernel(
-    float* __restrict__ d_topk_dist_probe,  // [n_query][n_probes][k] - 输出，初始化为 FLT_MAX
-    int* __restrict__ d_topk_index_probe,  // [n_query][n_probes][k] - 输出，初始化为 -1
-    int total_size  // n_query * n_probes * k
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total_size) return;
-    
-    d_topk_dist_probe[idx] = FLT_MAX;
-    d_topk_index_probe[idx] = -1;
-}
-
-/**
- * Kernel: 映射候选索引回原始向量索引
- */
-__global__ static void map_candidate_indices_kernel(
-    const int* __restrict__ d_candidate_indices,  // [n_query][n_probes * k]
-    int* __restrict__ d_topk_index,  // [n_query][k] - 输入是候选位置，输出是原始索引
-    int n_query,
-    int n_probes,
-    int k
-) {
-    int max_candidates_per_query = n_probes * k;
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = n_query * k;
-    if (idx >= total) return;
-    
-    int query_id = idx / k;
-    int k_pos = idx % k;
-    
-    int candidate_pos = d_topk_index[idx];
-    if (candidate_pos >= 0 && candidate_pos < max_candidates_per_query) {
-        int original_idx = d_candidate_indices[query_id * max_candidates_per_query + candidate_pos];
-        d_topk_index[idx] = original_idx;
-    } else {
-        d_topk_index[idx] = -1;
-    }
-}
 
 /**
  * 固定 probe 版本的流式融合余弦距离top-k计算

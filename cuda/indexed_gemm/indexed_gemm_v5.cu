@@ -1,4 +1,5 @@
 #include "indexed_gemm.cuh"
+#include "inner_product_utils.cuh"
 #include "../pch.h"
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include "../warpsortfilter/warpsort.cuh"
@@ -9,155 +10,6 @@
 
 using namespace pgvector::warpsort_utils;
 using namespace pgvector::warpsort;
-
-// 从 indexed_gemm_v3.cu 复制的辅助函数（必须在 kernel 之前定义）
-template<int Tile>
-__device__ __forceinline__ void load_tile_vec4(const float4* lhs_vec4,
-                                               const float4* rhs_vec4,
-                                               int base_idx,
-                                               int vec4_count,
-                                               float4 (&lhs_tile)[Tile],
-                                               float4 (&rhs_tile)[Tile]) {
-    #pragma unroll
-    for (int t = 0; t < Tile; ++t) {
-        int idx = base_idx + t;
-        if (idx < vec4_count) {
-            lhs_tile[t] = lhs_vec4[idx];
-            rhs_tile[t] = rhs_vec4[idx];
-        } else {
-            lhs_tile[t] = make_float4(0.f, 0.f, 0.f, 0.f);
-            rhs_tile[t] = make_float4(0.f, 0.f, 0.f, 0.f);
-        }
-    }
-}
-
-template<int Tile>
-__device__ __forceinline__ float accumulate_tile(const float4 (&lhs_tile)[Tile],
-                                                 const float4 (&rhs_tile)[Tile],
-                                                 int valid_count,
-                                                 float sum) {
-    #pragma unroll
-    for (int t = 0; t < Tile; ++t) {
-        if (t < valid_count) {
-            const float4& l = lhs_tile[t];
-            const float4& r = rhs_tile[t];
-            sum = fmaf(l.x, r.x, sum);
-            sum = fmaf(l.y, r.y, sum);
-            sum = fmaf(l.z, r.z, sum);
-            sum = fmaf(l.w, r.w, sum);
-        }
-    }
-    return sum;
-}
-
-template<int Dim>
-__device__ __forceinline__ float dot_product_tiled(const float* __restrict__ lhs,
-                                                   const float* __restrict__ rhs) {
-    constexpr int kVec4Count = Dim / 4;
-    constexpr int kTile = 4;
-    if constexpr (kVec4Count == 0) {
-        return 0.0f;
-    } else {
-        constexpr int tile_count = (kVec4Count + kTile - 1) / kTile;
-        const float4* lhs_vec4 = reinterpret_cast<const float4*>(lhs);
-        const float4* rhs_vec4 = reinterpret_cast<const float4*>(rhs);
-
-        float4 cur_lhs[kTile];
-        float4 cur_rhs[kTile];
-        load_tile_vec4<kTile>(lhs_vec4, rhs_vec4, 0, kVec4Count, cur_lhs, cur_rhs);
-
-        float sum = 0.0f;
-
-        if constexpr (tile_count == 1) {
-            sum = accumulate_tile<kTile>(cur_lhs, cur_rhs, kVec4Count, sum);
-        } else {
-            float4 next_lhs[kTile];
-            float4 next_rhs[kTile];
-
-            #pragma unroll
-            for (int tile = 0; tile < tile_count; ++tile) {
-                int next_base = (tile + 1) * kTile;
-                if (tile + 1 < tile_count) {
-                    load_tile_vec4<kTile>(lhs_vec4, rhs_vec4, next_base, kVec4Count, next_lhs, next_rhs);
-                }
-
-                int valid = kVec4Count - tile * kTile;
-                valid = valid > kTile ? kTile : valid;
-                sum   = accumulate_tile<kTile>(cur_lhs, cur_rhs, valid, sum);
-
-                if (tile + 1 < tile_count) {
-                    #pragma unroll
-                    for (int t = 0; t < kTile; ++t) {
-                        cur_lhs[t] = next_lhs[t];
-                        cur_rhs[t] = next_rhs[t];
-                    }
-                }
-            }
-        }
-
-        return sum;
-    }
-}
-
-__device__ __forceinline__ float dot_product_vec4_aligned(
-    const float* __restrict__ lhs,
-    const float* __restrict__ rhs,
-    int length) {
-    float sum = 0.0f;
-    const int vec4_elems = length >> 2;
-    const float4* lhs_vec4 = reinterpret_cast<const float4*>(lhs);
-    const float4* rhs_vec4 = reinterpret_cast<const float4*>(rhs);
-    
-    #pragma unroll
-    for (int v = 0; v < vec4_elems; ++v) {
-        const float4 lhs_val = lhs_vec4[v];
-        const float4 rhs_val = rhs_vec4[v];
-        sum += lhs_val.x * rhs_val.x +
-               lhs_val.y * rhs_val.y +
-               lhs_val.z * rhs_val.z +
-               lhs_val.w * rhs_val.w;
-    }
-    return sum;
-}
-
-__device__ __forceinline__ float dot_product_accumulate(
-    const float* __restrict__ lhs,
-    const float* __restrict__ rhs,
-    int length) {
-    float sum = 0.0f;
-    int i = 0;
-    
-    while (i < length &&
-           ((reinterpret_cast<uintptr_t>(lhs + i) |
-             reinterpret_cast<uintptr_t>(rhs + i)) & (sizeof(float4) - 1))) {
-        sum += lhs[i] * rhs[i];
-        ++i;
-    }
-    
-    const int remaining = length - i;
-    const int vec4_elems = remaining >> 2;
-    
-    if (vec4_elems > 0) {
-        const float4* lhs_vec4 = reinterpret_cast<const float4*>(lhs + i);
-        const float4* rhs_vec4 = reinterpret_cast<const float4*>(rhs + i);
-        
-        #pragma unroll
-        for (int v = 0; v < vec4_elems; ++v) {
-            const float4 lhs_val = lhs_vec4[v];
-            const float4 rhs_val = rhs_vec4[v];
-            sum += lhs_val.x * rhs_val.x +
-                   lhs_val.y * rhs_val.y +
-                   lhs_val.z * rhs_val.z +
-                   lhs_val.w * rhs_val.w;
-        }
-        i += vec4_elems << 2;
-    }
-    
-    for (; i < length; ++i) {
-        sum += lhs[i] * rhs[i];
-    }
-    return sum;
-}
 
 /**
  * v5版本：Entry-based线程模型
@@ -205,11 +57,10 @@ void indexed_inner_product_with_topk_kernel_v5_entry_based(
     
     const int entry_query_start = d_entry_query_start[entry_id];
     const int entry_query_count = d_entry_query_count[entry_id];
-    const int entry_query_end = entry_query_start + entry_query_count;
+    // const int entry_query_end = entry_query_start + entry_query_count;
     
-    const int warp_id = threadIdx.x / kWarpSize;
+    const int local_query_idx = threadIdx.x / kWarpSize;
     const int lane = laneId();
-    const int local_query_idx = warp_id;
     
     if (local_query_idx >= entry_query_count) return;
     
@@ -217,30 +68,13 @@ void indexed_inner_product_with_topk_kernel_v5_entry_based(
     const int query_global_id = d_entry_queries[entry_query_idx];
     const int probe_index_in_query = d_entry_probe_indices[entry_query_idx];
     
-    // 边界检查：probe_index_in_query 应该在 [0, n_probes) 范围内
-    if (probe_index_in_query < 0 || probe_index_in_query >= n_probes) {
-        return;  // 无效的probe索引
-    }
-    
-    if (local_query_idx < entry_query_count && lane == 0) {
+    if (lane == 0) {
         s_query_norm[local_query_idx] = d_query_norm[query_global_id];
     }
     __syncthreads();
     
     // 检查 query norm 是否有效（所有线程都需要检查）
-    if (local_query_idx < entry_query_count && s_query_norm[local_query_idx] < 1e-6f) {
-        // 如果 norm 无效，输出 dummy 值
-        // 输出位置：[n_query][n_probes][k]
-        float* row_dist = d_topk_dist + (query_global_id * n_probes + probe_index_in_query) * k;
-        int* row_idx = d_topk_index + (query_global_id * n_probes + probe_index_in_query) * k;
-        if (lane == 0) {
-            for (int i = 0; i < k; ++i) {
-                row_dist[i] = FLT_MAX;
-                row_idx[i] = -1;
-            }
-        }
-        return;
-    }
+    if (s_query_norm[local_query_idx] < 1e-6f) return;
     
     const float* query_global_ptr = d_query_group + query_global_id * n_dim;
     const bool query_ptr_aligned = (reinterpret_cast<uintptr_t>(query_global_ptr) & (sizeof(float4) - 1)) == 0;
@@ -297,8 +131,8 @@ void indexed_inner_product_with_topk_kernel_v5_entry_based(
             }
         }
     }
-    
     __syncwarp();
+
     queue.done();
     __syncwarp();
     
@@ -360,6 +194,17 @@ void launch_indexed_inner_product_with_topk_kernel_v5_entry_based(
 }
 
 // 显式实例化常用的模板参数组合
+// QueriesPerBlock=1
+template void launch_indexed_inner_product_with_topk_kernel_v5_entry_based<64, true, 1>(
+    dim3, int, float*, float*, int*, int*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
+
+template void launch_indexed_inner_product_with_topk_kernel_v5_entry_based<128, true, 1>(
+    dim3, int, float*, float*, int*, int*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
+
+template void launch_indexed_inner_product_with_topk_kernel_v5_entry_based<256, true, 1>(
+    dim3, int, float*, float*, int*, int*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
+
+// QueriesPerBlock=8
 template void launch_indexed_inner_product_with_topk_kernel_v5_entry_based<64, true, 8>(
     dim3, int, float*, float*, int*, int*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
 

@@ -2,6 +2,7 @@
 #include "../indexed_gemm/indexed_gemm.cuh"
 #include "../pch.h"
 #include "../unit_tests/common/test_utils.cuh"
+#include "../utils.cuh"
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include "../warpsortfilter/warpsort_topk.cu"
 #include <algorithm>
@@ -11,48 +12,6 @@
 #define ENABLE_CUDA_TIMING 1
 using namespace pgvector::warpsort_utils;
 using namespace pgvector::warpsort_topk;
-
-/**
- * Kernel: 初始化输出内存为无效值（FLT_MAX 和 -1）
- */
-__global__ static void init_invalid_values_kernel(
-    float* __restrict__ d_topk_dist_probe,  // [n_query][n_probes][k] - 输出，初始化为 FLT_MAX
-    int* __restrict__ d_topk_index_probe,  // [n_query][n_probes][k] - 输出，初始化为 -1
-    int total_size  // n_query * n_probes * k
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total_size) return;
-    
-    d_topk_dist_probe[idx] = FLT_MAX;
-    d_topk_index_probe[idx] = -1;
-}
-
-/**
- * Kernel: 映射候选索引回原始向量索引
- */
-__global__ static void map_candidate_indices_kernel(
-    const int* __restrict__ d_candidate_indices,  // [n_query][n_probes * k]
-    int* __restrict__ d_topk_index,  // [n_query][k] - 输入是候选位置，输出是原始索引
-    int n_query,
-    int n_probes,
-    int k
-) {
-    int max_candidates_per_query = n_probes * k;
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = n_query * k;
-    if (idx >= total) return;
-    
-    int query_id = idx / k;
-    int k_pos = idx % k;
-    
-    int candidate_pos = d_topk_index[idx];
-    if (candidate_pos >= 0 && candidate_pos < max_candidates_per_query) {
-        int original_idx = d_candidate_indices[query_id * max_candidates_per_query + candidate_pos];
-        d_topk_index[idx] = original_idx;
-    } else {
-        d_topk_index[idx] = -1;
-    }
-}
 
 /**
  * v5版本：Entry-based线程模型的流式融合余弦距离top-k计算
@@ -121,11 +80,11 @@ void cuda_cos_topk_warpsort_fine_v5(
     }
 
     int capacity = 32;
+    constexpr int kQueriesPerBlock = 1;
 
     int* probe_query_offsets_host = nullptr;
     int* probe_queries_host = nullptr;
     int* probe_query_probe_indices_host = nullptr;
-    constexpr int kQueriesPerBlock = 8;
     float* d_topk_dist_probe = nullptr;
     int* d_topk_index_probe = nullptr;
     
@@ -138,7 +97,7 @@ void cuda_cos_topk_warpsort_fine_v5(
     
     // 配置kernel launch
     // v5 entry-based版本：每个block处理一个entry（一个cluster + 一组query）
-    dim3 block(256);  // 8个warp，每个warp 32个线程
+    dim3 block(kQueriesPerBlock * capacity);  // 8个warp，每个warp 32个线程
 
     int n_entry = 0;
 
@@ -235,7 +194,7 @@ void cuda_cos_topk_warpsort_fine_v5(
             CHECK_CUDA_ERRORS;
         }
     }
-    
+    COUT_ENDL("n_entry", n_entry);
     {
         CUDATimer timer_kernel("Indexed Inner Product with TopK Kernel (v5 entry-based)", ENABLE_CUDA_TIMING);
         
@@ -334,21 +293,9 @@ void cuda_cos_topk_warpsort_fine_v5(
     {
         CUDATimer timer_reduce("Reduce probe results to query top-k", ENABLE_CUDA_TIMING);
         
-        // 先同步，确保之前的kernel执行完成
-        cudaError_t sync_before = cudaDeviceSynchronize();
-        if (sync_before != cudaSuccess) {
-            printf("[ERROR] Synchronization failed before reduction: %s\n", 
-                   cudaGetErrorString(sync_before));
-            cudaFree(d_topk_dist_probe);
-            cudaFree(d_topk_index_probe);
-            return;
-        }
-        
-        // 清除任何残留的错误状态
-        cudaGetLastError();
-        
-        // 清除错误状态后调用 select_k
-        cudaGetLastError();
+        cudaDeviceSynchronize();
+        CHECK_CUDA_ERRORS;
+
         cudaError_t select_err = select_k<float, int>(
             d_topk_dist_probe, n_query, n_probes * k, k,
             d_topk_dist, d_topk_index, true, 0

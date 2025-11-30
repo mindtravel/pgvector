@@ -1,4 +1,5 @@
-#include <cuda_runtime.h>
+/* 使用pch.h预编译头，它已包含必要的标准库头文件 */
+#include "pch.h"
 #include "cuda_wrapper.h"
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
@@ -10,7 +11,6 @@
 #include <thrust/execution_policy.h>
 #include <stdio.h>
 #include <algorithm>
-#include <cstddef>  // for offsetof
 #include <cmath>    // for INFINITY
 #include <cfloat>   // for FLT_MAX
 

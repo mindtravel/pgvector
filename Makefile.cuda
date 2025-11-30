@@ -15,6 +15,7 @@ DATA_built = sql/$(EXTENSION)--$(EXTVERSION).sql
 # 目标文件 - 包含CUDA对象文件
 OBJS = \
 	cuda/cuda_wrapper.o \
+	cuda/integrate_screen/integrate_screen_wrapper.o \
 	src/bitutils.o \
 	src/bitvec.o \
 	src/halfutils.o \
@@ -54,8 +55,8 @@ REGRESS_OPTS = --inputdir=test --load-extension=$(EXTENSION)
 # CUDA配置
 CUDA_PATH ?= /usr/local/cuda
 NVCC = $(CUDA_PATH)/bin/nvcc
-CUDA_INC = -I$(CUDA_PATH)/include
-CUDA_LIB = -L$(CUDA_PATH)/lib64 -lcudart
+CUDA_INC = -I$(CUDA_PATH)/include -I$(CUDA_PATH)/include/thrust
+CUDA_LIB = -L$(CUDA_PATH)/lib64 -lcudart -lcublas
 
 # 编译优化标志
 OPTFLAGS = -march=native
@@ -74,7 +75,7 @@ endif
 
 # 添加CUDA支持和优化标志
 PG_CFLAGS += $(OPTFLAGS) -ftree-vectorize -fassociative-math -fno-signed-zeros -fno-trapping-math -DUSE_CUDA
-PG_CPPFLAGS += $(CUDA_INC) -DUSE_CUDA
+PG_CPPFLAGS += -DUSE_CUDA
 SHLIB_LINK += $(CUDA_LIB)
 
 # 默认目标
@@ -90,12 +91,28 @@ include $(PGXS)
 
 # CUDA编译规则 - 必须在include $(PGXS)之后
 %.o: %.cu
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -std=c++14
+
+# C++编译规则
+%.o: %.cpp
+	$(CXX) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -I./cuda -std=c++17 -fPIC
 
 # 强制覆盖CUDA对象文件的构建规则，避免.bc文件依赖
 cuda/cuda_wrapper.o: cuda/cuda_wrapper.cu
 	@echo "编译CUDA文件: $< -> $@"
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -std=c++14
+
+# integrate_screen编译规则（需要包含unit_tests路径以访问test_utils.cuh）
+cuda/integrate_screen/integrate_screen.o: cuda/integrate_screen/integrate_screen.cu
+	@echo "编译CUDA文件: $< -> $@"
+	@mkdir -p cuda/integrate_screen
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17 -rdc=true
+
+# integrate_screen_wrapper编译规则
+cuda/integrate_screen/integrate_screen_wrapper.o: cuda/integrate_screen/integrate_screen_wrapper.cpp
+	@echo "编译C++文件: $< -> $@"
+	@mkdir -p cuda/integrate_screen
+	$(CXX) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -I./cuda -std=c++17 -fPIC
 
 # 强制覆盖所有.bc文件的依赖，将它们重定向到.o文件
 %.bc: %.o

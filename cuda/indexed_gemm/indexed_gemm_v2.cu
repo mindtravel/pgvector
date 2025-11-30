@@ -1,4 +1,5 @@
 #include "indexed_gemm.cuh"
+#include "inner_product_utils.cuh"
 #include "../pch.h"
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include "../warpsortfilter/warpsort.cuh"
@@ -6,66 +7,6 @@
 
 using namespace pgvector::warpsort_utils;
 using namespace pgvector::warpsort;
-
-__device__ __forceinline__ float dot_product_vec4_aligned(
-    const float* __restrict__ lhs,
-    const float* __restrict__ rhs,
-    int length) {
-    float sum = 0.0f;
-    const int vec4_elems = length >> 2;
-    const float4* lhs_vec4 = reinterpret_cast<const float4*>(lhs);
-    const float4* rhs_vec4 = reinterpret_cast<const float4*>(rhs);
-
-    #pragma unroll
-    for (int v = 0; v < vec4_elems; ++v) {
-        const float4 lhs_val = lhs_vec4[v];
-        const float4 rhs_val = rhs_vec4[v];
-        sum += lhs_val.x * rhs_val.x +
-               lhs_val.y * rhs_val.y +
-               lhs_val.z * rhs_val.z +
-               lhs_val.w * rhs_val.w;
-    }
-    return sum;
-}
-
-__device__ __forceinline__ float dot_product_accumulate(
-    const float* __restrict__ lhs,
-    const float* __restrict__ rhs,
-    int length) {
-    float sum = 0.0f;
-    int i = 0;
-
-    while (i < length &&
-           ((reinterpret_cast<uintptr_t>(lhs + i) |
-             reinterpret_cast<uintptr_t>(rhs + i)) & (sizeof(float4) - 1))) {
-        sum += lhs[i] * rhs[i];
-        ++i;
-    }
-
-    const int remaining = length - i;
-    const int vec4_elems = remaining >> 2;
-
-    if (vec4_elems > 0) {
-        const float4* lhs_vec4 = reinterpret_cast<const float4*>(lhs + i);
-        const float4* rhs_vec4 = reinterpret_cast<const float4*>(rhs + i);
-
-        #pragma unroll
-        for (int v = 0; v < vec4_elems; ++v) {
-            const float4 lhs_val = lhs_vec4[v];
-            const float4 rhs_val = rhs_vec4[v];
-            sum += lhs_val.x * rhs_val.x +
-                   lhs_val.y * rhs_val.y +
-                   lhs_val.z * rhs_val.z +
-                   lhs_val.w * rhs_val.w;
-        }
-        i += vec4_elems << 2;
-    }
-
-    for (; i < length; ++i) {
-        sum += lhs[i] * rhs[i];
-    }
-    return sum;
-}
 
 __device__ __forceinline__ void prefetch_l2(const void* ptr) {
 #if __CUDA_ARCH__ >= 700
