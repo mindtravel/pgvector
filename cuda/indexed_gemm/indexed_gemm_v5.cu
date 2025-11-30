@@ -65,8 +65,16 @@ void indexed_inner_product_with_topk_kernel_v5_entry_based(
     if (local_query_idx >= entry_query_count) return;
     
     const int entry_query_idx = entry_query_start + local_query_idx;
+    
+    // 边界检查：确保 entry_query_idx 在有效范围内
+    // 注意：这里假设 d_entry_queries 和 d_entry_probe_indices 的大小至少为 total_entries
+    // 而 entry_query_idx 的范围是 [entry_query_start, entry_query_start + entry_query_count)
     const int query_global_id = d_entry_queries[entry_query_idx];
     const int probe_index_in_query = d_entry_probe_indices[entry_query_idx];
+    
+    // 边界检查：确保 query_global_id 在有效范围内
+    // 注意：这里假设 n_query 是已知的，但kernel参数中没有传递
+    // 暂时依赖调用者确保 query_global_id 的有效性
     
     if (lane == 0) {
         s_query_norm[local_query_idx] = d_query_norm[query_global_id];

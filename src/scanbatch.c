@@ -162,7 +162,7 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         // elog(LOG, "batch_vector_search_c: 开始批量处理，预期最大结果数: %d", max_results);
         
         // 调用批量扫描函数，一次性处理所有查询
-        bool gettuple_result = ivfflatbatchgettuple(scan, ForwardScanDirection, 
+        ivfflatbatchgettuple(scan, ForwardScanDirection, 
                             result_values, result_nulls, 
                             max_values, &returned_tuples, k);
         
@@ -195,8 +195,7 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
     funcctx = SRF_PERCALL_SETUP();
     state = (BatchSearchState *)funcctx->user_fctx;
     
-    // elog(LOG, "batch_vector_search_c: SRF后续调用 - current_result=%d, returned_tuples=%d", 
-    //      state ? state->current_result : -1, state ? state->returned_tuples : -1);
+    int base_idx;
     
     if (!state) {
         elog(ERROR, "batch_vector_search_c: state为NULL");
@@ -241,10 +240,10 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
     }
     
     // 返回当前结果
-    if (!state->result_nulls[state->current_result * 3]) {
+    base_idx = state->current_result * 3;
+    
+    if (!state->result_nulls[base_idx]) {
         // 直接从result_values数组中获取结果
-        int base_idx = state->current_result * 3;
-        
         values[0] = state->result_values[base_idx + 0]; // query_id
         values[1] = state->result_values[base_idx + 1]; // vector_id  
         values[2] = state->result_values[base_idx + 2]; // distance
@@ -252,9 +251,6 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         tuple_nulls[0] = state->result_nulls[base_idx + 0];
         tuple_nulls[1] = state->result_nulls[base_idx + 1];
         tuple_nulls[2] = state->result_nulls[base_idx + 2];
-        
-        // elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=%d, distance=%.6f", 
-        //      state->current_result, DatumGetInt32(values[0]), DatumGetInt32(values[1]), DatumGetFloat8(values[2]));
     } else {
         // 处理null结果
         values[0] = (Datum)0;
@@ -264,14 +260,6 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         tuple_nulls[1] = true;
         tuple_nulls[2] = true;
     }
-    
-    values[0] = state->result_values[base_idx + 0]; // query_id
-    values[1] = state->result_values[base_idx + 1]; // vector_id (已经是实际的int32值)
-    values[2] = state->result_values[base_idx + 2]; // distance
-    
-    tuple_nulls[0] = state->result_nulls[base_idx + 0];
-    tuple_nulls[1] = state->result_nulls[base_idx + 1];
-    tuple_nulls[2] = state->result_nulls[base_idx + 2];
     
     // elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=%d, distance=%.6f", 
     //      state->current_result,

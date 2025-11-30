@@ -21,6 +21,7 @@
 #include <limits>
 #include <type_traits>
 #include <math_constants.h>
+#include <cfloat>
 #include "../utils.cuh"
 
 #include "fusion_cos_topk.cuh"

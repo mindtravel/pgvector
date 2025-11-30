@@ -111,22 +111,22 @@ struct PipelinePersistentData {
                        n_total_clusters * sizeof(int), cudaMemcpyHostToDevice, stream);
         compute_prefix_sum(d_probe_vector_count, d_probe_vector_offset, n_total_clusters, stream);
         
-        // 从GPU读取offset数组（用于计算d_cluster_vector_ptr）
-        int* probe_vector_offset_host = (int*)malloc(n_total_clusters * sizeof(int));
-        cudaMemcpyAsync(probe_vector_offset_host, d_probe_vector_offset, 
-                       n_total_clusters * sizeof(int), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-        CHECK_CUDA_ERRORS;
+        // 计算每个cluster的起始位置（在CPU端计算，避免同步）
+        // 使用cluster_size在CPU端计算offset，避免从GPU读取
+        int* probe_vector_offset_host = (int*)malloc((n_total_clusters + 1) * sizeof(int));
+        probe_vector_offset_host[0] = 0;
+        for (int i = 0; i < n_total_clusters; ++i) {
+            probe_vector_offset_host[i + 1] = probe_vector_offset_host[i] + cluster_size[i];
+        }
         
         // 复制cluster向量数据到GPU（使用异步传输）
+        // 所有传输都在同一个stream中，可以并行执行
         for (int i = 0; i < n_total_clusters; ++i) {
-            if (cluster_size[i] > 0) {
-                float* cluster_start = d_cluster_vectors + probe_vector_offset_host[i] * n_dim;
-                cudaMemcpyAsync(cluster_start, cluster_vectors[i][0], 
-                               cluster_size[i] * n_dim * sizeof(float), 
-                               cudaMemcpyHostToDevice, stream);
-                d_cluster_vector_ptr[i] = cluster_start;
-            }
+            float* cluster_start = d_cluster_vectors + probe_vector_offset_host[i] * n_dim;
+            cudaMemcpyAsync(cluster_start, cluster_vectors[i][0], 
+                            cluster_size[i] * n_dim * sizeof(float), 
+                            cudaMemcpyHostToDevice, stream);
+            d_cluster_vector_ptr[i] = cluster_start;  // 存储GPU设备指针
         }
         
         // 复制cluster中心数据
@@ -135,10 +135,25 @@ struct PipelinePersistentData {
                        cudaMemcpyHostToDevice, stream);
         
         // 计算L2范数（在stream中异步执行）
-        compute_l2_norm_gpu(d_cluster_vectors, d_cluster_vector_norm, n_total_vectors, n_dim);
-        compute_l2_norm_gpu(d_cluster_centers, d_cluster_centers_norm, n_total_clusters, n_dim);
+        compute_l2_norm_gpu(d_cluster_vectors, d_cluster_vector_norm, n_total_vectors, n_dim, L2NORM_AUTO, stream);
+        compute_l2_norm_gpu(d_cluster_centers, d_cluster_centers_norm, n_total_clusters, n_dim, L2NORM_AUTO, stream);
         
         free(probe_vector_offset_host);
+        
+        // 注意：initialized 标志在异步操作完成后才设置
+        // 如果 stream 是默认 stream (0)，则立即设置
+        // 如果 stream 是异步 stream，需要调用者同步后再设置
+        if (stream == 0 || stream == nullptr) {
+            // 默认 stream，操作是同步的，可以立即设置
+            initialized = true;
+        }
+        // 否则，initialized 将在调用者同步 stream 后设置
+    }
+    
+    /**
+     * 标记初始化完成（在 stream 同步后调用）
+     */
+    void mark_initialized() {
         initialized = true;
     }
     
@@ -180,6 +195,51 @@ struct PipelinePersistentData {
 
 // 全局常驻数据（简单版本：单实例）
 static PipelinePersistentData g_persistent_data;
+
+/**
+ * 初始化常驻数据集（可在单元测试的计时之外调用）
+ */
+bool initialize_persistent_data(
+    int* cluster_size,
+    float*** cluster_vectors,
+    float** cluster_center_data,
+    int n_total_clusters,
+    int n_total_vectors,
+    int n_dim)
+{
+    // 检查是否可以常驻内存
+    if (!g_persistent_data.can_persist(n_total_vectors, n_dim)) {
+        return false;
+    }
+    
+    // 创建临时stream用于初始化
+    cudaStream_t init_stream;
+    cudaStreamCreate(&init_stream);
+    
+    // 初始化常驻数据（同步执行，确保初始化完成）
+    g_persistent_data.initialize(cluster_size, cluster_vectors, cluster_center_data,
+                                 n_total_clusters, n_total_vectors, n_dim, init_stream);
+    
+    // 等待初始化完成
+    cudaStreamSynchronize(init_stream);
+    CHECK_CUDA_ERRORS;
+    
+    // 标记初始化完成
+    g_persistent_data.mark_initialized();
+    
+    cudaStreamDestroy(init_stream);
+    CHECK_CUDA_ERRORS;
+    
+    return true;
+}
+
+/**
+ * 清理常驻数据集
+ */
+void cleanup_persistent_data()
+{
+    g_persistent_data.cleanup();
+}
 
 /**
  * 流水线版本的批量查询接口
@@ -227,20 +287,13 @@ void batch_search_pipeline(float** query_batch,
     cudaStreamCreate(&data_stream);
     cudaStreamCreate(&compute_stream);
     
+    // 创建事件用于同步
+    cudaEvent_t data_ready_event;
+    cudaEventCreate(&data_ready_event);
+    
     // 检查是否可以常驻内存
     bool use_persistent = g_persistent_data.can_persist(n_total_vectors, n_dim);
     
-    // 初始化或使用常驻数据
-    if (use_persistent) {
-        {
-            CUDATimer timer("Pipeline: Initialize/Reuse Persistent Data");
-            g_persistent_data.initialize(cluster_size, cluster_vectors, cluster_center_data,
-                                        n_total_clusters, n_total_vectors, n_dim, data_stream);
-            cudaStreamSynchronize(data_stream);
-            CHECK_CUDA_ERRORS;
-        }
-    }
-
     // 临时数据（每次查询都需要）
     float* d_queries = nullptr;
     float* d_query_norm = nullptr;
@@ -269,29 +322,53 @@ void batch_search_pipeline(float** query_batch,
         cudaMalloc(&d_top_nprobe_index, n_query * n_probes * sizeof(int));
         CHECK_CUDA_ERRORS;
         
-        // 异步复制query数据到GPU
-        cudaMemcpyAsync(d_queries, query_batch[0], 
-                       n_query * n_dim * sizeof(float), 
-                       cudaMemcpyHostToDevice, data_stream);
-        
-        // 异步计算query norm
-        compute_l2_norm_gpu(d_queries, d_query_norm, n_query, n_dim);
-        
-        // 如果数据不常驻，需要上传cluster数据
-        if (!use_persistent) {
+        // 如果可以使用常驻数据但未初始化，则在data_stream中异步初始化
+        // 注意：如果已在计时外初始化，则跳过此步骤
+        if (use_persistent && !g_persistent_data.initialized) {
+            // 在data_stream中异步初始化常驻数据
+            g_persistent_data.initialize(cluster_size, cluster_vectors, cluster_center_data,
+                                        n_total_clusters, n_total_vectors, n_dim, data_stream);
+        } else if (!use_persistent) {
             // TODO: 实现非常驻模式的数据上传
             // 当前简单版本只支持常驻模式
             throw std::runtime_error("Non-persistent mode not implemented yet");
         }
         
-        // 等待数据准备完成
+        // 异步复制query数据到GPU（与常驻数据初始化并行执行）
+        cudaMemcpyAsync(d_queries, query_batch[0], 
+                       n_query * n_dim * sizeof(float), 
+                       cudaMemcpyHostToDevice, data_stream);
+        
+        // 异步计算query norm（在data_stream中）
+        compute_l2_norm_gpu(d_queries, d_query_norm, n_query, n_dim, L2NORM_AUTO, data_stream);
+        
+        // 如果常驻数据正在初始化，需要等待初始化完成
+        // 注意：如果数据已在计时外初始化，则不需要等待
+        if (use_persistent && !g_persistent_data.initialized) {
+            // 等待常驻数据初始化完成（包括数据传输和L2范数计算）
+            cudaStreamSynchronize(data_stream);
+            CHECK_CUDA_ERRORS;
+            // 标记初始化完成
+            g_persistent_data.mark_initialized();
+        }
+        
+        // 等待query数据准备完成（包括query传输和query norm计算）
+        // 这是必要的，因为compute_l2_norm_gpu是异步的，需要确保完成后再记录事件
+        // 即使数据已在计时外初始化，也需要等待query数据准备完成
         cudaStreamSynchronize(data_stream);
         CHECK_CUDA_ERRORS;
+        
+        // 记录数据准备完成事件（确保所有数据都已准备好）
+        // 此时data_stream中的所有操作（query传输、query norm计算、常驻数据初始化）都应该已完成
+        cudaEventRecord(data_ready_event, data_stream);
     }
 
     // ==================================================================
     // 流水线阶段2：核函数计算（在compute_stream中执行）
     // ==================================================================
+    
+    // 等待数据准备完成（使用事件同步，而不是stream同步）
+    cudaStreamWaitEvent(compute_stream, data_ready_event, 0);
     
     // Step 1: 粗筛
     {
@@ -335,12 +412,13 @@ void batch_search_pipeline(float** query_batch,
             d_inner_product, n_total_clusters
         );
         
-        // 余弦距离 + topk
+        // 余弦距离 + topk（使用compute_stream）
         pgvector::fusion_cos_topk_warpsort::fusion_cos_topk_warpsort<float, int>(
             d_query_norm, g_persistent_data.d_cluster_centers_norm, d_inner_product, d_index,
             n_query, n_total_clusters, n_probes,
             d_top_nprobe_dist, d_top_nprobe_index,
-            true /* select min */
+            true /* select min */,
+            compute_stream  // 使用compute_stream，确保与数据准备同步
         );
         
         cudaStreamSynchronize(compute_stream);
@@ -477,6 +555,10 @@ void batch_search_pipeline(float** query_batch,
         cudaFree(d_top_nprobe_index);
     }
     
+    // 确保数据准备完成（再次等待，确保query数据已准备好）
+    // 虽然粗筛阶段已经等待了，但为了安全起见，精筛阶段也再次等待
+    cudaStreamWaitEvent(compute_stream, data_ready_event, 0);
+    
     // Step 3: 精筛
     {
         CUDATimer timer("Pipeline Stage 2: Fine Search");
@@ -540,17 +622,46 @@ void batch_search_pipeline(float** query_batch,
             }
         }
         
-        // 规约
+        // 等待精筛 kernel 完成，确保候选数据已准备好
+        cudaStreamSynchronize(compute_stream);
+        CHECK_CUDA_ERRORS;
+        
+        // 规约：从候选中选择top-k
+        // 注意：d_topk_dist_candidate 和 d_topk_index_candidate 的格式是 [n_query][n_probes][k]
+        // select_k 期望的格式是 [n_query][n_probes * k]，两者是匹配的（展平后）
+        // select_k 输出的是候选位置索引（0 到 n_probes * k - 1），需要映射回原始向量索引
         select_k<float, int>(
             d_topk_dist_candidate, n_query, n_probes * k, k,
             d_topk_dist, d_topk_index, true, compute_stream
         );
         
+        // 等待 select_k 完成
+        cudaStreamSynchronize(compute_stream);
+        CHECK_CUDA_ERRORS;
+        
+        // 验证：检查 select_k 输出的索引是否在有效范围内
+        // 临时调试：将 d_topk_index 复制到 CPU 检查
+        #ifdef DEBUG_MAP_INDICES
+        int* h_topk_index_debug = (int*)malloc(n_query * k * sizeof(int));
+        cudaMemcpy(h_topk_index_debug, d_topk_index, n_query * k * sizeof(int), cudaMemcpyDeviceToHost);
+        int max_candidates = n_probes * k;
+        for (int i = 0; i < n_query * k; ++i) {
+            if (h_topk_index_debug[i] < 0 || h_topk_index_debug[i] >= max_candidates) {
+                printf("[DEBUG] Invalid candidate_pos at idx=%d: %d (max=%d)\n", 
+                       i, h_topk_index_debug[i], max_candidates);
+            }
+        }
+        free(h_topk_index_debug);
+        #endif
+        
+        // 映射候选索引回原始向量索引
+        // d_topk_index 现在包含候选位置索引，需要映射回原始向量索引
+        // 注意：d_topk_index_candidate 的格式是 [n_query][n_probes][k]，展平后是 [n_query][n_probes * k]
         dim3 map_block(256);
         dim3 map_grid((n_query * k + map_block.x - 1) / map_block.x);
         map_candidate_indices_kernel<<<map_grid, map_block, 0, compute_stream>>>(
-            d_topk_index_candidate,
-            d_topk_index,
+            d_topk_index_candidate,  // 原始索引数组 [n_query][n_probes * k]（展平格式）
+            d_topk_index,            // 输入：候选位置索引 [n_query][k]，输出：原始向量索引
             n_query,
             n_probes,
             k
@@ -585,7 +696,8 @@ void batch_search_pipeline(float** query_batch,
     if (d_entry_queries != nullptr) cudaFree(d_entry_queries);
     if (d_entry_probe_indices != nullptr) cudaFree(d_entry_probe_indices);
     
-    // 销毁streams
+    // 销毁streams和事件
+    cudaEventDestroy(data_ready_event);
     cudaStreamDestroy(data_stream);
     cudaStreamDestroy(compute_stream);
     

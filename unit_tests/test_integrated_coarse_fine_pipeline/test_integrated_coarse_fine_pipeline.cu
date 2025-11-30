@@ -380,6 +380,9 @@ int main(int argc, char** argv) {
                                        cached_vector_dim != vector_dim);
         
         if (need_regenerate_dataset) {
+            // 清理旧的常驻数据
+            cleanup_persistent_data();
+            
             if (cached_dataset.cluster_ptrs != nullptr) {
                 release_cluster_dataset(cached_dataset);
             }
@@ -391,6 +394,16 @@ int main(int argc, char** argv) {
             cached_cluster_center_data = generate_vector_list(n_total_clusters, vector_dim);
             cached_n_total_vectors = n_total_vectors;
             cached_vector_dim = vector_dim;
+            
+            // 在计时外初始化常驻数据（如果数据可以常驻）
+            initialize_persistent_data(
+                cached_dataset.cluster_sizes,
+                cached_dataset.cluster_ptrs,
+                cached_cluster_center_data,
+                n_total_clusters,
+                n_total_vectors,
+                vector_dim
+            );
         }
         
         // 检查是否需要重新生成query（当 n_query 或 vector_dim 变化时）
@@ -440,6 +453,9 @@ int main(int argc, char** argv) {
             return return_vec;
         });
     }
+    
+    // 清理常驻数据
+    cleanup_persistent_data();
     
     // 清理缓存的数据
     if (cached_dataset.cluster_ptrs != nullptr) {

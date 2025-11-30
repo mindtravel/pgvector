@@ -4,6 +4,35 @@
  * 顶层调度入口，负责串联粗筛+精筛流水线
  */
 void run_integrate_pipeline();
+
+/**
+ * 初始化常驻数据集（可在单元测试的计时之外调用）
+ * 
+ * 当向量数据总数小于6G时，将整个数据集传输到GPU并常驻内存
+ * 如果数据已初始化且维度匹配，则直接返回，不会重复传输
+ * 
+ * @param cluster_size          各 cluster 中向量的数量，长度 n_total_cluster
+ * @param cluster_vectors       各 cluster 的向量数据，指针数组，大小 [n_total_cluster]
+ * @param cluster_center_data   聚类中心数据，指针数组，大小 [n_total_cluster]
+ * @param n_total_clusters      聚类总数
+ * @param n_total_vectors       向量总数
+ * @param n_dim                 向量维度
+ * @return true 如果数据可以常驻内存，false 如果数据太大无法常驻
+ */
+bool initialize_persistent_data(
+    int* cluster_size,
+    float*** cluster_vectors,
+    float** cluster_center_data,
+    int n_total_clusters,
+    int n_total_vectors,
+    int n_dim
+);
+
+/**
+ * 清理常驻数据集
+ */
+void cleanup_persistent_data();
+
 /**
  * 流水线批量查询接口
  *

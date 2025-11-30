@@ -225,23 +225,8 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
     
 #ifdef USE_CUDA
     if (so->cuda_ctx && so->cuda_ctx->initialized) {
-        /* 暂时使用旧的实现，等待integrate_screen编译问题解决 */
-        /* 步骤1: 选择最近的列表（probes） */
-        GetScanLists_BatchGPU(scan, batch_keys);
-        
-        /* 步骤2: 上传probe候选数据到GPU（分离存储方案） */
-        if (UploadIndexTuplesToGPU_Batch(scan) != 0) {
-            elog(ERROR, "ProcessBatchQueriesGPU: 上传probe候选数据失败");
-            return;
-        }
-        
-        /* 步骤3: 从GPU获取结果并填充到result_buffer */
-        if (so->result_buffer == NULL) {
-            so->result_buffer = CreateBatchBuffer(nbatch, k, so->dimensions, so->tmpCtx);
-        } else {
-            so->result_buffer->k = k;
-        }
-        GetScanItems_BatchGPU(scan, batch_keys);
+        /* 使用新的batch_search_pipeline */
+        ProcessBatchQueriesGPU_NewPipeline(scan, batch_keys, k);
         return;
     }
 #endif

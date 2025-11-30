@@ -1,4 +1,5 @@
 #include "../utils.cuh"
+#include <cfloat>
 
 // #include ".h"
 

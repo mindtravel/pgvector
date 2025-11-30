@@ -6,9 +6,6 @@
 
 #include "utils.cuh"
 #include <cfloat>
-#include <thrust/device_ptr.h>
-#include <thrust/scan.h>
-#include <thrust/execution_policy.h>
 
 /**
  * Kernel: 并行生成顺序索引
@@ -99,19 +96,8 @@ __global__ void build_cluster_query_mapping_kernel(
     if (cluster_id >= 0 && cluster_id < n_total_clusters) {
         // 使用原子操作获取写入位置
         int write_pos = atomicAdd(&d_cluster_write_pos[cluster_id], 1);
-        
-        // 边界检查：确保写入位置在有效范围内
-        int cluster_start = d_cluster_query_offset[cluster_id];
-        int cluster_end = d_cluster_query_offset[cluster_id + 1];
-        if (write_pos >= cluster_start && write_pos < cluster_end) {
-            // 写入数据
-            d_cluster_query_data[write_pos] = query_id;
-            d_cluster_query_probe_indices[write_pos] = rank;  // rank就是probe_index_in_query
-        } else {
-            // 越界写入，说明有bug
-            printf("[ERROR] build_cluster_query_mapping_kernel: write_pos=%d out of range [%d, %d) for cluster_id=%d\n",
-                   write_pos, cluster_start, cluster_end, cluster_id);
-        }
+        d_cluster_query_data[write_pos] = query_id;
+        d_cluster_query_probe_indices[write_pos] = rank;  // rank就是probe_index_in_query
     }
 }
 
@@ -170,46 +156,164 @@ __global__ void map_candidate_indices_kernel(
 }
 
 /**
+ * Kernel: 填充数组为指定值
+ * 
+ * 线程模型：
+ * - 一维 grid，每个线程处理一个元素
+ * - 用于替代 thrust::fill
+ */
+__global__ void fill_kernel(
+    float* __restrict__ d_data,
+    float value,
+    int n)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    d_data[idx] = value;
+}
+
+/**
+ * Kernel: 填充整数数组为指定值
+ * 
+ * 线程模型：
+ * - 一维 grid，每个线程处理一个元素
+ * - 用于替代 thrust::fill
+ */
+__global__ void fill_int_kernel(
+    int* __restrict__ d_data,
+    int value,
+    int n)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    d_data[idx] = value;
+}
+
+/**
+ * Kernel: Block-level inclusive scan (Hillis-Steele算法)
+ * 
+ * 使用共享内存进行高效的block内前缀和计算
+ * 支持多block，每个block独立计算前缀和
+ */
+__global__ void inclusive_scan_kernel(
+    const int* __restrict__ d_input,  // [n] 输入数组
+    int* __restrict__ d_output,       // [n] 输出数组
+    int* __restrict__ d_block_sums,   // [n_blocks] 每个block的总和（用于后续合并）
+    int n)                            // 数组长度
+{
+    extern __shared__ int s_data[];
+    
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int idx = bid * blockDim.x + tid;
+    
+    // 加载数据到共享内存
+    if (idx < n) {
+        s_data[tid] = d_input[idx];
+    } else {
+        s_data[tid] = 0;
+    }
+    __syncthreads();
+    
+    // Hillis-Steele inclusive scan
+    for (int stride = 1; stride < blockDim.x; stride *= 2) {
+        if (tid >= stride) {
+            s_data[tid] += s_data[tid - stride];
+        }
+        __syncthreads();
+    }
+    
+    // 保存block总和（最后一个线程）
+    if (tid == blockDim.x - 1 && d_block_sums != nullptr) {
+        d_block_sums[bid] = s_data[tid];
+    }
+    
+    // 写回结果
+    if (idx < n) {
+        d_output[idx] = s_data[tid];
+    }
+}
+
+/**
+ * Kernel: 合并多block的前缀和结果
+ * 
+ * 将每个block的前缀和结果加上前面所有block的总和
+ */
+__global__ void merge_scan_blocks_kernel(
+    const int* __restrict__ d_block_sums,  // [n_blocks] 每个block的总和
+    int* __restrict__ d_output,            // [n] 输出数组（会被更新）
+    int n,                                  // 数组长度
+    int block_size)                         // 每个block的大小
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    
+    int block_id = idx / block_size;
+    if (block_id > 0) {
+        // 计算前面所有block的总和
+        int prefix_sum = 0;
+        for (int i = 0; i < block_id; i++) {
+            prefix_sum += d_block_sums[i];
+        }
+        d_output[idx] += prefix_sum;
+    }
+}
+
+/**
  * Host函数: 计算前缀和（用于构建CSR格式的offset数组）
  * 
- * 计算 exclusive prefix sum：offset[0] = 0, offset[i+1] = offset[i] + count[i]
+ * 计算 inclusive prefix sum：offset[i+1] = offset[i] + count[i]
+ * 然后手动设置 offset[0] = 0，得到 exclusive scan 的效果
  * 
- * 使用 Thrust::exclusive_scan 进行高效计算
+ * 使用纯CUDA实现，不依赖Thrust
  */
-
- void compute_prefix_sum(
+void compute_prefix_sum(
     const int* d_count,  // [n] 输入
     int* d_offset,       // [n+1] 输出
     int n,               // 元素数量
     cudaStream_t stream)
 {
     // 1. 手动将 offset[0] 设为 0
-    // 这是 CSR 格式或者 exclusive scan 的起始要求
     cudaMemsetAsync(d_offset, 0, sizeof(int), stream);
     
     if (n <= 0) return;
-
-    // 2. 使用 inclusive_scan，并将结果输出到 d_offset + 1 的位置
-    // 逻辑如下：
-    // Input:  [10, 20, 30]
-    // Output 目标地址: &d_offset[1]
-    // 
-    // d_offset[0] = 0 (由上面 Memset 设置)
-    // d_offset[1] = 10 (inclusive scan 第1个结果)
-    // d_offset[2] = 10 + 20 = 30
-    // d_offset[3] = 10 + 20 + 30 = 60
-    // 
-    // 最终 d_offset = [0, 10, 30, 60]，长度为 n+1，完美符合要求
     
-    thrust::device_ptr<const int> count_ptr = thrust::device_pointer_cast(d_count);
-    thrust::device_ptr<int> offset_ptr = thrust::device_pointer_cast(d_offset);
-
-    thrust::inclusive_scan(
-        thrust::cuda::par.on(stream),
-        count_ptr,
-        count_ptr + n,
-        offset_ptr + 1 // 关键点：输出偏移 +1
-    );
+    // 2. 计算 inclusive scan，结果写入 offset[1..n]
+    const int block_size = 256;
+    int n_blocks = (n + block_size - 1) / block_size;
+    int shared_mem_size = block_size * sizeof(int);
+    
+    if (n_blocks == 1) {
+        // 单block情况：直接计算，不需要block sums
+        inclusive_scan_kernel<<<1, block_size, shared_mem_size, stream>>>(
+            d_count,
+            d_offset + 1,  // 输出到 offset[1..n]
+            nullptr,       // 不需要block sums
+            n
+        );
+    } else {
+        // 多block情况：需要两阶段
+        // 阶段1：每个block内部scan，并保存block总和
+        int* d_block_sums = nullptr;
+        cudaMalloc(&d_block_sums, n_blocks * sizeof(int));
+        
+        inclusive_scan_kernel<<<n_blocks, block_size, shared_mem_size, stream>>>(
+            d_count,
+            d_offset + 1,
+            d_block_sums,
+            n
+        );
+        
+        // 阶段2：合并blocks（每个block的结果加上前面所有block的总和）
+        merge_scan_blocks_kernel<<<n_blocks, block_size, 0, stream>>>(
+            d_block_sums,
+            d_offset + 1,
+            n,
+            block_size
+        );
+        
+        cudaFree(d_block_sums);
+    }
 }
 
 /**

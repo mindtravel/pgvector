@@ -1,4 +1,5 @@
 #include "../utils.cuh"
+#include <cfloat>
 
 #include "../l2norm/l2norm.cuh"
 // #include "select_topk.cuh"

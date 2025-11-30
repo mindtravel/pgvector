@@ -68,6 +68,7 @@ echo "运行测试..."
 # echo "=================================="
 # echo "运行 integrated_coarse_fine 测试..."
 ./test_integrated_coarse_fine_pipeline/test_integrated_coarse_fine_pipeline
+# ./test_integrated_coarse_fine/test_integrated_coarse_fine
 # echo "=================================="
 # echo "运行 fusion_cos_topk_fine_v3_fixed_probe 测试..."
 # ./test_fusion_cos_topk_fine_v3_fixed_probe/test_fusion_cos_topk_fine_v3_fixed_probe 

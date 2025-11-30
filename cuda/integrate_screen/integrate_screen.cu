@@ -424,7 +424,7 @@ void batch_search_pipeline(float** query_batch,
         
         // 清理临时内存
         cudaFree(d_cluster_query_count);
-        cudaFree(d_cluster_write_pos);
+        cudaFree(d_cluster_write_pos);        
         cudaFree(d_entry_count_per_cluster);
         cudaFree(d_entry_offset);
         cudaFree(d_top_nprobe_index);
@@ -477,74 +477,74 @@ void batch_search_pipeline(float** query_batch,
             if (n_entry == 0) {
                 // 没有entry，直接跳过（所有结果已经是FLT_MAX和-1）
             } else {
-                // 根据capacity选择kernel实例
-                if (capacity <= 32) {
+            // 根据capacity选择kernel实例
+            if (capacity <= 32) {
                     launch_indexed_inner_product_with_topk_kernel_v5_entry_based<64, true, kQueriesPerBlock>(
-                        block,
-                        n_dim,
-                        d_queries,
-                        d_cluster_vectors,
-                        d_probe_vector_offset,
-                        d_probe_vector_count,
+                    block,
+                    n_dim,
+                    d_queries,
+                    d_cluster_vectors,
+                    d_probe_vector_offset,
+                    d_probe_vector_count,
                         d_entry_cluster_id,
                         d_entry_query_start,
                         d_entry_query_count,
                         d_entry_queries,
                         d_entry_probe_indices,
-                        d_query_norm,
-                        d_cluster_vector_norm,
+                    d_query_norm,
+                    d_cluster_vector_norm,
                         n_entry,
                         n_probes,
-                        k,
-                        d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                        d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                        0
-                    );
-                } else if (capacity <= 64) {
+                    k,
+                    d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                    d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                    0
+                );
+            } else if (capacity <= 64) {
                     launch_indexed_inner_product_with_topk_kernel_v5_entry_based<128, true, kQueriesPerBlock>(
-                        block,
-                        n_dim,
+                    block,
+                    n_dim,
                         d_queries,
                         d_cluster_vectors,
-                        d_probe_vector_offset,
-                        d_probe_vector_count,
+                    d_probe_vector_offset,
+                    d_probe_vector_count,
                         d_entry_cluster_id,
                         d_entry_query_start,
                         d_entry_query_count,
                         d_entry_queries,
                         d_entry_probe_indices,
-                        d_query_norm,
-                        d_cluster_vector_norm,
+                    d_query_norm,
+                    d_cluster_vector_norm,
                         n_entry,
                         n_probes,
-                        k,
-                        d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                        d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                        0
-                    );
-                } else {
+                    k,
+                    d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                    d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                    0
+                );
+            } else {
                     launch_indexed_inner_product_with_topk_kernel_v5_entry_based<256, true, kQueriesPerBlock>(
-                        block,
-                        n_dim,
-                        d_queries,
-                        d_cluster_vectors,
-                        d_probe_vector_offset,
-                        d_probe_vector_count,
+                    block,
+                    n_dim,
+                    d_queries, 
+                    d_cluster_vectors, 
+                    d_probe_vector_offset,
+                    d_probe_vector_count,
                         d_entry_cluster_id,
                         d_entry_query_start,
                         d_entry_query_count,
                         d_entry_queries,
                         d_entry_probe_indices,
-                        d_query_norm,
-                        d_cluster_vector_norm,
+                    d_query_norm,
+                    d_cluster_vector_norm,
                         n_entry,
                         n_probes,
-                        k,
-                        d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                        d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
-                        0
-                    );
-                }
+                    k,
+                    d_topk_dist_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                    d_topk_index_candidate,  // 直接写入按query组织的缓冲区 [n_query][n_probes][k]
+                    0
+                );
+            }
             }
             CHECK_CUDA_ERRORS;
         }
