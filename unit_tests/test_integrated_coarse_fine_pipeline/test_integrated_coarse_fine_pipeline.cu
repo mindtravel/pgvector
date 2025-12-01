@@ -11,10 +11,9 @@
 #include <thread>
 #include <vector>
 
-// 包含流水线版本的实现
-// 注意：直接包含 .cu 文件，因为流水线版本使用相同的函数名 batch_search_pipeline
-// 这样可以避免与 integrate_screen.cu 的冲突（通过不链接 integrate_screen_lib）
-#include "../../cuda/integrate_screen/integrate_screen_pipeline.cu"
+// 包含流水线版本的头文件
+// 注意：使用库链接，而不是直接包含 .cu 文件，避免触发不必要的重新编译
+#include "../../cuda/integrate_screen/integrate_screen.cuh"
 #include "../common/test_utils.cuh"
 
 struct BenchmarkCase {
@@ -112,9 +111,6 @@ static BalancedMapping build_balanced_mapping(const ClusterDataset& dataset,
     return mapping;
 }
 
-struct QueryBatch {
-    float** ptrs = nullptr;
-};
 static float cosine_distance(const float* a, const float* b, int dim) {
     float dot = 0.0f;
     float na = 0.0f;
@@ -133,8 +129,8 @@ static float cosine_distance(const float* a, const float* b, int dim) {
 
 
 static void cpu_coarse_fine_search(const BenchmarkCase& config,
-                                   float** query_batch,
                                    const ClusterDataset& dataset,
+                                   float** query_batch,
                                    float** centers,
                                    int** out_index,
                                    float** out_dist
@@ -146,6 +142,8 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
     struct Pair { float dist; int idx; };  
 
     const unsigned num_threads = std::max(1u, std::thread::hardware_concurrency());
+
+
     auto worker = [&](int start, int end) {
         std::vector<Pair> tmp(n_total_clusters);
         std::vector<Pair> fine_buffer;
@@ -229,6 +227,7 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
     for (auto& th : threads) {
         th.join();
     }
+
 }
 
 /**
@@ -240,35 +239,12 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
  * @return {pass_rate, gpu_ms, cpu_ms, speedup}
  */
 static std::vector<double> run_case(const BenchmarkCase& config,
-                                     ClusterDataset* dataset = nullptr,
-                                     float** query_batch = nullptr,
-                                     float** cluster_center_data = nullptr) {
-
-    // 如果数据集未提供，则生成
-    ClusterDataset local_dataset;
-    bool need_release_dataset = false;
-    if (dataset == nullptr) {
-        local_dataset = prepare_cluster_dataset(config);
-        dataset = &local_dataset;
-        need_release_dataset = true;
-    }
-    
-    // 如果query未提供，则生成
-    bool need_free_query = false;
-    if (query_batch == nullptr) {
-        query_batch = generate_vector_list(config.n_query, config.vector_dim);
-        need_free_query = true;
-    }
+                                     ClusterDataset* dataset,
+                                     float** query_batch,
+                                     float** cluster_center_data) {
 
     float*** cluster_data = dataset->cluster_ptrs;
     int* cluster_sizes = dataset->cluster_sizes;
-    
-    // 如果cluster中心未提供，则生成
-    bool need_free_centers = false;
-    if (cluster_center_data == nullptr) {
-        cluster_center_data = generate_vector_list(config.n_total_clusters, config.vector_dim);
-        need_free_centers = true;
-    }
 
     int** cpu_idx = (int**)malloc_vector_list(config.n_query, config.k, sizeof(int));
     float** cpu_dist = (float**)malloc_vector_list(config.n_query, config.k, sizeof(float));
@@ -278,11 +254,15 @@ static std::vector<double> run_case(const BenchmarkCase& config,
 
     double cpu_ms = 0.0;
     MEASURE_MS_AND_SAVE("cpu耗时:", cpu_ms,
-        cpu_coarse_fine_search(config, query_batch, *dataset, cluster_center_data,
+        cpu_coarse_fine_search(config, 
+                                *dataset, 
+                                query_batch, 
+                                cluster_center_data,
                                cpu_idx,
                                cpu_dist
         );
     );
+
 
     int* n_isnull = (int*)(malloc(config.n_query * sizeof(int)));
 
@@ -325,17 +305,6 @@ static std::vector<double> run_case(const BenchmarkCase& config,
 
     double speedup = (gpu_ms > 1e-6) ? (cpu_ms / gpu_ms) : 0.0;
 
-    // 只释放本地生成的数据
-    if (need_free_query) {
-        free_vector_list((void**)query_batch);
-    }
-    if (need_release_dataset) {
-        release_cluster_dataset(*dataset);
-    }
-    if (need_free_centers) {
-        free_vector_list((void**)cluster_center_data);
-    }
-
     return {
         pass_rate,
         gpu_ms,
@@ -347,45 +316,66 @@ static std::vector<double> run_case(const BenchmarkCase& config,
 int main(int argc, char** argv) {
     MetricsCollector metrics;
     metrics.set_columns("pass_rate", "n_query", "n_total_clusters", "vector_dim", 
-                        "k", "n_probes", "n_total_vectors", "gpu_ms", "cpu_ms", 
+                        "k", "n_probes", "n_total_vectors", "qps", "dpv", "gpu_ms", "cpu_ms", 
                         "speedup");
     metrics.set_num_repeats(1);
     
-    // Warmup
-    BenchmarkCase config = {1, 128, 10, 10000, 5, 10};  // n_query=1, dim=128, n_clusters=10, n_vectors=10000, n_probes=5, k=10
-    run_case(config); // warmup
-    COUT_ENDL("=========warmup done (pipeline version)=========");
-
-    // 缓存的数据集和query
-    ClusterDataset cached_dataset = {};
-    float** cached_query_batch = nullptr;
-    float** cached_cluster_center_data = nullptr;
-    
     // 缓存的关键参数
-    int cached_n_total_vectors = -1;
-    int cached_vector_dim = -1;
-    int cached_n_query = -1;
+    int cached_n_total_vectors = 10000;
+    int cached_vector_dim = 100;
+    int cached_n_query = 1;
+    int cached_n_total_clusters = 10;
+    // Warmup
+    BenchmarkCase config = {cached_n_query, 
+        cached_vector_dim, 
+        cached_n_total_clusters, 
+        cached_n_total_vectors, 5, 10};  // n_query=1, dim=128, n_clusters=10, n_vectors=10000, n_probes=5, k=10
+    ClusterDataset cached_dataset = prepare_cluster_dataset(config);
+    float** cached_query_batch = generate_vector_list(cached_n_query, cached_vector_dim);
+    float** cached_cluster_center_data = generate_vector_list(cached_n_total_vectors, cached_vector_dim);
+
+    run_case(config, &cached_dataset, cached_query_batch, cached_cluster_center_data); // warmup
+    COUT_ENDL("=========warmup done (pipeline version)=========");
     
-    PARAM_3D(n_total_vectors, (1000000),
-        n_probes, (1,5,10,20,40),
-        vector_dim, (128))
+    PARAM_2D(dataset_id, (1,2,3),
+    // PARAM_2D(n_total_vectors, (10000000),
+        n_probes, (1,5,10,20,40))
+        // n_probes, (1))
     {
-        int n_total_clusters = std::max(10, static_cast<int>(std::sqrt(n_total_vectors)));         
         int n_query = 10000;
         int k = 100;
-         
+        int vector_dim = 100;
+        int n_total_vectors = 10000;
+
+        if(dataset_id == 1){//SIFT 1M
+            n_total_vectors = 1000000;
+            vector_dim = 128;
+        }
+        else if(dataset_id == 2){// DEEP10M
+            n_total_vectors = 10000000;
+            vector_dim = 96;
+        }
+        else if(dataset_id == 3){// TEXT1M
+            n_total_vectors = 1000000;
+            vector_dim = 200;
+        }
+        else COUT_ENDL("unexpected dataset");
+
+        int n_total_clusters = std::max(10, static_cast<int>(std::sqrt(n_total_vectors)));         
         BenchmarkCase config = {n_query, vector_dim, n_total_clusters, n_total_vectors, n_probes, k};
         
         bool need_regenerate_dataset = (cached_n_total_vectors != n_total_vectors ||
-                                       cached_vector_dim != vector_dim);
-        
+                                       cached_vector_dim != vector_dim ||
+                                       cached_n_total_clusters != n_total_clusters);
+
+        bool need_regenerate_query = (cached_n_query != n_query || 
+            cached_vector_dim != vector_dim);
+
         if (need_regenerate_dataset) {
             // 清理旧的常驻数据
             cleanup_persistent_data();
             
-            if (cached_dataset.cluster_ptrs != nullptr) {
-                release_cluster_dataset(cached_dataset);
-            }
+            release_cluster_dataset(cached_dataset);
             if (cached_cluster_center_data != nullptr) {
                 free_vector_list((void**)cached_cluster_center_data);
                 cached_cluster_center_data = nullptr;
@@ -393,8 +383,9 @@ int main(int argc, char** argv) {
             cached_dataset = prepare_cluster_dataset(config);
             cached_cluster_center_data = generate_vector_list(n_total_clusters, vector_dim);
             cached_n_total_vectors = n_total_vectors;
+            cached_n_total_clusters = n_total_clusters;
             cached_vector_dim = vector_dim;
-            
+
             // 在计时外初始化常驻数据（如果数据可以常驻）
             initialize_persistent_data(
                 cached_dataset.cluster_sizes,
@@ -403,19 +394,14 @@ int main(int argc, char** argv) {
                 n_total_clusters,
                 n_total_vectors,
                 vector_dim
-            );
+            );       
         }
         
-        // 检查是否需要重新生成query（当 n_query 或 vector_dim 变化时）
-        bool need_regenerate_query = (cached_n_query != n_query || 
-                                   cached_vector_dim != vector_dim);
-        
         if (need_regenerate_query) {
-            if (cached_query_batch != nullptr) {
-                free_vector_list((void**)cached_query_batch);
-            }
+            free_vector_list((void**)cached_query_batch);
             cached_query_batch = generate_vector_list(n_query, vector_dim);
             cached_n_query = n_query;
+            cached_vector_dim = vector_dim;
         }
         
         if (!QUIET) {
@@ -446,6 +432,8 @@ int main(int argc, char** argv) {
                 static_cast<double>(k),
                 static_cast<double>(n_probes),
                 static_cast<double>(n_total_vectors),
+                (static_cast<double>(n_query) * 1000.0)/ metrics_result[1],  // qps
+                (1000 * metrics_result[1]) / static_cast<double>(n_query),    // dpv
                 metrics_result[1],  // gpu_ms
                 metrics_result[2],  // cpu_ms
                 metrics_result[3]  // speedup

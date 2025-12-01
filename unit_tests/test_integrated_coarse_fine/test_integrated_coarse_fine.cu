@@ -237,36 +237,12 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
  * @return {pass_rate, pass_rate_balanced, gpu_ms, gpu_ms_balanced, cpu_ms, speedup, speedup_balanced, n_total_vectors}
  */
 static std::vector<double> run_case(const BenchmarkCase& config,
-                                     ClusterDataset* dataset = nullptr,
-                                     float** query_batch = nullptr,
-                                     float** cluster_center_data = nullptr) {
-
-    // 如果数据集未提供，则生成
-    ClusterDataset local_dataset;
-    bool need_release_dataset = false;
-    if (dataset == nullptr) {
-        local_dataset = prepare_cluster_dataset(config);
-        dataset = &local_dataset;
-        need_release_dataset = true;
-    }
-    
-    // 如果query未提供，则生成
-    bool need_free_query = false;
-    if (query_batch == nullptr) {
-        query_batch = generate_vector_list(config.n_query, config.vector_dim);
-        need_free_query = true;
-    }
-
+                                     ClusterDataset* dataset,
+                                     float** query_batch,
+                                     float** cluster_center_data) {
     float*** cluster_data = dataset->cluster_ptrs;
     int* cluster_sizes = dataset->cluster_sizes;
     
-    // 如果cluster中心未提供，则生成
-    bool need_free_centers = false;
-    if (cluster_center_data == nullptr) {
-        cluster_center_data = generate_vector_list(config.n_total_clusters, config.vector_dim);
-        need_free_centers = true;
-    }
-
     int** cpu_idx = (int**)malloc_vector_list(config.n_query, config.k, sizeof(int));
     float** cpu_dist = (float**)malloc_vector_list(config.n_query, config.k, sizeof(float));
 
@@ -322,17 +298,6 @@ static std::vector<double> run_case(const BenchmarkCase& config,
 
     double speedup = (gpu_ms > 1e-6) ? (cpu_ms / gpu_ms) : 0.0;
 
-    // 只释放本地生成的数据
-    if (need_free_query) {
-        free_vector_list((void**)query_batch);
-    }
-    if (need_release_dataset) {
-        release_cluster_dataset(*dataset);
-    }
-    if (need_free_centers) {
-        free_vector_list((void**)cluster_center_data);
-    }
-
     return {
         pass_rate,
         gpu_ms,
@@ -349,9 +314,9 @@ int main(int argc, char** argv) {
     metrics.set_num_repeats(1);
     
     // 修复：确保 n_total_vectors >= n_total_clusters，这样每个cluster至少有一个向量
-    BenchmarkCase config = {1, 128, 10, 10000, 5, 10};  // n_query=1, dim=128, n_clusters=10, n_vectors=100, n_probes=5, k=10
-    run_case(config); // warmup
-    COUT_ENDL("=========warmup done=========");
+    // BenchmarkCase config = {1, 128, 10, 10000, 5, 10};  // n_query=1, dim=128, n_clusters=10, n_vectors=100, n_probes=5, k=10
+    // run_case(config); // warmup
+    // COUT_ENDL("=========warmup done=========");
 
     // 缓存的数据集和query
     ClusterDataset cached_dataset = {};
@@ -376,16 +341,19 @@ int main(int argc, char** argv) {
     //     int n_total_clusters = std::max(10, static_cast<int>(std::sqrt(n_total_vectors)));         
     //     int n_query = 10000;
     //     int k = 100;
-    PARAM_3D(n_total_vectors, (1000000),
-        n_probes, (1,5,10,20,40),
-        // n_probes, (1,5,10),
-        vector_dim, (128))
+    PARAM_3D(n_total_vectors, (10000, 20000),
+        // n_probes, (1),
+        n_probes, (1,5,10),
+        vector_dim, (4,8,12,24,48,95,77,100,123,124,125,128))
     {
         int n_total_clusters = std::max(10, static_cast<int>(std::sqrt(n_total_vectors)));         
-        int n_query = 10000;
+        int n_query = 3;
         int k = 100;
          
         BenchmarkCase config = {n_query, vector_dim, n_total_clusters, n_total_vectors, n_probes, k};
+        
+        bool need_regenerate_query = (cached_n_query != n_query || 
+                                   cached_vector_dim != vector_dim);
         
         bool need_regenerate_dataset = (cached_n_total_vectors != n_total_vectors ||
                                        cached_vector_dim != vector_dim);
@@ -404,16 +372,14 @@ int main(int argc, char** argv) {
             cached_vector_dim = vector_dim;
         }
         
-        // 检查是否需要重新生成query（当 n_query 或 vector_dim 变化时）
-        bool need_regenerate_query = (cached_n_query != n_query || 
-                                   cached_vector_dim != vector_dim);
-        
+
         if (need_regenerate_query) {
             if (cached_query_batch != nullptr) {
                 free_vector_list((void**)cached_query_batch);
             }
             cached_query_batch = generate_vector_list(n_query, vector_dim);
             cached_n_query = n_query;
+            cached_vector_dim = vector_dim;
         }
         
         if (!QUIET) {

@@ -223,6 +223,41 @@ target_link_libraries(integrate_screen_lib
     cublas
 )
 
+# 创建共享的integrate_screen_pipeline库（供测试使用）
+# 被以下使用：
+#   - test_integrated_coarse_fine_pipeline (测试流水线版本)
+# 
+# 包含的文件：
+#   - integrate_screen_pipeline.cu: 流水线版本实现（包含batch_search_pipeline函数）
+#   - fusion_cos_topk_warpsort.cu: 粗筛实现（integrate_screen_pipeline.cu的Step 1需要）
+#   - warpsort_topk.cu: warp-level top-k选择（integrate_screen_pipeline.cu需要select_k）
+# 
+# 注意：
+#   - indexed_gemm_v3_fixed_probe.cu 和 indexed_gemm_v5.cu 已移到 indexed_gemm_lib 中
+#   - utils.cu 已移到独立的 utils_lib 中，通过链接依赖引入
+#   - inner_product_utils.cuh 是头文件，不需要添加到库中
+add_library(integrate_screen_pipeline_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen_pipeline.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
+)
+target_include_directories(integrate_screen_pipeline_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+)
+set_target_properties(integrate_screen_pipeline_lib PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    CUDA_ARCHITECTURES 70
+)
+target_link_libraries(integrate_screen_pipeline_lib 
+    PUBLIC
+    l2norm_lib 
+    utils_lib
+    indexed_gemm_lib
+    cublas
+)
+
 # 添加测试子目录
 add_subdirectory(test_vector_normalizer)
 add_subdirectory(test_print_cuda)

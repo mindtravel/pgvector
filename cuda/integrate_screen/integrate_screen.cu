@@ -44,19 +44,26 @@ void batch_search_pipeline(float** query_batch,
                            int n_probes,
                            int k) {
 
+    fprintf(stderr, "batch_search_pipeline: 开始执行, n_query=%d, n_dim=%d, n_total_clusters=%d, n_total_vectors=%d, n_probes=%d, k=%d\n",
+            n_query, n_dim, n_total_clusters, n_total_vectors, n_probes, k);
+    
     if (n_query <= 0 || n_dim <= 0 || n_total_clusters <= 0 || k <= 0) {
-        printf("[ERROR] Invalid parameters: n_query=%d, n_dim=%d, n_total_clusters=%d, k=%d\n",
+        fprintf(stderr, "[ERROR] batch_search_pipeline: 无效参数 - n_query=%d, n_dim=%d, n_total_clusters=%d, k=%d\n",
                n_query, n_dim, n_total_clusters, k);
         throw std::invalid_argument("invalid batch_search_pipeline configuration");
     }
     if (!cluster_size || !cluster_vectors) {
+        fprintf(stderr, "[ERROR] batch_search_pipeline: cluster元数据为null\n");
         throw std::invalid_argument("cluster metadata is null");
     }
 
     if (!cluster_center_data) {
+        fprintf(stderr, "[ERROR] batch_search_pipeline: cluster_center_data为null\n");
         throw std::invalid_argument("cluster_center_data must not be null for coarse search");
     }
     if (n_probes <= 0 || n_probes > n_total_clusters) {
+        fprintf(stderr, "[ERROR] batch_search_pipeline: 无效n_probes - n_probes=%d, n_total_clusters=%d\n",
+               n_probes, n_total_clusters);
         throw std::invalid_argument("invalid n_probes");
     }
 
@@ -87,11 +94,18 @@ void batch_search_pipeline(float** query_batch,
 
     {
         CUDATimer timer("Step 0: Data Preparation");
+        fprintf(stderr, "batch_search_pipeline: Step 0 - 开始数据准备\n");
+        
         cudaMalloc(&d_queries, n_query * n_dim * sizeof(float));
         cudaMemcpy(d_queries, query_batch[0], n_query * n_dim * sizeof(float), cudaMemcpyHostToDevice);
         CHECK_CUDA_ERRORS
 
         d_cluster_vector_ptr = (float**)malloc(n_total_clusters * sizeof(float*));
+        if (!d_cluster_vector_ptr) {
+            fprintf(stderr, "[ERROR] batch_search_pipeline: 无法分配d_cluster_vector_ptr内存\n");
+            throw std::bad_alloc();
+        }
+        
         cudaMalloc(&d_cluster_vectors, n_total_vectors * n_dim * sizeof(float));
 
         // 先在GPU上计算probe_vector_offset（使用前缀和）
@@ -583,6 +597,7 @@ void batch_search_pipeline(float** query_batch,
         cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
 
+        fprintf(stderr, "batch_search_pipeline: 复制TopK结果到主机内存 (n_query=%d, k=%d)\n", n_query, k);
         cudaMemcpy(topk_dist[0], d_topk_dist, 
                    n_query * k * sizeof(float), cudaMemcpyDeviceToHost);
         cudaMemcpy(topk_index[0], d_topk_index, 
@@ -590,12 +605,14 @@ void batch_search_pipeline(float** query_batch,
         cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
 
+        fprintf(stderr, "batch_search_pipeline: 释放精筛阶段GPU内存\n");
         cudaFree(d_cluster_vectors);
         cudaFree(d_cluster_vector_norm);
         CHECK_CUDA_ERRORS;
     }
     
     // 释放Step 2中分配的GPU内存
+    fprintf(stderr, "batch_search_pipeline: 释放Step 2的GPU内存\n");
     cudaFree(d_cluster_query_offset);
     cudaFree(d_cluster_query_data);
     cudaFree(d_cluster_query_probe_indices);
@@ -618,6 +635,7 @@ void batch_search_pipeline(float** query_batch,
     }
 
     // 释放Step 0中分配的GPU内存
+    fprintf(stderr, "batch_search_pipeline: 释放Step 0的GPU内存\n");
     cudaFree(d_probe_vector_offset);
     cudaFree(d_probe_vector_count);
 
@@ -625,6 +643,12 @@ void batch_search_pipeline(float** query_batch,
     cudaFree(d_query_norm);
     
     CHECK_CUDA_ERRORS;
+    
+    if (d_cluster_vector_ptr) {
+        free(d_cluster_vector_ptr);
+    }
+    
+    fprintf(stderr, "batch_search_pipeline: 执行完成\n");
 }
 
 void run_integrate_pipeline() {

@@ -17,9 +17,7 @@ set(SOURCES
     ../common/test_utils.cu
     # 使用共享库，不再重复编译
     # ../../cuda/l2norm/l2norm.cu - 在 l2norm_lib 中
-    # 注意：test_integrated_coarse_fine_pipeline.cu 直接包含了 integrate_screen_pipeline.cu
-    # integrate_screen_pipeline.cu 需要 fusion_cos_topk_warpsort 和 warpsort_topk
-    # 这些在 fusion_cos_topk_warpsort_lib 中
+    # integrate_screen_pipeline.cu - 在 integrate_screen_pipeline_lib 中
     # indexed_gemm_v3_fixed_probe.cu, indexed_gemm_v5.cu - 在 indexed_gemm_lib 中
 )
 
@@ -32,7 +30,7 @@ target_link_libraries(test_integrated_coarse_fine_pipeline
     l2norm_lib
     indexed_gemm_lib
     utils_lib
-    fusion_cos_topk_warpsort_lib  # 包含 fusion_cos_topk_warpsort 和 warpsort_topk
+    integrate_screen_pipeline_lib  # 包含 integrate_screen_pipeline.cu 及其依赖
 )
 
 set_target_properties(test_integrated_coarse_fine_pipeline PROPERTIES

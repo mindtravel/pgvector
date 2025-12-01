@@ -196,7 +196,7 @@ std::vector<double> test_single_config(
         // 只有在刚分配时才需要计算L2范数
         if(h_cluster_vectors != nullptr) {
             compute_l2_norms_batch(h_cluster_vectors, h_cluster_vector_norm, n_total_vectors, n_dim);
-        }
+    }
     }
     // 如果 h_cluster_vector_norm 已经传入（不为nullptr），假设它已经计算过了，不需要重新计算
     

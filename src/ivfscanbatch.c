@@ -1103,12 +1103,15 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     }
     
     /* 准备输出缓冲区（使用malloc，因为batch_search_pipeline使用malloc） */
+    elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: 分配输出缓冲区, nbatch=%d, k=%d", nbatch, k);
+    
     float** topk_dist = (float**)malloc(nbatch * sizeof(float*));
     int** topk_index = (int**)malloc(nbatch * sizeof(int*));
     int* n_isnull = (int*)malloc(nbatch * sizeof(int));
     
     if (!topk_dist || !topk_index || !n_isnull) {
-        elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配输出缓冲区");
+        elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配输出缓冲区 (topk_dist=%p, topk_index=%p, n_isnull=%p)", 
+             (void*)topk_dist, (void*)topk_index, (void*)n_isnull);
         return;
     }
     
@@ -1130,13 +1133,16 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     }
     
     /* 调用batch_search_pipeline包装函数 */
+    elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: 调用batch_search_pipeline_wrapper, nbatch=%d, n_total_clusters=%d, n_total_vectors=%d, probes=%d, k=%d",
+         nbatch, n_total_clusters, n_total_vectors, so->probes, k);
+    
     int result = batch_search_pipeline_wrapper(query_batch, cluster_size, cluster_vectors,
                                                cluster_center_data, topk_dist, topk_index, n_isnull,
                                                nbatch, so->dimensions, n_total_clusters,
                                                n_total_vectors, so->probes, k);
     
     if (result != 0) {
-        elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: batch_search_pipeline执行失败");
+        elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: batch_search_pipeline执行失败 (返回码: %d), 请查看PostgreSQL日志获取详细信息", result);
         for (int i = 0; i < nbatch; i++) {
             free(topk_dist[i]);
             free(topk_index[i]);
@@ -1148,13 +1154,30 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     }
     
     /* 转换结果 */
+    elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: 开始转换结果到BatchBuffer");
+    
     if (so->result_buffer == NULL) {
         so->result_buffer = CreateBatchBuffer(nbatch, k, so->dimensions, so->tmpCtx);
+        if (!so->result_buffer) {
+            elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法创建BatchBuffer");
+            /* 清理内存 */
+            for (int i = 0; i < nbatch; i++) {
+                if (topk_dist && topk_dist[i]) free(topk_dist[i]);
+                if (topk_index && topk_index[i]) free(topk_index[i]);
+            }
+            if (topk_dist) free(topk_dist);
+            if (topk_index) free(topk_index);
+            if (n_isnull) free(n_isnull);
+            return;
+        }
     }
     
     ConvertBatchPipelineResults(scan, topk_dist, topk_index, nbatch, k,
                                 so->result_buffer, mapping_table, cluster_size,
                                 cluster_pages, n_total_clusters);
+    
+    elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: 结果转换完成, 总结果数=%d", 
+         so->result_buffer ? so->result_buffer->total_results : 0);
     
     /* 清理malloc分配的内存 */
     for (int i = 0; i < nbatch; i++) {
