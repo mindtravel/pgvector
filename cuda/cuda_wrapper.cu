@@ -153,29 +153,41 @@ extern "C" {
         size_t query_size = dimensions * sizeof(float);
         size_t distances_size = num_centers * sizeof(float);
         
-        printf("INFO: 尝试分配GPU内存 - 聚类中心: %zu字节, 查询向量: %zu字节, 距离: %zu字节\n", 
+        // 先检查参数有效性
+        if (centers_size == 0 || query_size == 0 || distances_size == 0) {
+            fprintf(stderr, "ERROR: 无效的内存大小 - centers: %zu, query: %zu, distances: %zu\n",
+                   centers_size, query_size, distances_size);
+            free(ctx);
+            return NULL;
+        }
+        
+        fprintf(stderr, "INFO: 尝试分配GPU内存 - centers: %zu bytes, query: %zu bytes, distances: %zu bytes\n", 
                centers_size, query_size, distances_size);
 
         // 检查GPU内存是否足够
-        size_t free_memory, total_memory;
+        size_t free_memory = 0, total_memory = 0;
         cudaError_t mem_err = cudaMemGetInfo(&free_memory, &total_memory);
-        if (mem_err == cudaSuccess) {
-            size_t required_memory = centers_size + query_size + distances_size;
-            if (use_zero_copy) {
-                required_memory += centers_size; // 零拷贝需要额外的页锁定内存
-            }
-            
-            if (free_memory < required_memory) {
-                printf("WARNING: GPU内存不足 - 需要: %zu字节, 可用: %zu字节\n", required_memory, free_memory);
-                // 不直接返回NULL，尝试分配看看是否真的会失败
-            }
+        if (mem_err != cudaSuccess) {
+            fprintf(stderr, "ERROR: cudaMemGetInfo失败: %s\n", cudaGetErrorString(mem_err));
+            free(ctx);
+            return NULL;
+        }
+        
+        size_t required_memory = centers_size + query_size + distances_size;
+        if (use_zero_copy) {
+            required_memory += centers_size; // 零拷贝需要额外的页锁定内存
+        }
+        
+        if (free_memory < required_memory) {
+            fprintf(stderr, "WARNING: GPU内存不足 - 需要: %zu bytes, 可用: %zu bytes\n", required_memory, free_memory);
+            // 不直接返回NULL，尝试分配看看是否真的会失败
         }
 
         cudaError_t err;
         
         if (use_zero_copy) {
             // 零拷贝模式：分配页锁定主机内存
-            printf("INFO: 尝试分配页锁定内存 (%zu字节)\n", centers_size);
+            fprintf(stderr, "INFO: 尝试分配页锁定内存 (%zu bytes)\n", centers_size);
             err = cudaHostAlloc(&ctx->h_centers_pinned, centers_size, cudaHostAllocMapped);
             if (err != cudaSuccess) {
                 printf("ERROR: 页锁定内存分配失败: %s (需要%zu字节)\n", 
@@ -195,15 +207,30 @@ extern "C" {
             printf("INFO: 页锁定内存分配成功\n");
         } else {
             // 标准模式：分配GPU设备内存
-            printf("INFO: 尝试分配GPU设备内存 (%zu字节)\n", centers_size);
+            fprintf(stderr, "INFO: 尝试分配GPU设备内存 (%zu bytes), ctx=%p\n", centers_size, (void*)ctx);
+            
+            // 检查CUDA设备状态
+            int current_device = -1;
+            cudaError_t device_err = cudaGetDevice(&current_device);
+            if (device_err != cudaSuccess) {
+                fprintf(stderr, "ERROR: 无法获取当前CUDA设备: %s\n", cudaGetErrorString(device_err));
+                free(ctx);
+                return NULL;
+            }
+            fprintf(stderr, "DEBUG: 当前CUDA设备: %d, 准备调用cudaMalloc\n", current_device);
+            
+            // 清除之前的CUDA错误状态
+            cudaGetLastError();
+            
             err = cudaMalloc(&ctx->d_centers, centers_size);
+            fprintf(stderr, "DEBUG: cudaMalloc调用完成, err=%d\n", err);
             if (err != cudaSuccess) {
-                printf("ERROR: GPU设备内存分配失败: %s (需要%zu字节)\n", 
+                fprintf(stderr, "ERROR: GPU设备内存分配失败: %s (需要%zu bytes)\n", 
                        cudaGetErrorString(err), centers_size);
                 free(ctx);
                 return NULL;
             }
-            printf("INFO: GPU设备内存分配成功\n");
+            fprintf(stderr, "INFO: GPU设备内存分配成功, 指针: %p\n", (void*)ctx->d_centers);
         }
 
         // 分配查询向量内存
@@ -386,27 +413,41 @@ extern "C" {
         }
 
         size_t size = ctx->num_centers * ctx->dimensions * sizeof(float);
-        printf("INFO: 开始上传聚类中心数据到GPU (%zu字节, %d个中心, %d维)\n", 
+        fprintf(stderr, "INFO: 开始上传聚类中心数据到GPU (%zu字节, %d个中心, %d维)\n", 
                size, ctx->num_centers, ctx->dimensions);
         
-        // 打印聚类中心数据内容用于调试
-        printf("DEBUG: 聚类中心数据内容:\n");
-        for (int i = 0; i < ctx->num_centers; i++) {
-            printf("DEBUG: 聚类中心%d前5个元素:\n", i);
-            for (int j = 0; j < (ctx->dimensions < 5 ? ctx->dimensions : 5); j++) {
+        // 只打印前几个中心的数据用于调试（避免大量输出导致性能问题或崩溃）
+        int debug_centers = (ctx->num_centers < 3) ? ctx->num_centers : 3;
+        fprintf(stderr, "DEBUG: 聚类中心数据内容（仅前%d个中心）:\n", debug_centers);
+        for (int i = 0; i < debug_centers; i++) {
+            fprintf(stderr, "DEBUG: 聚类中心%d前3个元素:\n", i);
+            int max_dims = (ctx->dimensions < 3) ? ctx->dimensions : 3;
+            for (int j = 0; j < max_dims; j++) {
                 int idx = i * ctx->dimensions + j;
-                printf("DEBUG:   centers_data[%d] = %f\n", idx, centers_data[idx]);
+                if (idx >= 0 && idx < (ctx->num_centers * ctx->dimensions)) {
+                    fprintf(stderr, "DEBUG:   centers_data[%d] = %f\n", idx, centers_data[idx]);
+                } else {
+                    fprintf(stderr, "DEBUG:   索引%d超出范围（总元素数=%d）\n", 
+                           idx, ctx->num_centers * ctx->dimensions);
+                    break;
+                }
             }
+        }
+        
+        // 验证数据指针有效性
+        if (!centers_data) {
+            fprintf(stderr, "ERROR: centers_data指针为NULL\n");
+            return -1;
         }
         
         cudaError_t err = cudaMemcpy(ctx->d_centers, centers_data, size, cudaMemcpyHostToDevice);
         
         if (err != cudaSuccess) {
-            printf("ERROR: 聚类中心数据上传失败: %s\n", cudaGetErrorString(err));
+            fprintf(stderr, "ERROR: 聚类中心数据上传失败: %s\n", cudaGetErrorString(err));
             return -1;
         }
 
-        printf("INFO: 聚类中心数据上传成功\n");
+        fprintf(stderr, "INFO: 聚类中心数据上传成功\n");
         return 0;
     }
 

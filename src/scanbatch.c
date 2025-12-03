@@ -178,7 +178,7 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         
         // 保存资源以便后续清理
         state->scan = scan;
-        state->index = NULL;  // 不保存index引用，让PostgreSQL通过scan管理
+        state->index = index;  // 保存index引用以便后续关闭
         state->batch_keys = batch_keys;
         state->heap_rel = NULL;  // 已经关闭，不需要保存
         state->heap_rel_opened_by_us = false;
@@ -203,44 +203,61 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
     }
     
     if (state->current_result >= state->returned_tuples) {
-        // elog(LOG, "batch_vector_search_c: 所有结果已返回，开始清理资源");
+        elog(LOG, "batch_vector_search_c: 所有结果已返回 (current_result=%d, returned_tuples=%d)，开始清理资源", 
+             state->current_result, state->returned_tuples);
         
         // 清理 PostgreSQL 资源
-        // 最简化策略：让PostgreSQL的SRF机制自动处理所有资源清理
+        // 需要手动关闭索引关系以避免 relcache reference leak
+        elog(LOG, "batch_vector_search_c: 开始清理 scan 和 index");
         
-        // 重要发现：
-        // 1. scan结构和scan->opaque都在SRF内存上下文中
-        // 2. PostgreSQL会在SRF结束时自动调用清理函数
-        // 3. 手动调用清理函数可能导致双重清理问题
-        // 4. 最安全的方式是完全依赖PostgreSQL的自动清理机制
+        // 先保存 index 引用，因为在 ivfflatbatchendscan 之后不能访问 scan
+        // 注意：state->index 和 scan->indexRelation 是同一个对象，只需要关闭一次
+        Relation index_to_close = state->index;
+        state->index = NULL;  // 先清空，避免重复关闭
         
-        // elog(LOG, "batch_vector_search_c: 依赖PostgreSQL自动清理资源 - scan=%p, index=%p", 
-        //      state->scan, state->index);
+        // 清理 scan（这会清理 scan 的内部状态，但不会关闭 index）
+        if (state->scan) {
+            elog(LOG, "batch_vector_search_c: 调用 ivfflatbatchendscan");
+            ivfflatbatchendscan(state->scan);
+            elog(LOG, "batch_vector_search_c: ivfflatbatchendscan 完成");
+            state->scan = NULL;
+        }
         
-        // heap_rel 已经在第一次调用时关闭，不需要再次关闭
-        /* batch_keys 由 SRF 内存上下文自动清理 */
+        // 关闭索引关系（只关闭一次）
+        if (index_to_close) {
+            elog(LOG, "batch_vector_search_c: 关闭 index");
+            index_close(index_to_close, AccessShareLock);
+            elog(LOG, "batch_vector_search_c: index 关闭完成");
+        }
         
-        // 在返回DONE之前，确保所有指针都已清空
-        // 这样即使PostgreSQL在清理SRF内存上下文时访问state，也不会访问已删除的内存
+        // 清理状态
+        elog(LOG, "batch_vector_search_c: 清理状态指针");
         state->result_values = NULL;
         state->result_nulls = NULL;
         state->batch_keys = NULL;
         
-        // 重要：确保所有可能被PostgreSQL访问的字段都已清空
-        // scan和index已经设置为NULL，heap_rel已经在第一次调用时关闭
-        // 但是，我们需要确保state结构本身是安全的
-        
-        // elog(LOG, "batch_vector_search_c: 资源清理完成，返回DONE - scan=%p, index=%p", 
-        //      state->scan, state->index);
-        
-        // 在返回DONE之前，确认所有指针状态
-        // 这可以防止PostgreSQL在清理SRF内存上下文时访问已删除的内存
-        
+        elog(LOG, "batch_vector_search_c: 准备返回 DONE");
         SRF_RETURN_DONE(funcctx);
     }
     
     // 返回当前结果
     base_idx = state->current_result * 3;
+    
+    /* 边界检查 */
+    if (base_idx + 2 >= state->returned_tuples * 3) {
+        elog(ERROR, "batch_vector_search_c: 数组越界, base_idx=%d, returned_tuples=%d, max_idx=%d", 
+             base_idx, state->returned_tuples, state->returned_tuples * 3);
+        SRF_RETURN_DONE(funcctx);
+    }
+    
+    /* 验证数组指针 */
+    if (!state->result_values || !state->result_nulls) {
+        elog(ERROR, "batch_vector_search_c: result_values 或 result_nulls 为 NULL");
+        SRF_RETURN_DONE(funcctx);
+    }
+    
+    elog(LOG, "batch_vector_search_c: 返回结果 %d, base_idx=%d, returned_tuples=%d", 
+         state->current_result, base_idx, state->returned_tuples);
     
     if (!state->result_nulls[base_idx]) {
         // 直接从result_values数组中获取结果
@@ -251,6 +268,9 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         tuple_nulls[0] = state->result_nulls[base_idx + 0];
         tuple_nulls[1] = state->result_nulls[base_idx + 1];
         tuple_nulls[2] = state->result_nulls[base_idx + 2];
+        
+        elog(LOG, "batch_vector_search_c: 获取值 - query_id=%d, vector_id=%d, distance=%.6f", 
+             DatumGetInt32(values[0]), DatumGetInt32(values[1]), DatumGetFloat8(values[2]));
     } else {
         // 处理null结果
         values[0] = (Datum)0;
@@ -259,18 +279,22 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         tuple_nulls[0] = true;
         tuple_nulls[1] = true;
         tuple_nulls[2] = true;
+        elog(LOG, "batch_vector_search_c: null结果");
     }
-    
-    // elog(LOG, "batch_vector_search_c: 返回结果 %d - query_id=%d, vector_id=%d, distance=%.6f", 
-    //      state->current_result,
-    //      DatumGetInt32(values[0]),
-    //      DatumGetInt32(values[1]),
-    //      DatumGetFloat8(values[2]));
     
     state->current_result++;
     
+    elog(LOG, "batch_vector_search_c: 准备创建 tuple");
     tuple = heap_form_tuple(funcctx->tuple_desc, values, tuple_nulls);
-    SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+    if (!tuple) {
+        elog(ERROR, "batch_vector_search_c: heap_form_tuple 返回 NULL");
+        SRF_RETURN_DONE(funcctx);
+    }
+    elog(LOG, "batch_vector_search_c: tuple 创建成功, 准备返回");
+    
+    Datum result_datum = HeapTupleGetDatum(tuple);
+    elog(LOG, "batch_vector_search_c: HeapTupleGetDatum 完成, 准备调用 SRF_RETURN_NEXT");
+    SRF_RETURN_NEXT(funcctx, result_datum);
 }
 
 /* ScanKeyBatchFree 已删除 - 原因如下：

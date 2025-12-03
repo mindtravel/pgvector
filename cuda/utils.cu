@@ -144,7 +144,6 @@ __global__ void map_candidate_indices_kernel(
     if (idx >= total) return;
     
     int query_id = idx / k;
-    int k_pos = idx % k;
     
     int candidate_pos = d_topk_index[idx];
     if (candidate_pos >= 0 && candidate_pos < max_candidates_per_query) {

@@ -96,8 +96,9 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
 # CUDA编译规则 - 必须在include $(PGXS)之后
+# 使用 sm_70 架构（Tesla V100）并添加优化选项
 %.o: %.cu
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -std=c++14
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_70 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -std=c++17 -O3 --use_fast_math
 
 # C++编译规则
 %.o: %.cpp
@@ -106,43 +107,43 @@ include $(PGXS)
 # 强制覆盖CUDA对象文件的构建规则，避免.bc文件依赖
 cuda/cuda_wrapper.o: cuda/cuda_wrapper.cu
 	@echo "编译CUDA文件: $< -> $@"
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -std=c++14
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -arch=sm_70 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -std=c++17 -O3 --use_fast_math
 
 # indexed_gemm_v5编译规则
 cuda/indexed_gemm/indexed_gemm_v5.o: cuda/indexed_gemm/indexed_gemm_v5.cu
 	@echo "编译CUDA文件: $< -> $@"
 	@mkdir -p cuda/indexed_gemm
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_70 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17 -O3 --use_fast_math
 
 # fusion_cos_topk_warpsort编译规则
 cuda/fusion_cos_topk/fusion_cos_topk_warpsort.o: cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
 	@echo "编译CUDA文件: $< -> $@"
 	@mkdir -p cuda/fusion_cos_topk
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_70 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17 -O3 --use_fast_math
 
 # l2norm编译规则
 cuda/l2norm/l2norm.o: cuda/l2norm/l2norm.cu
 	@echo "编译CUDA文件: $< -> $@"
 	@mkdir -p cuda/l2norm
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_70 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17 -O3 --use_fast_math
 
 # utils编译规则
 cuda/utils.o: cuda/utils.cu
 	@echo "编译CUDA文件: $< -> $@"
 	@mkdir -p cuda
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_70 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17 -O3 --use_fast_math
 
 # test_utils编译规则（提供CHECK_CUDA_ERRORS宏的实现）
 unit_tests/common/test_utils.o: unit_tests/common/test_utils.cu
 	@echo "编译CUDA文件: $< -> $@"
 	@mkdir -p unit_tests/common
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_70 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17 -O3 --use_fast_math
 
 # integrate_screen编译规则（需要包含unit_tests路径以访问test_utils.cuh）
 cuda/integrate_screen/integrate_screen.o: cuda/integrate_screen/integrate_screen.cu
 	@echo "编译CUDA文件: $< -> $@"
 	@mkdir -p cuda/integrate_screen
-	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_60 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17
+	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_70 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17 -O3 --use_fast_math
 
 # integrate_screen_wrapper编译规则
 cuda/integrate_screen/integrate_screen_wrapper.o: cuda/integrate_screen/integrate_screen_wrapper.cpp

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cfloat>
+#include <cstring>
 #include <limits>
 #include <iostream>
 #include <random>
@@ -263,21 +264,68 @@ static std::vector<double> run_case(const BenchmarkCase& config,
         );
     );
 
-
-    int* n_isnull = (int*)(malloc(config.n_query * sizeof(int)));
+    // 分配 device 内存并复制数据
+    float* d_query_batch = nullptr;
+    int* d_cluster_size = nullptr;
+    float* d_cluster_vectors = nullptr;
+    float* d_cluster_centers = nullptr;
+    float* d_topk_dist = nullptr;
+    int* d_topk_index = nullptr;
+    
+    // 1. 复制 query_batch（连续存储）
+    cudaMalloc(&d_query_batch, config.n_query * config.vector_dim * sizeof(float));
+    // query_batch 是 float**，需要展平为连续数组
+    float* query_batch_flat = (float*)malloc(config.n_query * config.vector_dim * sizeof(float));
+    for (int i = 0; i < config.n_query; i++) {
+        memcpy(query_batch_flat + i * config.vector_dim, query_batch[i], config.vector_dim * sizeof(float));
+    }
+    cudaMemcpy(d_query_batch, query_batch_flat, config.n_query * config.vector_dim * sizeof(float), cudaMemcpyHostToDevice);
+    free(query_batch_flat);
+    
+    // 2. 复制 cluster_sizes
+    cudaMalloc(&d_cluster_size, config.n_total_clusters * sizeof(int));
+    cudaMemcpy(d_cluster_size, cluster_sizes, config.n_total_clusters * sizeof(int), cudaMemcpyHostToDevice);
+    
+    // 3. 复制所有 cluster 向量（连续存储）
+    cudaMalloc(&d_cluster_vectors, config.n_total_vectors * config.vector_dim * sizeof(float));
+    float* cluster_vectors_flat = (float*)malloc(config.n_total_vectors * config.vector_dim * sizeof(float));
+    int offset = 0;
+    for (int cid = 0; cid < config.n_total_clusters; cid++) {
+        int vec_count = cluster_sizes[cid];
+        for (int vid = 0; vid < vec_count; vid++) {
+            memcpy(cluster_vectors_flat + offset * config.vector_dim, 
+                   cluster_data[cid][0] + vid * config.vector_dim, 
+                   config.vector_dim * sizeof(float));
+            offset++;
+        }
+    }
+    cudaMemcpy(d_cluster_vectors, cluster_vectors_flat, config.n_total_vectors * config.vector_dim * sizeof(float), cudaMemcpyHostToDevice);
+    free(cluster_vectors_flat);
+    
+    // 4. 复制 cluster_center_data（连续存储）
+    cudaMalloc(&d_cluster_centers, config.n_total_clusters * config.vector_dim * sizeof(float));
+    float* cluster_centers_flat = (float*)malloc(config.n_total_clusters * config.vector_dim * sizeof(float));
+    for (int i = 0; i < config.n_total_clusters; i++) {
+        memcpy(cluster_centers_flat + i * config.vector_dim, cluster_center_data[i], config.vector_dim * sizeof(float));
+    }
+    cudaMemcpy(d_cluster_centers, cluster_centers_flat, config.n_total_clusters * config.vector_dim * sizeof(float), cudaMemcpyHostToDevice);
+    free(cluster_centers_flat);
+    
+    // 5. 分配输出 device 内存
+    cudaMalloc(&d_topk_dist, config.n_query * config.k * sizeof(float));
+    cudaMalloc(&d_topk_index, config.n_query * config.k * sizeof(int));
+    
+    CHECK_CUDA_ERRORS;
 
     double gpu_ms = 0.0;
     MEASURE_MS_AND_SAVE("gpu耗时:", gpu_ms,
         batch_search_pipeline(
-            query_batch,
-            cluster_sizes,
-            cluster_data,
-            cluster_center_data,
-
-            gpu_dist,
-            gpu_idx,
-            n_isnull,
-
+            d_query_batch,
+            d_cluster_size,
+            d_cluster_vectors,
+            d_cluster_centers,
+            d_topk_dist,
+            d_topk_index,
             config.n_query,
             config.vector_dim,
             config.n_total_clusters,
@@ -289,14 +337,24 @@ static std::vector<double> run_case(const BenchmarkCase& config,
         CHECK_CUDA_ERRORS;
     );
     
+    // 6. 将结果从 device 复制回 host
+    cudaMemcpy(gpu_dist[0], d_topk_dist, config.n_query * config.k * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(gpu_idx[0], d_topk_index, config.n_query * config.k * sizeof(int), cudaMemcpyDeviceToHost);
+    CHECK_CUDA_ERRORS;
+    
+    // 7. 释放 device 内存
+    cudaFree(d_query_batch);
+    cudaFree(d_cluster_size);
+    cudaFree(d_cluster_vectors);
+    cudaFree(d_cluster_centers);
+    cudaFree(d_topk_dist);
+    cudaFree(d_topk_index);
+    
     bool pass = compare_set_2D<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-4f);
     
     double pass_rate = pass ? 1.0 : 0.0;
-    
 
     // 清理内存
-    free(n_isnull);
-
     free_vector_list((void**)cpu_idx);
     free_vector_list((void**)cpu_dist);
 

@@ -34,31 +34,30 @@ bool initialize_persistent_data(
 void cleanup_persistent_data();
 
 /**
- * 流水线批量查询接口
+ * 流水线批量查询接口（接受 device 指针）
+ * 
+ * 注意：所有输入数据指针必须是 device 指针，CPU-GPU 内存复制应在调用前完成
  *
- * @param query_batch           query 数据，指针数组，大小 [n_query]
- * @param cluster_size          各 cluster 中向量的数量，长度 n_total_cluster
- * @param cluster_data          各 cluster 在 GPU 上的起始地址数组，长度 n_total_cluster
- * @param cluster_center_data   聚类中心数据，指针数组，大小 [n_total_cluster]
- * @param topk_dist             输出：top-k 距离矩阵 [n_query * k]
- * @param topk_index            输出：top-k 索引矩阵 [n_query * k]
- * @param n_isnull              输出：每个 query 在 top-k 末尾（无有效数据）的个数
+ * @param d_query_batch         device 指针：query 数据，连续存储 [n_query * n_dim]
+ * @param d_cluster_size         device 指针：各 cluster 中向量的数量，长度 n_total_cluster
+ * @param d_cluster_vectors      device 指针：所有 cluster 向量数据，连续存储 [n_total_vectors * n_dim]
+ * @param d_cluster_centers      device 指针：聚类中心数据，连续存储 [n_total_cluster * n_dim]
+ * @param d_topk_dist            device 指针：输出 top-k 距离矩阵 [n_query * k]
+ * @param d_topk_index           device 指针：输出 top-k 索引矩阵 [n_query * k]
  * @param n_query               query 总数
  * @param n_dim                 向量维度
  * @param n_total_cluster       聚类总数
- * @param n_cluster_per_query   每个 query 精筛的 cluster 数（n_probes）
+ * @param n_total_vectors       向量总数
+ * @param n_probes              每个 query 精筛的 cluster 数
  * @param k                     top-k 数量
  */
 void batch_search_pipeline(
-    float** query_batch,
-    int* cluster_size,
-    float*** cluster_data,
-    float** cluster_center_data,
-    float** topk_dist,
-    
-    int** topk_index,
-    int* n_isnull,
-
+    float* d_query_batch,
+    int* d_cluster_size,
+    float* d_cluster_vectors,
+    float* d_cluster_centers,
+    float* d_topk_dist,
+    int* d_topk_index,
     int n_query,
     int n_dim,
     int n_total_cluster,
