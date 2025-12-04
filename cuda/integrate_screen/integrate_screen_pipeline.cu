@@ -272,7 +272,7 @@ void batch_search_pipeline(float** query_batch,
                            int* cluster_size,
                            float*** cluster_vectors,
                            float** cluster_center_data,
-                           
+                           int* initial_indices,
                            float** topk_dist,
                            int** topk_index,
                            int* n_isnull,
@@ -419,18 +419,30 @@ void batch_search_pipeline(float** query_batch,
         float alpha = 1.0f; 
         float beta = 0.0f;
         cublasHandle_t handle;
-        int* d_index;
+        int* d_index = nullptr;
+        bool need_free_index = false;
     
         cudaMalloc(&d_inner_product, n_query * n_total_clusters * sizeof(float));
-        cudaMalloc(&d_index, n_query * n_total_clusters * sizeof(int));
         cudaMalloc(&d_top_nprobe_dist, n_query * n_probes * sizeof(float));
             cublasCreate(&handle);
         CHECK_CUDA_ERRORS;
     
-        // 生成顺序索引
+        // 使用外部传入的索引，如果没有传入则内部生成顺序索引
+        if (initial_indices != nullptr) {
+            // 复制外部传入的索引到GPU
+            cudaMalloc(&d_index, n_query * n_total_clusters * sizeof(int));
+            cudaMemcpyAsync(d_index, initial_indices, 
+                           n_query * n_total_clusters * sizeof(int),
+                           cudaMemcpyHostToDevice, compute_stream);
+            need_free_index = true;
+        } else {
+            // 内部生成顺序索引
+            cudaMalloc(&d_index, n_query * n_total_clusters * sizeof(int));
+            need_free_index = true;
             dim3 block_dim((n_total_clusters < 256) ? n_total_clusters : 256);
-        generate_sequence_indices_kernel<<<queryDim, block_dim, 0, compute_stream>>>(
-                d_index, n_query, n_total_clusters);
+            generate_sequence_indices_kernel<<<queryDim, block_dim, 0, compute_stream>>>(
+                    d_index, n_query, n_total_clusters);
+        }
         
         // 初始化距离数组（使用fill kernel替代thrust::fill）
         dim3 fill_block(256);
@@ -470,7 +482,9 @@ void batch_search_pipeline(float** query_batch,
             cublasDestroy(handle);
         // 注意：d_cluster_centers 来自常驻数据，不应释放
             cudaFree(d_inner_product);
-            cudaFree(d_index);
+            if (need_free_index && d_index != nullptr) {
+                cudaFree(d_index);
+            }
             cudaFree(d_top_nprobe_dist);
         CHECK_CUDA_ERRORS;
     }

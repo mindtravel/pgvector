@@ -31,6 +31,7 @@ void batch_search_pipeline(float* d_query_batch,
                            int* d_cluster_size,
                            float* d_cluster_vectors,
                            float* d_cluster_centers,
+                           int* d_initial_indices,
                            float* d_topk_dist,
                            int* d_topk_index,
                            int n_query,
@@ -126,12 +127,10 @@ void batch_search_pipeline(float* d_query_batch,
         cublasHandle_t handle;
     
         // 分配设备内存
-        int *d_index;
         {
             CUDATimer timer_manage("Step 1: GPU Memory Allocation");
     
             cudaMalloc(&d_inner_product, n_query * n_total_clusters * sizeof(float));/*存储各个query需要查找的data向量的距离*/
-            cudaMalloc(&d_index, n_query * n_total_clusters * sizeof(int));/*存储各个query需要查找的data向量的索引*/
             cudaMalloc(&d_top_nprobe_dist, n_query * n_probes * sizeof(float));/*存储topk距离*/
     
             cublasCreate(&handle);
@@ -143,12 +142,6 @@ void batch_search_pipeline(float* d_query_batch,
     
             CUDATimer timer_trans1("Step 1: H2D Data Transfer");
     
-            /* 使用 CUDA kernel 并行生成顺序索引 [0, 1, 2, ..., n_total_clusters-1] */
-            // 线程模型：每个block处理一个query，每个block使用256个线程（或更少）
-            dim3 block_dim((n_total_clusters < 256) ? n_total_clusters : 256);
-            generate_sequence_indices_kernel<<<queryDim, block_dim>>>(
-                d_index, n_query, n_total_clusters);
-            CHECK_CUDA_ERRORS;
     
             /* 初始化距离数组（使用fill kernel替代thrust::fill） */
             dim3 fill_block(256);
@@ -189,7 +182,7 @@ void batch_search_pipeline(float* d_query_batch,
             CUDATimer timer_compute("Step 1: Kernel Execution: cos + topk");
     
             pgvector::fusion_cos_topk_warpsort::fusion_cos_topk_warpsort<float, int>(
-                d_query_norm, d_cluster_centers_norm, d_inner_product, d_index,
+                d_query_norm, d_cluster_centers_norm, d_inner_product, d_initial_indices,
                 n_query, n_total_clusters, n_probes,  // 粗筛选择 n_probes 个 cluster
                 d_top_nprobe_dist, d_top_nprobe_index,
                 true /* select min */
@@ -233,7 +226,6 @@ void batch_search_pipeline(float* d_query_batch,
             // d_cluster_centers_ptr 由调用者管理，不在这里释放
             cudaFree(d_inner_product);
             cudaFree(d_cluster_centers_norm);
-            cudaFree(d_index);
             cudaFree(d_top_nprobe_dist);
         }
     

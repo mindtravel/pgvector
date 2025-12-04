@@ -12,6 +12,7 @@ int batch_search_pipeline_wrapper(float* d_query_batch,
                                   int* d_cluster_size,
                                   float* d_cluster_vectors,
                                   float* d_cluster_centers,
+                                  int* d_initial_indices,
                                   float* d_topk_dist,
                                   int* d_topk_index,
                                   int n_query, int n_dim, int n_total_cluster,
@@ -32,6 +33,8 @@ int batch_search_pipeline_wrapper(float* d_query_batch,
             (void*)d_cluster_vectors, (size_t)n_total_vectors * n_dim * sizeof(float));
     fprintf(stderr, "batch_search_pipeline_wrapper:   d_cluster_centers=%p (expected size: %zu bytes)\n",
             (void*)d_cluster_centers, (size_t)n_total_cluster * n_dim * sizeof(float));
+    fprintf(stderr, "batch_search_pipeline_wrapper:   d_initial_indices=%p (expected size: %zu bytes)\n",
+            (void*)d_initial_indices, d_initial_indices ? (size_t)n_query * n_total_cluster * sizeof(int) : 0);
     fprintf(stderr, "batch_search_pipeline_wrapper:   d_topk_dist=%p (expected size: %zu bytes)\n",
             (void*)d_topk_dist, (size_t)n_query * k * sizeof(float));
     fprintf(stderr, "batch_search_pipeline_wrapper:   d_topk_index=%p (expected size: %zu bytes)\n",
@@ -59,6 +62,7 @@ int batch_search_pipeline_wrapper(float* d_query_batch,
     
     try {
         batch_search_pipeline(d_query_batch, d_cluster_size, d_cluster_vectors, d_cluster_centers,
+                             d_initial_indices,  // 传入初始索引（如果为nullptr，则内部生成）
                              d_topk_dist, d_topk_index,
                              n_query, n_dim, n_total_cluster, n_total_vectors, n_probes, k);
         fprintf(stderr, "batch_search_pipeline_wrapper: 执行成功\n");

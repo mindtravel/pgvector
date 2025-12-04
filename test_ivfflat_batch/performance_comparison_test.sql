@@ -117,6 +117,12 @@ SELECT * FROM batch_vector_search(
     3
 );
 
+-- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+SELECT * FROM batch_vector_search(
+    (SELECT oid FROM pg_class WHERE relname = 'test_vectors_perf_ivfflat_idx'),
+    ARRAY[:query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4],
+    3
+);
 \timing off
 
 

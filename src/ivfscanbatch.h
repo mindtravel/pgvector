@@ -56,6 +56,7 @@ typedef struct {
     /* 结果数据 - 按列存储以提高缓存效率 */
     int* query_ids;                  /* 所有查询ID连续存储 */
     ItemPointerData* vector_ids;     /* 所有向量TID连续存储（ItemPointer） */
+    int* global_vector_indices;      /* 所有全局向量索引连续存储（用于返回给用户） */
     float* distances;                /* 所有距离连续存储 */
     
     int n_queries;                  /* 查询数量 */

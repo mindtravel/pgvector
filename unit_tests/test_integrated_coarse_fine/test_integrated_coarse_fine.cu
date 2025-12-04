@@ -27,6 +27,7 @@ struct BenchmarkCase {
 struct ClusterDataset {
     float*** cluster_ptrs;
     int* cluster_sizes;
+    int* initial_indices;  /* 初始索引（cluster索引）[n_query * n_total_clusters] */
     int n_total_clusters;
 };
 
@@ -69,6 +70,15 @@ static ClusterDataset prepare_cluster_dataset(const BenchmarkCase& config) {
         int vec_count = dataset.cluster_sizes[cid];
         dataset.cluster_ptrs[cid] = generate_vector_list(vec_count, config.vector_dim);
     }
+    
+    // 生成初始索引（cluster索引）：[0, 1, 2, ..., n_total_clusters-1]，每个query使用相同的索引
+    dataset.initial_indices = (int*)malloc(config.n_query * config.n_total_clusters * sizeof(int));
+    for (int qi = 0; qi < config.n_query; qi++) {
+        for (int cid = 0; cid < config.n_total_clusters; cid++) {
+            dataset.initial_indices[qi * config.n_total_clusters + cid] = cid;
+        }
+    }
+    
     return dataset;
 }
 
@@ -81,6 +91,10 @@ static void release_cluster_dataset(ClusterDataset& dataset) {
     dataset.cluster_ptrs = nullptr;
     free(dataset.cluster_sizes);
     dataset.cluster_sizes = nullptr;
+    if (dataset.initial_indices) {
+        free(dataset.initial_indices);
+        dataset.initial_indices = nullptr;
+    }
 }
 
 static BalancedMapping build_balanced_mapping(const ClusterDataset& dataset,
@@ -134,6 +148,7 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
                                    float** query_batch,
                                    const ClusterDataset& dataset,
                                    float** centers,
+                                   int* initial_indices,
                                    int** out_index,
                                    float** out_dist
                                 ) {
@@ -150,9 +165,11 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
         for (int qi = start; qi < end; ++qi) {
             const float* query = query_batch[qi];
 
-            // coarse: compare with cluster centers
-            for (int cid = 0; cid < n_total_clusters; ++cid) {
-                tmp[cid] = {cosine_distance(query, centers[cid], n_dim), cid};
+            // coarse: compare with cluster centers (使用传入的初始索引)
+            const int* query_initial_indices = initial_indices + qi * n_total_clusters;
+            for (int idx = 0; idx < n_total_clusters; ++idx) {
+                int cid = query_initial_indices[idx];  // 使用传入的索引
+                tmp[idx] = {cosine_distance(query, centers[cid], n_dim), cid};
             }
             // 粗筛选择 n_probes 个 cluster
             std::partial_sort(tmp.begin(), tmp.begin() + config.n_probes, tmp.end(),
@@ -243,7 +260,8 @@ static std::vector<double> run_case(const BenchmarkCase& config,
                                      float** cluster_center_data) {
     float*** cluster_data = dataset->cluster_ptrs;
     int* cluster_sizes = dataset->cluster_sizes;
-    
+    int* initial_indices = dataset->initial_indices;  /* 使用数据集中的初始索引 */
+
     int** cpu_idx = (int**)malloc_vector_list(config.n_query, config.k, sizeof(int));
     float** cpu_dist = (float**)malloc_vector_list(config.n_query, config.k, sizeof(float));
 
@@ -252,7 +270,9 @@ static std::vector<double> run_case(const BenchmarkCase& config,
 
     double cpu_ms = 0.0;
     MEASURE_MS_AND_SAVE("cpu耗时:", cpu_ms,
-        cpu_coarse_fine_search(config, query_batch, *dataset, cluster_center_data,
+        cpu_coarse_fine_search(config, query_batch, *dataset,
+                               cluster_center_data,
+                               initial_indices,  /* 传入初始索引（一维数组） */
                                cpu_idx,
                                cpu_dist
         );
@@ -309,6 +329,13 @@ static std::vector<double> run_case(const BenchmarkCase& config,
     cudaMalloc(&d_topk_dist, config.n_query * config.k * sizeof(float));
     cudaMalloc(&d_topk_index, config.n_query * config.k * sizeof(int));
     
+    // 6. 复制初始索引（cluster索引）到GPU（使用数据集中的初始索引）
+    int* d_initial_indices = nullptr;
+    cudaMalloc(&d_initial_indices, config.n_query * config.n_total_clusters * sizeof(int));
+    cudaMemcpy(d_initial_indices, initial_indices, 
+               config.n_query * config.n_total_clusters * sizeof(int), 
+               cudaMemcpyHostToDevice);
+    
     CHECK_CUDA_ERRORS;
 
     double gpu_ms = 0.0;
@@ -318,6 +345,7 @@ static std::vector<double> run_case(const BenchmarkCase& config,
             d_cluster_size,
             d_cluster_vectors,
             d_cluster_centers,
+            d_initial_indices,  // 传入初始索引
             d_topk_dist,
             d_topk_index,
             config.n_query,
@@ -331,16 +359,17 @@ static std::vector<double> run_case(const BenchmarkCase& config,
         CHECK_CUDA_ERRORS;
     );
     
-    // 6. 将结果从 device 复制回 host
+    // 7. 将结果从 device 复制回 host
     cudaMemcpy(gpu_dist[0], d_topk_dist, config.n_query * config.k * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(gpu_idx[0], d_topk_index, config.n_query * config.k * sizeof(int), cudaMemcpyDeviceToHost);
     CHECK_CUDA_ERRORS;
     
-    // 7. 释放 device 内存
+    // 8. 释放 device 内存
     cudaFree(d_query_batch);
     cudaFree(d_cluster_size);
     cudaFree(d_cluster_vectors);
     cudaFree(d_cluster_centers);
+    cudaFree(d_initial_indices);
     cudaFree(d_topk_dist);
     cudaFree(d_topk_index);
     
@@ -393,21 +422,21 @@ int main(int argc, char** argv) {
     // PARAM_3D(n_total_vectors, (10000, 50000, 100000, 200000, 500000, 1000000),
     //         n_query, (100, 200, 512, 1000),
     //         vector_dim, (128, 256))
-    //  PARAM_3D(n_total_vectors, (10000, 1000000),
-    //          n_probes, (1, 2, 5, 10, 20),
-    //          vector_dim, (128))
-    // {
-    //     int n_total_clusters = std::max(10, static_cast<int>(std::sqrt(n_total_vectors)));         
-    //     int n_query = 10000;
-    //     int k = 100;
-    // 使用和 pgvector 相同的参数进行测试
+     PARAM_3D(n_total_vectors, (10000, 1000000),
+             n_probes, (1, 2, 5, 10, 20),
+             vector_dim, (128))
     {
-        int n_query = 4;
-        int vector_dim = 96;
-        int n_total_clusters = 50;
-        int n_total_vectors = 1000;
-        int n_probes = 8;
-        int k = 3;
+        int n_total_clusters = std::max(10, static_cast<int>(std::sqrt(n_total_vectors)));         
+        int n_query = 10000;
+        int k = 100;
+    // 使用和 pgvector 相同的参数进行测试
+    // {
+    //     int n_query = 4;
+    //     int vector_dim = 96;
+    //     int n_total_clusters = 50;
+    //     int n_total_vectors = 1000;
+    //     int n_probes = 8;
+    //     int k = 3;
          
         BenchmarkCase config = {n_query, vector_dim, n_total_clusters, n_total_vectors, n_probes, k};
         

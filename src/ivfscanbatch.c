@@ -4,9 +4,13 @@
 #include <math.h>
 
 #include "access/relscan.h"
+#include "access/tableam.h"
+#include "access/heapam.h"
+#include "access/sysattr.h"
 #include "storage/bufmgr.h"
 #include "utils/memutils.h"
 #include "utils/datum.h"
+#include "utils/snapshot.h"
 #include "fmgr.h"
 #include "ivfscanbatch.h"
 #include "scanbatch.h"
@@ -48,6 +52,7 @@ static int CompareLists(const pairingheap_node *a, const pairingheap_node *b, vo
 static void GetScanLists_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys);
 static int UploadCentersToGPU_Batch(IndexScanDesc scan);
 static int UploadIndexTuplesToGPU_Batch(IndexScanDesc scan);
+/** @deprecated 已废弃，请使用 ProcessBatchQueriesGPU_NewPipeline */
 static void GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys);
 
 /* batch_search_pipeline相关函数 */
@@ -55,6 +60,7 @@ typedef struct {
     int cluster_id;
     int vector_index_in_cluster;
     ItemPointerData tid;
+    int table_row_id;  /* 表行ID（id字段），如果索引不包含则从堆表读取 */
 } VectorIndexMapping;
 
 static int PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_probes,
@@ -189,8 +195,16 @@ ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* values, bool*
         int total_results = 0;
         int nbatch = so->batch_keys->nkeys;
         
-        elog(LOG, "ivfflatbatchgettuple: 开始处理结果, nbatch=%d, k=%d, max_tuples=%d", 
-             nbatch, k, max_tuples);
+        /* 验证 result_buffer 中的查询数量是否匹配 */
+        if (so->result_buffer->n_queries != nbatch) {
+            elog(ERROR, "ivfflatbatchgettuple: result_buffer中的查询数量(%d)与batch_keys中的查询数量(%d)不匹配！"
+                 "这可能是因为扫描描述符被重用但result_buffer未重置。",
+                 so->result_buffer->n_queries, nbatch);
+            return false;
+        }
+        
+        elog(LOG, "ivfflatbatchgettuple: 开始处理结果, nbatch=%d, k=%d, max_tuples=%d, result_buffer->n_queries=%d, result_buffer->k=%d", 
+             nbatch, k, max_tuples, so->result_buffer->n_queries, so->result_buffer->k);
         
         /* max_tuples 实际上是 max_values（数组大小），每个结果有3个字段 */
         int max_results = max_tuples / 3;
@@ -269,6 +283,16 @@ ivfflatbatchendscan(IndexScanDesc scan)
      * 删除 tmpCtx 时会自动清理，无需手动释放 */
 }
 
+/**
+ * 批量GPU查询处理入口函数
+ * 
+ * 统一使用新GPU路径 (ProcessBatchQueriesGPU_NewPipeline):
+ * - 使用 batch_search_pipeline_wrapper
+ * - 不依赖 cuda_ctx
+ * - 返回全局向量索引
+ * 
+ * 注意：旧路径 GetScanItems_BatchGPU 已废弃，不再使用
+ */
 void
 ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
 {
@@ -276,12 +300,9 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
     int nbatch = batch_keys->nkeys;
     
 #ifdef USE_CUDA
-    // 注释掉：现在直接使用 integrate_screen，不依赖 cuda_ctx
-    // if (so->cuda_ctx && so->cuda_ctx->initialized) {
-        /* 使用新的batch_search_pipeline */
-        ProcessBatchQueriesGPU_NewPipeline(scan, batch_keys, k);
-        return;
-    // }
+    /* 统一使用新的 batch_search_pipeline 路径 */
+    ProcessBatchQueriesGPU_NewPipeline(scan, batch_keys, k);
+    return;
 #endif
 }
 
@@ -311,6 +332,13 @@ GetBatchResults(BatchBuffer* buffer, int query_index, int k, Datum* values, bool
         *returned_count = 0;
         return;
     }
+    
+    if (buffer->global_vector_indices == NULL) {
+        elog(ERROR, "GetBatchResults: buffer->global_vector_indices 为 NULL");
+        *returned_count = 0;
+        return;
+    }
+    
     if (buffer->distances == NULL) {
         elog(ERROR, "GetBatchResults: buffer->distances 为 NULL");
         *returned_count = 0;
@@ -319,9 +347,25 @@ GetBatchResults(BatchBuffer* buffer, int query_index, int k, Datum* values, bool
     
     elog(LOG, "GetBatchResults: buffer 字段验证通过, 开始遍历结果");
     
+    /* 边界检查：确保 total_results 不超过数组大小 */
+    int max_results = buffer->n_queries * buffer->k;
+    if (buffer->total_results > max_results) {
+        elog(WARNING, "GetBatchResults: total_results=%d 超出数组大小 %d，限制为 %d", 
+             buffer->total_results, max_results, max_results);
+        buffer->total_results = max_results;
+    }
+    
     /* 直接从按列存储的数组中获取结果 */
-    /* 注意：每个查询都有k个槽位，可能包含null值（vector_id == -1） */
-    for (i = 0; i < buffer->total_results && count < k; i++) {
+    /* 注意：每个查询都有k个槽位，可能包含null值（global_vector_indices == -1） */
+    /* 遍历范围应该是 n_queries * k，而不是 total_results（total_results可能不准确） */
+    int max_buffer_size = buffer->n_queries * buffer->k;
+    for (i = 0; i < max_buffer_size && count < k; i++) {
+        /* 边界检查：确保 i 在数组范围内 */
+        if (i >= max_results) {
+            elog(WARNING, "GetBatchResults: 索引 i=%d 超出数组大小 %d", i, max_results);
+            break;
+        }
+        
         /* 检查是否是当前查询的结果 */
         if (buffer->query_ids[i] == query_index) {
             /* 边界检查 */
@@ -331,8 +375,8 @@ GetBatchResults(BatchBuffer* buffer, int query_index, int k, Datum* values, bool
             
             elog(LOG, "GetBatchResults: 找到匹配结果, i=%d, count=%d", i, count);
             
-            /* 检查是否是null值（使用ItemPointerIsValid检查） */
-            bool is_null = !ItemPointerIsValid(&buffer->vector_ids[i]);
+            /* 检查是否是null值（使用global_vector_indices检查，-1表示无效） */
+            bool is_null = (buffer->global_vector_indices[i] < 0);
             
             if (is_null) {
                 /* null值：设置所有字段为null
@@ -350,19 +394,11 @@ GetBatchResults(BatchBuffer* buffer, int query_index, int k, Datum* values, bool
             } else {
                 /* 有效值：设置返回值 */
                 values[count * 3 + 0] = Int32GetDatum(buffer->query_ids[i]); /* query_id */
-                /* vector_id: 将 ItemPointer 转换为 integer
-                 * ItemPointer 包含 block number 和 offset number
-                 * 在 PostgreSQL 中，通常使用 block number 和 offset number 的组合来表示 TID
-                 * 但这里我们需要一个整数，可以使用 offset number
-                 * 注意：如果 vector_id 需要是全局唯一的，可能需要使用 block number 和 offset number 的组合
-                 */
+                /* vector_id: 返回全局向量索引（global_vector_idx） */
                 {
-                    /* 使用 offset number 作为 vector_id */
-                    /* 注意：ItemPointerGetOffsetNumber 接受 ItemPointer 参数（ItemPointerData*） */
-                    elog(LOG, "GetBatchResults: 访问 vector_ids[%d], 地址=%p", i, (void*)&buffer->vector_ids[i]);
-                    int vector_id_value = (int)ItemPointerGetOffsetNumber(&buffer->vector_ids[i]);
-                    elog(LOG, "GetBatchResults: vector_id_value=%d", vector_id_value);
-                    values[count * 3 + 1] = Int32GetDatum(vector_id_value); /* vector_id: integer */
+                    int global_vector_idx = buffer->global_vector_indices[i];
+                    elog(LOG, "GetBatchResults: 访问 global_vector_indices[%d], global_vector_idx=%d", i, global_vector_idx);
+                    values[count * 3 + 1] = Int32GetDatum(global_vector_idx); /* vector_id: 全局向量索引 */
                 }
                 elog(LOG, "GetBatchResults: 访问 distances[%d], 值=%.6f", i, buffer->distances[i]);
                 values[count * 3 + 2] = Float8GetDatum(buffer->distances[i]); /* distance */
@@ -394,7 +430,13 @@ CreateBatchBuffer(int n_queries, int k, int dimensions, MemoryContext ctx)
     buffer->query_data = MemoryContextAlloc(ctx, n_queries * dimensions * sizeof(float));
     buffer->query_ids = MemoryContextAlloc(ctx, total_results * sizeof(int));
     buffer->vector_ids = MemoryContextAlloc(ctx, total_results * sizeof(ItemPointerData));
+    buffer->global_vector_indices = MemoryContextAlloc(ctx, total_results * sizeof(int));
     buffer->distances = MemoryContextAlloc(ctx, total_results * sizeof(float));
+    
+    /* 初始化 global_vector_indices 为 -1（表示无效） */
+    for (int i = 0; i < total_results; i++) {
+        buffer->global_vector_indices[i] = -1;
+    }
     
     buffer->n_queries = n_queries;
     buffer->k = k;
@@ -539,6 +581,19 @@ GetScanLists_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
     pfree(list_pages);
 }
 
+/**
+ * @deprecated 此函数已废弃，请使用 ProcessBatchQueriesGPU_NewPipeline
+ * 
+ * 旧GPU路径：使用 cuda_compute_batch_probe_distances 和 cuda_topk_probe_candidates
+ * - 依赖 cuda_ctx (CUDA上下文)
+ * - 返回 TID (ItemPointerData)
+ * 
+ * 新GPU路径：使用 batch_search_pipeline_wrapper (ProcessBatchQueriesGPU_NewPipeline)
+ * - 不依赖 cuda_ctx
+ * - 返回全局向量索引
+ * 
+ * 当前所有调用都通过 ProcessBatchQueriesGPU -> ProcessBatchQueriesGPU_NewPipeline
+ */
 void
 GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
 {
@@ -658,6 +713,11 @@ GetScanItems_BatchGPU(IndexScanDesc scan, ScanKeyBatch batch_keys)
             
             so->result_buffer->query_ids[buffer_idx] = topk_query_ids[source_idx];
             so->result_buffer->vector_ids[buffer_idx] = topk_vector_ids[source_idx];
+            /* 注意：GetScanItems_BatchGPU 使用旧的GPU路径，返回的是TID，不是全局向量索引
+             * 这里暂时设置为 -1，表示需要通过TID查找（但当前实现不支持）
+             * 或者可以尝试从TID推导出全局向量索引，但这需要额外的映射表
+             */
+            so->result_buffer->global_vector_indices[buffer_idx] = -1;  /* 旧路径暂不支持全局索引 */
             so->result_buffer->distances[buffer_idx] = topk_distances[source_idx];
             
             /* 调试日志：验证索引修复效果（仅前几个结果） */
@@ -1156,6 +1216,9 @@ PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_p
                 cluster_vectors_data[center_idx] = cluster_data;
                 cluster_vectors[center_idx] = &cluster_vectors_data[center_idx];
                 
+                /* 记录当前聚类的mapping起始索引，用于批量读取表行ID */
+                int cluster_mapping_start = mapping_idx;
+                
                 int vector_idx = 0;
                 BlockNumber searchPage = cluster_start_pages[center_idx];
                 while (BlockNumberIsValid(searchPage)) {
@@ -1178,6 +1241,10 @@ PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_p
                             mapping_table[mapping_idx].cluster_id = center_idx;
                             mapping_table[mapping_idx].vector_index_in_cluster = vector_idx;
                             mapping_table[mapping_idx].tid = itup->t_tid;
+                            
+                            /* 先设置为-1，稍后批量从堆表读取 */
+                            mapping_table[mapping_idx].table_row_id = -1;
+                            
                             mapping_idx++;
                             vector_idx++;
                         }
@@ -1185,6 +1252,60 @@ PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_p
                     
                     searchPage = IvfflatPageGetOpaque(page)->nextblkno;
                     UnlockReleaseBuffer(buf);
+                }
+                
+                /* 批量读取当前聚类的表行ID */
+                int cluster_mapping_count = mapping_idx - cluster_mapping_start;
+                if (cluster_mapping_count > 0) {
+                    /* 打开堆表关系 */
+                    Oid heapRelid = IndexGetRelation(RelationGetRelid(scan->indexRelation), false);
+                    Relation heapRelation = table_open(heapRelid, AccessShareLock);
+                    TupleDesc heapDesc = RelationGetDescr(heapRelation);
+                    Snapshot snapshot = GetActiveSnapshot();
+                    
+                    /* 查找id字段的索引（假设id是第一个字段） */
+                    int id_attnum = -1;
+                    for (int i = 1; i <= heapDesc->natts; i++) {
+                        Form_pg_attribute attr = TupleDescAttr(heapDesc, i - 1);
+                        if (strcmp(NameStr(attr->attname), "id") == 0) {
+                            id_attnum = i;
+                            break;
+                        }
+                    }
+                    
+                    if (id_attnum > 0) {
+                        /* 批量读取表行ID */
+                        for (int i = 0; i < cluster_mapping_count; i++) {
+                            int idx = cluster_mapping_start + i;
+                            ItemPointer tid = &mapping_table[idx].tid;
+                            
+                            if (ItemPointerIsValid(tid)) {
+                                Buffer buffer;
+                                HeapTupleData tuple;
+                                tuple.t_self = *tid;  /* 设置tuple的TID */
+                                bool found = heap_fetch(heapRelation, snapshot, &tuple, &buffer, false);
+                                if (found) {
+                                    HeapTuple heapTuple = &tuple;
+                                    bool isnull = false;
+                                    Datum id_datum = heap_getattr(heapTuple, id_attnum, heapDesc, &isnull);
+                                    if (!isnull) {
+                                        mapping_table[idx].table_row_id = DatumGetInt32(id_datum);
+                                    } else {
+                                        mapping_table[idx].table_row_id = -1;
+                                    }
+                                    ReleaseBuffer(buffer);
+                                } else {
+                                    mapping_table[idx].table_row_id = -1;
+                                }
+                            } else {
+                                mapping_table[idx].table_row_id = -1;
+                            }
+                        }
+                    } else {
+                        elog(WARNING, "PrepareBatchDataForPipeline: 未找到id字段，跳过表行ID读取");
+                    }
+                    
+                    table_close(heapRelation, AccessShareLock);
                 }
             } else {
                 cluster_vectors[center_idx] = NULL;
@@ -1226,22 +1347,49 @@ ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_in
                             VectorIndexMapping* mapping_table, int* cluster_size,
                             BlockNumber* cluster_pages, int n_total_clusters)
 {
+    /* 验证 result_buffer 大小匹配 */
+    if (result_buffer->n_queries != n_query || result_buffer->k != k) {
+        elog(ERROR, "ConvertBatchPipelineResults: result_buffer大小不匹配 (n_queries=%d vs %d, k=%d vs %d)",
+             result_buffer->n_queries, n_query, result_buffer->k, k);
+        return;
+    }
+    
     int total_vectors = 0;
     for (int i = 0; i < n_total_clusters; i++) {
         total_vectors += cluster_size[i];
     }
     
+    /* 重置 result_buffer：先清零所有字段，确保没有残留数据 */
+    int buffer_size = result_buffer->n_queries * result_buffer->k;
+    memset(result_buffer->query_ids, -1, buffer_size * sizeof(int));
+    memset(result_buffer->global_vector_indices, -1, buffer_size * sizeof(int));
+    memset(result_buffer->distances, 0, buffer_size * sizeof(float));
+    for (int i = 0; i < buffer_size; i++) {
+        ItemPointerSetInvalid(&result_buffer->vector_ids[i]);
+    }
+    
+    /* 每个查询都有k个槽位，总共 n_query * k 个结果位置 */
+    /* 注意：虽然数组大小是 n_query * k，但 total_results 只计算有效结果数 */
     int total_results = 0;
     for (int query_idx = 0; query_idx < n_query; query_idx++) {
         for (int i = 0; i < k; i++) {
             int buffer_idx = query_idx * k + i;
             int global_vector_idx = topk_index[query_idx][i];
             
+            /* 边界检查：确保 buffer_idx 在数组范围内 */
+            if (buffer_idx >= result_buffer->n_queries * result_buffer->k) {
+                elog(ERROR, "ConvertBatchPipelineResults: buffer_idx=%d 超出范围 (n_queries=%d, k=%d, max=%d)", 
+                     buffer_idx, result_buffer->n_queries, result_buffer->k, result_buffer->n_queries * result_buffer->k);
+                continue;
+            }
+            
             if (global_vector_idx >= 0 && global_vector_idx < total_vectors) {
                 /* 直接使用全局索引在mapping_table中查找 */
                 VectorIndexMapping* mapping = &mapping_table[global_vector_idx];
                 result_buffer->query_ids[buffer_idx] = query_idx;
-                /* 确保 tid 是有效的 ItemPointer */
+                /* 保存表行ID（用于返回给用户） */
+                result_buffer->global_vector_indices[buffer_idx] = mapping->table_row_id;
+                /* 确保 tid 是有效的 ItemPointer（保留用于内部使用） */
                 if (ItemPointerIsValid(&mapping->tid)) {
                     result_buffer->vector_ids[buffer_idx] = mapping->tid;
                 } else {
@@ -1253,8 +1401,8 @@ ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_in
                 
                 /* 调试：打印前几个结果的详细信息 */
                 if (query_idx < 3 && i < 3) {
-                    elog(LOG, "ConvertBatchPipelineResults: 查询%d结果%d - global_vector_idx=%d, cluster_id=%d, vector_idx_in_cluster=%d, distance=%.10f, tid=(%u,%u)", 
-                         query_idx, i, global_vector_idx, mapping->cluster_id, 
+                    elog(LOG, "ConvertBatchPipelineResults: 查询%d结果%d - global_vector_idx=%d, table_row_id=%d, cluster_id=%d, vector_idx_in_cluster=%d, distance=%.10f, tid=(%u,%u)", 
+                         query_idx, i, global_vector_idx, mapping->table_row_id, mapping->cluster_id, 
                          mapping->vector_index_in_cluster, topk_dist[query_idx][i],
                          ItemPointerGetBlockNumber(&mapping->tid),
                          ItemPointerGetOffsetNumber(&mapping->tid));
@@ -1266,13 +1414,16 @@ ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_in
                 elog(LOG, "ConvertBatchPipelineResults: 无效的 global_vector_idx=%d (total_vectors=%d), query_idx=%d, i=%d", 
                      global_vector_idx, total_vectors, query_idx, i);
                 result_buffer->query_ids[buffer_idx] = query_idx;
+                result_buffer->global_vector_indices[buffer_idx] = -1;  /* 无效索引标记 */
                 ItemPointerSetInvalid(&result_buffer->vector_ids[buffer_idx]);
                 result_buffer->distances[buffer_idx] = INFINITY;
             }
         }
     }
     
-    result_buffer->total_results = total_results > 0 ? total_results : n_query * k;
+    /* total_results 应该始终等于 n_query * k（每个查询k个槽位） */
+    /* 注意：total_results 表示数组大小，不是有效结果数 */
+    result_buffer->total_results = n_query * k;
 }
 
 /* C++包装函数声明（在C++文件中实现，通过extern "C"导出） */
@@ -1281,6 +1432,7 @@ extern int batch_search_pipeline_wrapper(float* d_query_batch,
                                          int* d_cluster_size,
                                          float* d_cluster_vectors,
                                          float* d_cluster_centers,
+                                         int* d_initial_indices,
                                          float* d_topk_dist,
                                          int* d_topk_index,
                                          int n_query, int n_dim, int n_total_cluster,
@@ -1293,22 +1445,48 @@ extern int batch_search_pipeline_wrapper(float* d_query_batch,
 /* 辅助函数：清理 GPU 内存 */
 static void
 CleanupGPUMemory(float* d_query_batch, int* d_cluster_size, float* d_cluster_vectors,
-                 float* d_cluster_centers, float* d_topk_dist, int* d_topk_index)
+                 float* d_cluster_centers, int* d_initial_indices, float* d_topk_dist, int* d_topk_index)
 {
     if (d_query_batch) cudaFree(d_query_batch);
     if (d_cluster_size) cudaFree(d_cluster_size);
     if (d_cluster_vectors) cudaFree(d_cluster_vectors);
     if (d_cluster_centers) cudaFree(d_cluster_centers);
+    if (d_initial_indices) cudaFree(d_initial_indices);
     if (d_topk_dist) cudaFree(d_topk_dist);
     if (d_topk_index) cudaFree(d_topk_index);
 }
 
+/**
+ * 新的GPU批量查询处理管道（当前使用的唯一路径）
+ * 
+ * 特点：
+ * - 使用 batch_search_pipeline_wrapper (调用 batch_search_pipeline)
+ * - 不依赖 cuda_ctx，直接管理GPU内存
+ * - 返回全局向量索引，通过 mapping_table 映射回 TID
+ * - 支持传入初始索引 (d_initial_indices)
+ * 
+ * 替代了旧的 GetScanItems_BatchGPU 路径
+ * 所有GPU批量查询都通过 ProcessBatchQueriesGPU -> ProcessBatchQueriesGPU_NewPipeline
+ */
 static void
 ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
 {
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
     int nbatch = batch_keys->nkeys;
     int dimensions = so->dimensions;
+    
+    /* 重置处理状态，确保每次查询都重新处理 */
+    so->batch_processing_complete = false;
+    
+    /* 检查并重新创建 result_buffer（如果查询数量或k值改变） */
+    if (so->result_buffer != NULL) {
+        if (so->result_buffer->n_queries != nbatch || so->result_buffer->k != k) {
+            elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: result_buffer大小不匹配 (n_queries=%d vs %d, k=%d vs %d)，重新创建",
+                 so->result_buffer->n_queries, nbatch, so->result_buffer->k, k);
+            /* 旧的result_buffer会在tmpCtx删除时自动清理，这里只需要设置为NULL */
+            so->result_buffer = NULL;
+        }
+    }
     
     /* 切换到 tmpCtx，确保所有 palloc 分配的内存都在 tmpCtx 中 */
     /* 这样在 tmpCtx 被删除时会自动清理，无需手动释放 */
@@ -1329,6 +1507,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     int* d_cluster_size = NULL;
     float* d_cluster_vectors = NULL;
     float* d_cluster_centers = NULL;
+    int* d_initial_indices = NULL;
     float* d_topk_dist = NULL;
     int* d_topk_index = NULL;
     
@@ -1369,6 +1548,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     size_t cluster_size_size = (size_t)n_total_clusters * sizeof(int);
     size_t cluster_vectors_size = (size_t)n_total_vectors * (size_t)dimensions * sizeof(float);
     size_t cluster_centers_size = (size_t)n_total_clusters * (size_t)dimensions * sizeof(float);
+    size_t initial_indices_size = (size_t)nbatch * (size_t)n_total_clusters * sizeof(int);
     size_t topk_dist_size = (size_t)nbatch * (size_t)k * sizeof(float);
     size_t topk_index_size = (size_t)nbatch * (size_t)k * sizeof(int);
     
@@ -1394,7 +1574,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     if (cuda_err != cudaSuccess) {
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配 cluster_size GPU 内存 (%zu bytes): %s", 
             cluster_size_size, cudaGetErrorString(cuda_err));
-        CleanupGPUMemory(d_query_batch, NULL, NULL, NULL, NULL, NULL);
+        CleanupGPUMemory(d_query_batch, NULL, NULL, NULL, NULL, NULL, NULL);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1407,7 +1587,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     if (cuda_err != cudaSuccess) {
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配 cluster_vectors GPU 内存 (%zu bytes): %s", 
             cluster_vectors_size, cudaGetErrorString(cuda_err));
-        CleanupGPUMemory(d_query_batch, d_cluster_size, NULL, NULL, NULL, NULL);
+        CleanupGPUMemory(d_query_batch, d_cluster_size, NULL, NULL, NULL, NULL, NULL);
         MemoryContextSwitchTo(oldCtx);
         return;
     }      
@@ -1421,7 +1601,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配 cluster_centers GPU 内存 (%zu bytes): %s", 
             cluster_centers_size, cudaGetErrorString(cuda_err));
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        NULL, NULL, NULL);
+                        NULL, NULL, NULL, NULL);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1435,13 +1615,27 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配 topk_dist GPU 内存 (%zu bytes): %s", 
             topk_dist_size, cudaGetErrorString(cuda_err));
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, NULL, NULL);
+                        d_cluster_centers, NULL, NULL, NULL);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
 
     elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: d_topk_dist 分配成功, 地址=%p, 大小=%zu bytes", 
         (void*)d_topk_dist, topk_dist_size);
+    
+    /* 分配 d_initial_indices: 每个查询对应 n_total_clusters 个初始索引 */
+    cuda_err = cudaMalloc(&d_initial_indices, initial_indices_size);
+    if (cuda_err != cudaSuccess) {
+        elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配 initial_indices GPU 内存 (%zu bytes): %s", 
+            initial_indices_size, cudaGetErrorString(cuda_err));
+        CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
+                        d_cluster_centers, NULL, d_topk_dist, NULL);
+        MemoryContextSwitchTo(oldCtx);
+        return;
+    }
+    
+    elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: d_initial_indices 分配成功, 地址=%p, 大小=%zu bytes", 
+        (void*)d_initial_indices, initial_indices_size);
     
     cuda_err = cudaMalloc(&d_topk_index, topk_index_size);    
 
@@ -1450,7 +1644,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配 topk_index GPU 内存 (%zu bytes): %s", 
             topk_index_size, cudaGetErrorString(cuda_err));
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, d_topk_dist, NULL);
+                        d_cluster_centers, d_initial_indices, d_topk_dist, NULL);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1463,11 +1657,15 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     if (!query_batch || !query_batch[0]) {
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: query_batch 为空，无法复制");
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, d_topk_dist, d_topk_index);
+                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
 
+    elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: 准备复制 query_batch 到GPU, nbatch=%d, dimensions=%d, 总大小=%zu bytes", 
+         nbatch, dimensions, (size_t)nbatch * dimensions * sizeof(float));
+    elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: query_batch[0]=%p, query_data_contiguous=%p", 
+         (void*)query_batch[0], (void*)query_batch[0]);
     cuda_err = cudaMemcpy(d_query_batch, query_batch[0], 
         nbatch * dimensions * sizeof(float), 
         cudaMemcpyHostToDevice);
@@ -1476,7 +1674,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: query_batch 复制失败: %s", 
                 cudaGetErrorString(cuda_err));
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, d_topk_dist, d_topk_index);
+                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1490,7 +1688,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: cluster_size 复制失败: %s", 
             cudaGetErrorString(cuda_err));
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, d_topk_dist, d_topk_index);
+                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1532,7 +1730,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
 
     if (!copy_success) {
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-            d_cluster_centers, d_topk_dist, d_topk_index);
+            d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1541,7 +1739,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: cluster_vectors 复制数量不匹配! gpu_offset=%d, n_total_vectors=%d", 
             gpu_offset, n_total_vectors);
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, d_topk_dist, d_topk_index);
+                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1552,7 +1750,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     if (!cluster_center_data || !cluster_center_data[0]) {
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: cluster_center_data 为空，无法复制");
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, d_topk_dist, d_topk_index);
+                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1566,11 +1764,42 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: cluster_centers 复制失败: %s", 
             cudaGetErrorString(cuda_err));
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, d_topk_dist, d_topk_index);
+                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
 
+    /* H2D: 初始化 d_initial_indices - 每个查询对应 n_total_clusters 个初始索引 (0 到 n_total_clusters-1) */
+    int* initial_indices_host = (int*)palloc(nbatch * n_total_clusters * sizeof(int));
+    if (!initial_indices_host) {
+        elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配 initial_indices_host 内存");
+        CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
+                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
+        MemoryContextSwitchTo(oldCtx);
+        return;
+    }
+    
+    /* 初始化：每个查询的初始索引为 0 到 n_total_clusters-1 */
+    for (int query_idx = 0; query_idx < nbatch; query_idx++) {
+        for (int cluster_idx = 0; cluster_idx < n_total_clusters; cluster_idx++) {
+            initial_indices_host[query_idx * n_total_clusters + cluster_idx] = cluster_idx;
+        }
+    }
+    
+    cuda_err = cudaMemcpy(d_initial_indices, initial_indices_host,
+                          nbatch * n_total_clusters * sizeof(int),
+                          cudaMemcpyHostToDevice);
+    pfree(initial_indices_host);
+    
+    if (cuda_err != cudaSuccess) {
+        elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: initial_indices 复制失败: %s", 
+            cudaGetErrorString(cuda_err));
+        CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
+                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
+        MemoryContextSwitchTo(oldCtx);
+        return;
+    }
+    
     elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: CPU->GPU 数据复制完成, nbatch=%d, n_total_clusters=%d, n_total_vectors=%d, probes=%d, k=%d",
             nbatch, n_total_clusters, n_total_vectors, so->probes, k);
     
@@ -1631,20 +1860,20 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: cluster_size 数组总和(%d) 与 n_total_vectors(%d) 不匹配!", 
             sum_cluster_sizes, n_total_vectors);
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, d_topk_dist, d_topk_index);
+                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
 
     int result = batch_search_pipeline_wrapper(d_query_batch, d_cluster_size, d_cluster_vectors,
-                                                d_cluster_centers, d_topk_dist, d_topk_index,
+                                                d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index,
                                                 nbatch, dimensions, n_total_clusters,
                                                 n_total_vectors, so->probes, k);
     
     if (result != 0) {
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: batch_search_pipeline执行失败 (返回码: %d), 请查看PostgreSQL日志获取详细信息", result);
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, d_topk_dist, d_topk_index);
+                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1657,7 +1886,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     if (!topk_dist_flat || !topk_index_flat){
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配输出缓冲区");
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-            d_cluster_centers, d_topk_dist, d_topk_index);
+            d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1670,7 +1899,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: topk_index 回传失败: %s", 
             cudaGetErrorString(cuda_err));
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-            d_cluster_centers, d_topk_dist, d_topk_index);
+            d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1683,7 +1912,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: topk_dist 回传失败: %s", 
             cudaGetErrorString(cuda_err));
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-            d_cluster_centers, d_topk_dist, d_topk_index);
+            d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1695,7 +1924,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     if(!topk_dist || !topk_index){
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法分配指针数组");
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-            d_cluster_centers, d_topk_dist, d_topk_index);
+            d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1725,19 +1954,26 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     if (!mapping_table || !cluster_size) {
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: mapping_table 或 cluster_size 为 NULL");
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-            d_cluster_centers, d_topk_dist, d_topk_index);
+            d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
 
-    if (so->result_buffer == NULL) {/*这个检查可能没有什么用*/
-        so->result_buffer = CreateBatchBuffer(nbatch, k, dimensions, so->tmpCtx);
+    /* 创建或重新创建 result_buffer */
+    /* 注意：每次查询都必须重新创建 result_buffer，避免复用上一次查询的结果 */
+    /* 即使 nbatch 和 k 相同，也要重新创建，因为查询向量可能不同 */
+    if (so->result_buffer != NULL) {
+        elog(LOG, "ProcessBatchQueriesGPU_NewPipeline: 清理旧的 result_buffer (n_queries=%d, k=%d)，重新创建 (n_queries=%d, k=%d)",
+             so->result_buffer->n_queries, so->result_buffer->k, nbatch, k);
+        /* 旧的result_buffer会在tmpCtx删除时自动清理，这里只需要设置为NULL */
+        so->result_buffer = NULL;
     }
+    so->result_buffer = CreateBatchBuffer(nbatch, k, dimensions, so->tmpCtx);
                         
     if (!so->result_buffer) {
         elog(ERROR, "ProcessBatchQueriesGPU_NewPipeline: 无法创建BatchBuffer");
         CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-            d_cluster_centers, d_topk_dist, d_topk_index);
+            d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
         MemoryContextSwitchTo(oldCtx);
         return;
     }
@@ -1752,7 +1988,7 @@ ProcessBatchQueriesGPU_NewPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, 
     
     /* ========== 清理 GPU 内存 ========== */
     CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                    d_cluster_centers, d_topk_dist, d_topk_index);
+                    d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
     MemoryContextSwitchTo(oldCtx);
     return;
 }
