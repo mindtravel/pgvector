@@ -2,6 +2,7 @@
 -- 向量搜索性能对比测试
 -- 比较传统单个查询 vs 批量查询的性能
 -- ============================================
+
 CREATE EXTENSION IF NOT EXISTS vector;
 
 \echo '=== 向量搜索性能对比测试 ==='
@@ -40,10 +41,10 @@ SELECT
     'test_vector_' || i as description
 FROM generate_series(1, 1000) i;
 
--- 创建索引
+-- 创建索引（使用余弦距离）
 \echo '创建 IVFFlat 索引...'
 CREATE INDEX test_vectors_perf_ivfflat_idx ON test_vectors_perf 
-USING ivfflat (embedding vector_l2_ops) 
+USING ivfflat (embedding vector_cosine_ops) 
 WITH (lists = 50);
 
 -- 分析表
@@ -74,33 +75,33 @@ WHERE relname = 'test_vectors_perf_ivfflat_idx';
 \echo '查询1:'
 -- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 SELECT id, category, description,
-       embedding <-> :query1 as distance
+       embedding <=> :query1 as distance
 FROM test_vectors_perf
-ORDER BY embedding <-> :query1
+ORDER BY embedding <=> :query1
 LIMIT 3;
 
 \echo '查询2:'
 -- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 SELECT id, category, description,
-       embedding <-> :query2 as distance
+       embedding <=> :query2 as distance
 FROM test_vectors_perf
-ORDER BY embedding <-> :query2
+ORDER BY embedding <=> :query2
 LIMIT 3;
 
 \echo '查询3:'
 -- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 SELECT id, category, description,
-       embedding <-> :query3 as distance
+       embedding <=> :query3 as distance
 FROM test_vectors_perf
-ORDER BY embedding <-> :query3
+ORDER BY embedding <=> :query3
 LIMIT 3;
 
 \echo '查询4:'
 -- EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 SELECT id, category, description,
-       embedding <-> :query4 as distance
+       embedding <=> :query4 as distance
 FROM test_vectors_perf
-ORDER BY embedding <-> :query4
+ORDER BY embedding <=> :query4
 LIMIT 3;
 
 -- ============================================

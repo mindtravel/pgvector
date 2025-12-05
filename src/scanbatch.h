@@ -39,7 +39,6 @@ typedef struct BatchSearchState {
     int n_querys;
     Datum *result_values;
     bool *result_nulls;
-    int returned_tuples;
     int current_result;
     IndexScanDesc scan;
     Relation index;

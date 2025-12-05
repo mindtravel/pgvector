@@ -61,7 +61,6 @@ typedef struct {
     
     int n_queries;                  /* 查询数量 */
     int k;                          /* 每个查询的top-k */
-    int total_results;              /* 总结果数 = n_queries * k */
     
     MemoryContext mem_ctx;          /* 内存上下文 */
 } BatchBuffer;
@@ -75,7 +74,6 @@ typedef struct IvfflatBatchScanOpaqueData
     /* 基础信息 - 只保留GPU批量查询需要的字段 */
     const IvfflatTypeInfo *typeInfo;  /* 类型信息 */
     int dimensions;                   /* 向量维度 */
-    MemoryContext tmpCtx;            /* 内存上下文 */
     
     /* 批量查询数据 */
     ScanKeyBatch batch_keys;         /* 批量查询键 */
@@ -106,13 +104,13 @@ typedef IvfflatBatchScanOpaqueData* IvfflatBatchScanOpaque;
 
 /* 公共函数声明 */
 extern IndexScanDesc ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys);
-extern bool ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* values, bool* isnull, int max_tuples, int* returned_tuples, int k);
+extern bool ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* values, bool* isnull, int k);
 extern void ivfflatbatchendscan(IndexScanDesc scan);
 
 /* 批量处理函数声明 */
 extern BatchBuffer* CreateBatchBuffer(int n_queries, int k, int dimensions, MemoryContext mem_ctx);
 extern void ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k);
-extern void GetBatchResults(BatchBuffer* buffer, int query_index, int k, Datum* values, bool* isnull, int* returned_count);
+extern void GetBatchResults(BatchBuffer* buffer, Datum* values, bool* isnull);
 
 
 

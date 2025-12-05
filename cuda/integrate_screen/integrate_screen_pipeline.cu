@@ -440,8 +440,8 @@ void batch_search_pipeline(float** query_batch,
             cudaMalloc(&d_index, n_query * n_total_clusters * sizeof(int));
             need_free_index = true;
             dim3 block_dim((n_total_clusters < 256) ? n_total_clusters : 256);
-            generate_sequence_indices_kernel<<<queryDim, block_dim, 0, compute_stream>>>(
-                    d_index, n_query, n_total_clusters);
+        generate_sequence_indices_kernel<<<queryDim, block_dim, 0, compute_stream>>>(
+                d_index, n_query, n_total_clusters);
         }
         
         // 初始化距离数组（使用fill kernel替代thrust::fill）
@@ -483,7 +483,7 @@ void batch_search_pipeline(float** query_batch,
         // 注意：d_cluster_centers 来自常驻数据，不应释放
             cudaFree(d_inner_product);
             if (need_free_index && d_index != nullptr) {
-                cudaFree(d_index);
+            cudaFree(d_index);
             }
             cudaFree(d_top_nprobe_dist);
         CHECK_CUDA_ERRORS;

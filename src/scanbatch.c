@@ -45,7 +45,6 @@ ScanKeyBatchCreate(int nkeys, int vec_dim)
     return batch;
 }
 
-/* scanbatch_free 已删除 - ScanKeyBatch 由 SRF 内存上下文自动管理 */
 
 PG_FUNCTION_INFO_V1(batch_vector_search_c);
 Datum
@@ -72,6 +71,8 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
     bool tuple_nulls[3];
     HeapTuple tuple;
     
+    int base_idx;
+    int total_results;
 
     // elog(LOG, "batch_vector_search_c: 开始批量向量搜索");
     
@@ -113,10 +114,6 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         Relation index;
         IndexScanDesc scan;
         int max_results;
-        int max_values;
-        Datum *result_values;
-        bool *result_nulls;
-        int returned_tuples;
         
         // 初始化函数上下文
         funcctx = SRF_FIRSTCALL_INIT();
@@ -134,9 +131,12 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
             elog(ERROR, "batch_vector_search_c: ScanKeyBatchCreate 失败");
         }
         
+        elog(LOG, "batch_vector_search_c: 创建 batch_keys, nkeys=%d, vec_dim=%d, batch_keys=%p", 
+             n_querys, vec_dim, (void*)batch_keys);
+        
         /* 设置批量键指向的数据区域 */ 
         ScanKeyBatchAddData(batch_keys, elems, nulls, nelems);
-        // elog(LOG, "batch_vector_search_c: 所有向量添加完成");
+        elog(LOG, "batch_vector_search_c: batch_keys 数据设置完成, nkeys=%d", batch_keys->nkeys);
         
         // 创建索引扫描
         // 注意：IndexScanDesc是通过RelationGetIndexScan在当前内存上下文（SRF内存上下文）中分配的
@@ -153,28 +153,18 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
         // elog(LOG, "batch_vector_search_c: 索引扫描创建完成");
         
         // 一次性获取所有查询的所有结果
-        max_results = k * n_querys; // 每个查询k个结果 × 查询数量
-        max_values = max_results * 3; // 每个结果有3个字段
-        result_values = palloc(max_values * sizeof(Datum));
-        result_nulls = palloc(max_values * sizeof(bool));
-        returned_tuples = 0;
-        
-        // elog(LOG, "batch_vector_search_c: 开始批量处理，预期最大结果数: %d", max_results);
-        
-        // 调用批量扫描函数，一次性处理所有查询
-        ivfflatbatchgettuple(scan, ForwardScanDirection, 
-                            result_values, result_nulls, 
-                            max_values, &returned_tuples, k);
-        
-        // elog(LOG, "batch_vector_search_c: 批量处理完成，返回结果数: %d", returned_tuples);
-        
-        // 保存结果数据到状态中
-        state->result_values = result_values;
-        state->result_nulls = result_nulls;
-        state->returned_tuples = returned_tuples;
+        // 直接在 state 中分配最终数据缓冲区，避免中间复制
+        max_results = k * n_querys * 3; // 每个查询k个结果 × 查询数量 × 3个字段
+        state->result_values = palloc(max_results * sizeof(Datum));
+        state->result_nulls = palloc(max_results * sizeof(bool));
         state->current_result = 0;
         state->k = k;
         state->n_querys = n_querys;
+        
+        // 调用批量扫描函数，直接填充 state 中的数据缓冲区
+        ivfflatbatchgettuple(scan, ForwardScanDirection, 
+                            state->result_values, state->result_nulls, 
+                             k);
         
         // 保存资源以便后续清理
         state->scan = scan;
@@ -188,122 +178,55 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
             elog(ERROR, "return type must be a row type");
         funcctx->tuple_desc = BlessTupleDesc(funcctx->tuple_desc);
         
-        // elog(LOG, "batch_vector_search_c: 初始化完成，准备返回 %d 个结果", returned_tuples);
     }
     
     // 每次调用返回一个结果
     funcctx = SRF_PERCALL_SETUP();
     state = (BatchSearchState *)funcctx->user_fctx;
     
-    int base_idx;
+    // 计算总结果数：每个查询k个结果，共n_querys个查询
+    total_results = state->k * state->n_querys;
     
-    if (!state) {
-        elog(ERROR, "batch_vector_search_c: state为NULL");
-        SRF_RETURN_DONE(funcctx);
-    }
-    
-    if (state->current_result >= state->returned_tuples) {
-        elog(LOG, "batch_vector_search_c: 所有结果已返回 (current_result=%d, returned_tuples=%d)，开始清理资源", 
-             state->current_result, state->returned_tuples);
-        
+    if (state->current_result >= total_results) {
         // 清理 PostgreSQL 资源
-        // 需要手动关闭索引关系以避免 relcache reference leak
-        elog(LOG, "batch_vector_search_c: 开始清理 scan 和 index");
-        
-        // 先保存 index 引用，因为在 ivfflatbatchendscan 之后不能访问 scan
-        // 注意：state->index 和 scan->indexRelation 是同一个对象，只需要关闭一次
+        // 注意：result_values、result_nulls、batch_keys 都在 SRF 内存上下文中分配，
+        // 会在 SRF 结束时自动释放，不需要手动释放
         Relation index_to_close = state->index;
-        state->index = NULL;  // 先清空，避免重复关闭
         
-        // 清理 scan（这会清理 scan 的内部状态，但不会关闭 index）
-        if (state->scan) {
-            elog(LOG, "batch_vector_search_c: 调用 ivfflatbatchendscan");
-            ivfflatbatchendscan(state->scan);
-            elog(LOG, "batch_vector_search_c: ivfflatbatchendscan 完成");
-            state->scan = NULL;
-        }
-        
-        // 关闭索引关系（只关闭一次）
+        // 先关闭 index，再清理 scan（避免访问已删除的内存）
         if (index_to_close) {
-            elog(LOG, "batch_vector_search_c: 关闭 index");
             index_close(index_to_close, AccessShareLock);
-            elog(LOG, "batch_vector_search_c: index 关闭完成");
         }
         
-        // 清理状态
-        elog(LOG, "batch_vector_search_c: 清理状态指针");
+        if (state->scan) {
+            ivfflatbatchendscan(state->scan);
+        }
+        
+        // 清空指针，避免后续访问（但不要手动释放，SRF 会自动清理）
+        // 注意：不要在这里清空 batch_keys，因为它可能还在被 scan 使用
+        state->index = NULL;
+        state->scan = NULL;
         state->result_values = NULL;
         state->result_nulls = NULL;
         state->batch_keys = NULL;
         
-        elog(LOG, "batch_vector_search_c: 准备返回 DONE");
         SRF_RETURN_DONE(funcctx);
     }
     
-    // 返回当前结果
+    // 直接从 state 中读取结果并返回（GetBatchResults 已经填充好了）
     base_idx = state->current_result * 3;
-    
-    /* 边界检查 */
-    if (base_idx + 2 >= state->returned_tuples * 3) {
-        elog(ERROR, "batch_vector_search_c: 数组越界, base_idx=%d, returned_tuples=%d, max_idx=%d", 
-             base_idx, state->returned_tuples, state->returned_tuples * 3);
-        SRF_RETURN_DONE(funcctx);
-    }
-    
-    /* 验证数组指针 */
-    if (!state->result_values || !state->result_nulls) {
-        elog(ERROR, "batch_vector_search_c: result_values 或 result_nulls 为 NULL");
-        SRF_RETURN_DONE(funcctx);
-    }
-    
-    elog(LOG, "batch_vector_search_c: 返回结果 %d, base_idx=%d, returned_tuples=%d", 
-         state->current_result, base_idx, state->returned_tuples);
-    
-    if (!state->result_nulls[base_idx]) {
-        // 直接从result_values数组中获取结果
-        values[0] = state->result_values[base_idx + 0]; // query_id
-        values[1] = state->result_values[base_idx + 1]; // vector_id  
-        values[2] = state->result_values[base_idx + 2]; // distance
-        
-        tuple_nulls[0] = state->result_nulls[base_idx + 0];
-        tuple_nulls[1] = state->result_nulls[base_idx + 1];
-        tuple_nulls[2] = state->result_nulls[base_idx + 2];
-        
-        elog(LOG, "batch_vector_search_c: 获取值 - query_id=%d, vector_id=%d, distance=%.6f", 
-             DatumGetInt32(values[0]), DatumGetInt32(values[1]), DatumGetFloat8(values[2]));
-    } else {
-        // 处理null结果
-        values[0] = (Datum)0;
-        values[1] = (Datum)0;
-        values[2] = (Datum)0;
-        tuple_nulls[0] = true;
-        tuple_nulls[1] = true;
-        tuple_nulls[2] = true;
-        elog(LOG, "batch_vector_search_c: null结果");
-    }
+    values[0] = state->result_values[base_idx + 0];
+    values[1] = state->result_values[base_idx + 1];
+    values[2] = state->result_values[base_idx + 2];
+    tuple_nulls[0] = state->result_nulls[base_idx + 0];
+    tuple_nulls[1] = state->result_nulls[base_idx + 1];
+    tuple_nulls[2] = state->result_nulls[base_idx + 2];
     
     state->current_result++;
     
-    elog(LOG, "batch_vector_search_c: 准备创建 tuple");
     tuple = heap_form_tuple(funcctx->tuple_desc, values, tuple_nulls);
-    if (!tuple) {
-        elog(ERROR, "batch_vector_search_c: heap_form_tuple 返回 NULL");
-        SRF_RETURN_DONE(funcctx);
-    }
-    elog(LOG, "batch_vector_search_c: tuple 创建成功, 准备返回");
-    
-    Datum result_datum = HeapTupleGetDatum(tuple);
-    elog(LOG, "batch_vector_search_c: HeapTupleGetDatum 完成, 准备调用 SRF_RETURN_NEXT");
-    SRF_RETURN_NEXT(funcctx, result_datum);
+    SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
 }
-
-/* ScanKeyBatchFree 已删除 - 原因如下：
- * 1. ScanKeyBatch 结构体在 SRF 内存上下文中分配，SRF 结束时自动清理
- * 2. ScanKeyBatch 只包含指针，不分配额外内存：
- *    - first_vector_ptr 指向 PostgreSQL 数组数据，不需要释放
- *    - 其他字段都是基本类型
- * 3. 手动 pfree 是多余的，PostgreSQL 的内存管理机制会自动处理
- */
 
 /*
  * 向ScankeyBatch添加vectorbatch

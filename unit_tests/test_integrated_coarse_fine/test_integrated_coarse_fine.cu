@@ -261,7 +261,7 @@ static std::vector<double> run_case(const BenchmarkCase& config,
     float*** cluster_data = dataset->cluster_ptrs;
     int* cluster_sizes = dataset->cluster_sizes;
     int* initial_indices = dataset->initial_indices;  /* 使用数据集中的初始索引 */
-
+    
     int** cpu_idx = (int**)malloc_vector_list(config.n_query, config.k, sizeof(int));
     float** cpu_dist = (float**)malloc_vector_list(config.n_query, config.k, sizeof(float));
 
