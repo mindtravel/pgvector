@@ -11,6 +11,8 @@
 #include "utils/memutils.h"
 #include "utils/datum.h"
 #include "utils/snapshot.h"
+#include "utils/tuplestore.h"
+#include "executor/tuptable.h"
 #include "fmgr.h"
 #include "ivfscanbatch.h"
 #include "scanbatch.h"
@@ -193,12 +195,64 @@ ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* values, bool*
         return false;
     }
     
-    elog(LOG, "ivfflatbatchgettuple: 开始处理结果, nbatch=%d, k=%d", 
-            nbatch, k);
+    // elog(LOG, "ivfflatbatchgettuple: 开始处理结果, nbatch=%d, k=%d", nbatch, k);
+    
+    elog(LOG, "ivfflatbatchgettuple: 调用 GetBatchResults 前 - result_buffer=%p, values=%p, isnull=%p",
+         (void*)so->result_buffer, (void*)values, (void*)isnull);
+    if (so->result_buffer) {
+        elog(LOG, "ivfflatbatchgettuple: result_buffer 状态 - n_queries=%d, k=%d",
+             so->result_buffer->n_queries, so->result_buffer->k);
+    }
     
     GetBatchResults(so->result_buffer, values, isnull);
     
-    elog(LOG, "ivfflatbatchgettuple: 完成");
+    elog(LOG, "ivfflatbatchgettuple: GetBatchResults 完成，准备返回");
+    elog(LOG, "ivfflatbatchgettuple: 返回前检查 - values[0]=%ld, values[1]=%ld, values[2]=%ld",
+         (long)values[0], (long)values[1], (long)values[2]);
+    
+    // elog(LOG, "ivfflatbatchgettuple: 完成");
+    return true;
+}
+
+/**
+ * ivfflatbatchgettuple_direct: 直接将批量查询结果写入 tuplestore
+ * 这是零拷贝版本，跳过中间缓冲区，直接从 BatchBuffer 写入 tuplestore
+ * 
+ * @param scan: 索引扫描描述符
+ * @param dir: 扫描方向
+ * @param tupstore: Tuplestorestate 指针，目标存储
+ * @param tupdesc: TupleDesc，元组描述符
+ * @param k: 每个查询返回的 top-k 结果数量
+ * @return: 是否成功
+ */
+bool
+ivfflatbatchgettuple_direct(IndexScanDesc scan, ScanDirection dir, Tuplestorestate *tupstore, TupleDesc tupdesc, int k)
+{
+    IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
+    int nbatch;
+
+    if (!so->batch_processing_complete) {
+        ProcessBatchQueriesGPU(scan, so->batch_keys, k);
+        so->batch_processing_complete = true;
+    }
+    
+    if (!so->result_buffer) {
+        elog(ERROR, "ivfflatbatchgettuple_direct: result_buffer为空！");
+    }
+    
+    nbatch = so->batch_keys->nkeys;
+    
+    /* 验证 result_buffer 中的查询数量是否匹配 */
+    if (so->result_buffer->n_queries != nbatch) {
+        elog(ERROR, "ivfflatbatchgettuple_direct: result_buffer中的查询数量(%d)与batch_keys中的查询数量(%d)不匹配！"
+                "这可能是因为扫描描述符被重用但result_buffer未重置。",
+                so->result_buffer->n_queries, nbatch);
+        return false;
+    }
+    
+    /* 直接调用 GetBatchResultsDirect，将结果写入 tuplestore */
+    GetBatchResultsDirect(so->result_buffer, tupstore, tupdesc);
+    
     return true;
 }
 
@@ -263,12 +317,12 @@ GetBatchResults(BatchBuffer* buffer, Datum* values, bool* isnull)
     n_queries = buffer->n_queries;
     k = buffer->k;
     
-    elog(LOG, "GetBatchResults: buffer 字段验证通过, 开始遍历结果, n_queries=%d, k=%d", n_queries, k);
+    // elog(LOG, "GetBatchResults: buffer 字段验证通过, 开始遍历结果, n_queries=%d, k=%d", n_queries, k);
     
     /* 两重循环：外层遍历所有查询，内层遍历每个查询的k个结果 */
     result_idx = 0;
     for (int query_idx = 0; query_idx < n_queries; query_idx++) {
-        elog(LOG, "GetBatchResults: 处理查询 %d", query_idx);
+        // elog(LOG, "GetBatchResults: 处理查询 %d", query_idx);
         
         for (int k_idx = 0; k_idx < k; k_idx++) {
             /* 计算在buffer中的索引：按列存储，每个查询有k个槽位 */
@@ -298,12 +352,12 @@ GetBatchResults(BatchBuffer* buffer, Datum* values, bool* isnull)
                 /* vector_id: 返回表行ID（存储在global_vector_indices中） */
                 {
                     int table_row_id = buffer->global_vector_indices[buffer_idx];
-                    elog(LOG, "GetBatchResults: 查询 %d, 结果 %d, buffer_idx=%d, table_row_id=%d", 
-                         query_idx, k_idx, buffer_idx, table_row_id);
+                    // elog(LOG, "GetBatchResults: 查询 %d, 结果 %d, buffer_idx=%d, table_row_id=%d", 
+                    //      query_idx, k_idx, buffer_idx, table_row_id);
                     values[output_base_idx + 1] = Int32GetDatum(table_row_id); /* vector_id: 表行ID */
                 }
-                elog(LOG, "GetBatchResults: 查询 %d, 结果 %d, distance=%.6f", 
-                     query_idx, k_idx, buffer->distances[buffer_idx]);
+                // elog(LOG, "GetBatchResults: 查询 %d, 结果 %d, distance=%.6f", 
+                //      query_idx, k_idx, buffer->distances[buffer_idx]);
                 values[output_base_idx + 2] = Float8GetDatum(buffer->distances[buffer_idx]); /* distance */
                 
                 /* 设置非空标志 */
@@ -316,7 +370,97 @@ GetBatchResults(BatchBuffer* buffer, Datum* values, bool* isnull)
         }
     }
     
-    elog(LOG, "GetBatchResults: 完成, 总结果数=%d (n_queries=%d * k=%d)", result_idx, n_queries, k);
+    // elog(LOG, "GetBatchResults: 完成, 总结果数=%d (n_queries=%d * k=%d)", result_idx, n_queries, k);
+}
+
+/**
+ * GetBatchResultsDirect: 直接将 BatchBuffer 中的结果写入 tuplestore
+ * 这是零拷贝版本，跳过中间缓冲区，直接从 BatchBuffer 写入 tuplestore
+ * 
+ * @param buffer: BatchBuffer 指针，包含所有查询的结果
+ * @param tupstore: Tuplestorestate 指针，目标存储
+ * @param tupdesc: TupleDesc，元组描述符
+ */
+void
+GetBatchResultsDirect(BatchBuffer* buffer, Tuplestorestate *tupstore, TupleDesc tupdesc)
+{
+    int n_queries;
+    int k;
+    Datum values[3];
+    bool tuple_nulls[3];
+
+    if (buffer == NULL) {
+        elog(ERROR, "GetBatchResultsDirect: buffer 为 NULL");
+        return;
+    }
+    
+    /* 验证 buffer 的字段 */
+    if (buffer->query_ids == NULL) {
+        elog(ERROR, "GetBatchResultsDirect: buffer->query_ids 为 NULL");
+        return;
+    }
+    if (buffer->vector_ids == NULL) {
+        elog(ERROR, "GetBatchResultsDirect: buffer->vector_ids 为 NULL");
+        return;
+    }
+    
+    if (buffer->global_vector_indices == NULL) {
+        elog(ERROR, "GetBatchResultsDirect: buffer->global_vector_indices 为 NULL");
+        return;
+    }
+    
+    if (buffer->distances == NULL) {
+        elog(ERROR, "GetBatchResultsDirect: buffer->distances 为 NULL");
+        return;
+    }
+    
+    if (tupstore == NULL) {
+        elog(ERROR, "GetBatchResultsDirect: tupstore 为 NULL");
+        return;
+    }
+    
+    if (tupdesc == NULL) {
+        elog(ERROR, "GetBatchResultsDirect: tupdesc 为 NULL");
+        return;
+    }
+    
+    n_queries = buffer->n_queries;
+    k = buffer->k;
+    
+    /* 两重循环：外层遍历所有查询，内层遍历每个查询的k个结果 */
+    for (int query_idx = 0; query_idx < n_queries; query_idx++) {
+        for (int k_idx = 0; k_idx < k; k_idx++) {
+            /* 计算在buffer中的索引：按列存储，每个查询有k个槽位 */
+            int buffer_idx = query_idx * k + k_idx;
+            
+            /* 检查是否是null值（使用global_vector_indices检查，-1表示无效） */
+            bool is_null = (buffer->global_vector_indices[buffer_idx] < 0);
+            
+            if (is_null) {
+                /* null值：设置所有字段为null */
+                values[0] = (Datum) 0;  /* query_id: NULL */
+                values[1] = (Datum) 0;  /* vector_id: NULL */
+                values[2] = (Datum) 0;  /* distance: NULL */
+                
+                tuple_nulls[0] = true;
+                tuple_nulls[1] = true;
+                tuple_nulls[2] = true;
+            } else {
+                /* 有效值：直接从 buffer 读取并转换为 Datum */
+                values[0] = Int32GetDatum(buffer->query_ids[buffer_idx]); /* query_id */
+                values[1] = Int32GetDatum(buffer->global_vector_indices[buffer_idx]); /* vector_id: 表行ID */
+                values[2] = Float8GetDatum(buffer->distances[buffer_idx]); /* distance */
+                
+                /* 设置非空标志 */
+                tuple_nulls[0] = false;
+                tuple_nulls[1] = false;
+                tuple_nulls[2] = false;
+            }
+            
+            /* 直接写入 tuplestore，零拷贝 */
+            tuplestore_putvalues(tupstore, tupdesc, values, tuple_nulls);
+        }
+    }
 }
 
 
@@ -902,14 +1046,14 @@ PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_p
                             BlockNumber** cluster_pages_out,
                             int* n_total_clusters_out, int* n_total_vectors_out)
 {
-    elog(LOG, "PrepareBatchDataForPipeline: 开始执行, n_probes=%d", n_probes);
+    // elog(LOG, "PrepareBatchDataForPipeline: 开始执行, n_probes=%d", n_probes);
     
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
     TupleDesc tupdesc = RelationGetDescr(scan->indexRelation);
     int totalLists = 0;
     IvfflatGetMetaPageInfo(scan->indexRelation, &totalLists, NULL);
     
-    elog(LOG, "PrepareBatchDataForPipeline: totalLists=%d", totalLists);
+    // elog(LOG, "PrepareBatchDataForPipeline: totalLists=%d", totalLists);
     
     if (totalLists <= 0) {
         elog(ERROR, "PrepareBatchDataForPipeline: totalLists <= 0");
@@ -920,7 +1064,7 @@ PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_p
     int dimensions = so->dimensions;
     int nbatch = batch_keys->nkeys;
     
-    elog(LOG, "PrepareBatchDataForPipeline: dimensions=%d, nbatch=%d", dimensions, nbatch);
+    // elog(LOG, "PrepareBatchDataForPipeline: dimensions=%d, nbatch=%d", dimensions, nbatch);
     
     /* 第一次遍历：统计每个cluster的向量数量 */
     int* cluster_sizes = (int*)palloc0(totalLists * sizeof(int));
@@ -962,56 +1106,56 @@ PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_p
     elog(LOG, "PrepareBatchDataForPipeline: 开始统计每个cluster的向量数量");
     int total_vectors = 0;
     for (int i = 0; i < totalLists; i++) {
-        if (i % 10 == 0 || i < 3) {
-            elog(LOG, "PrepareBatchDataForPipeline: 统计 cluster %d/%d", i, totalLists);
-        }
+        // if (i % 10 == 0 || i < 3) {
+        //     elog(LOG, "PrepareBatchDataForPipeline: 统计 cluster %d/%d", i, totalLists);
+        // }
         BlockNumber searchPage = cluster_start_pages[i];
-        elog(LOG, "PrepareBatchDataForPipeline: cluster %d, searchPage=%u, BlockNumberIsValid=%d", 
-             i, searchPage, BlockNumberIsValid(searchPage));
+        // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, searchPage=%u, BlockNumberIsValid=%d", 
+        //      i, searchPage, BlockNumberIsValid(searchPage));
         if (!BlockNumberIsValid(searchPage)) {
             elog(LOG, "PrepareBatchDataForPipeline: cluster %d 的起始页面无效", i);
             continue;
         }
         while (BlockNumberIsValid(searchPage)) {
-            elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 读取页面 %u", i, searchPage);
+            // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 读取页面 %u", i, searchPage);
             Buffer buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, 
                                           searchPage, RBM_NORMAL, NULL);
-            elog(LOG, "PrepareBatchDataForPipeline: cluster %d, ReadBufferExtended 完成, buf=%d", i, buf);
+            // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, ReadBufferExtended 完成, buf=%d", i, buf);
             if (buf == InvalidBuffer) {
                 elog(ERROR, "PrepareBatchDataForPipeline: 无法读取页面 %u", searchPage);
                 break;
             }
-            elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 锁定缓冲区", i);
+            // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 锁定缓冲区", i);
             LockBuffer(buf, BUFFER_LOCK_SHARE);
-            elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 获取 Page 指针", i);
+            // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 获取 Page 指针", i);
             Page page = BufferGetPage(buf);
             if (!page) {
-                elog(ERROR, "PrepareBatchDataForPipeline: 页面 %u 的 Page 指针为 NULL", searchPage);
+                // elog(ERROR, "PrepareBatchDataForPipeline: 页面 %u 的 Page 指针为 NULL", searchPage);
                 UnlockReleaseBuffer(buf);
                 break;
             }
-            elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 获取 maxoffno", i);
+            // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 获取 maxoffno", i);
             OffsetNumber maxoffno = PageGetMaxOffsetNumber(page);
-            elog(LOG, "PrepareBatchDataForPipeline: cluster %d, maxoffno=%d", i, maxoffno);
+            // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, maxoffno=%d", i, maxoffno);
             
             for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno)) {
-                if (offno <= 3 || offno == maxoffno) {
-                    elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 处理 offno=%d", i, offno);
-                }
+                // if (offno <= 3 || offno == maxoffno) {
+                //     elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 处理 offno=%d", i, offno);
+                // }
                 ItemId itemId = PageGetItemId(page, offno);
                 if (!itemId) {
                     elog(ERROR, "PrepareBatchDataForPipeline: ItemId 为 NULL (cluster %d, page %u, offno %d)", 
                          i, searchPage, offno);
                     continue;
                 }
-                elog(LOG, "PrepareBatchDataForPipeline: cluster %d, offno=%d, 获取 IndexTuple", i, offno);
+                // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, offno=%d, 获取 IndexTuple", i, offno);
                 IndexTuple itup = (IndexTuple) PageGetItem(page, itemId);
                 if (!itup) {
                     elog(ERROR, "PrepareBatchDataForPipeline: IndexTuple 为 NULL (cluster %d, page %u, offno %d)", 
                          i, searchPage, offno);
                     continue;
                 }
-                elog(LOG, "PrepareBatchDataForPipeline: cluster %d, offno=%d, 获取 vector_datum", i, offno);
+                // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, offno=%d, 获取 vector_datum", i, offno);
                 bool isnull = false;
                 Datum vector_datum = index_getattr(itup, 1, tupdesc, &isnull);
                 if (!isnull) {
@@ -1020,12 +1164,12 @@ PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_p
                 }
             }
             
-            elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 获取下一页", i);
+            // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 获取下一页", i);
             searchPage = IvfflatPageGetOpaque(page)->nextblkno;
-            elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 释放缓冲区", i);
+            // elog(LOG, "PrepareBatchDataForPipeline: cluster %d, 释放缓冲区", i);
             UnlockReleaseBuffer(buf);
         }
-        elog(LOG, "PrepareBatchDataForPipeline: cluster %d 统计完成, cluster_sizes[%d]=%d", i, i, cluster_sizes[i]);
+        // elog(LOG, "PrepareBatchDataForPipeline: cluster %d 统计完成, cluster_sizes[%d]=%d", i, i, cluster_sizes[i]);
     }
     elog(LOG, "PrepareBatchDataForPipeline: 统计完成, total_vectors=%d", total_vectors);
     
@@ -1043,7 +1187,7 @@ PrepareBatchDataForPipeline(IndexScanDesc scan, ScanKeyBatch batch_keys, int n_p
     elog(LOG, "PrepareBatchDataForPipeline: 开始复制 query_batch 数据, nbatch=%d", nbatch);
     
     for (int i = 0; i < nbatch; i++) {
-        elog(LOG, "PrepareBatchDataForPipeline: 处理 query %d", i);
+        // elog(LOG, "PrepareBatchDataForPipeline: 处理 query %d", i);
         Datum vector_datum = ScanKeyBatchGetVector(batch_keys, i);
         if (vector_datum == (Datum) NULL) {
             elog(ERROR, "PrepareBatchDataForPipeline: query %d 的向量数据为 NULL", i);
@@ -1852,14 +1996,37 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
     }
 
     elog(LOG, "ProcessBatchQueriesGPU: 调用 ConvertBatchPipelineResults");
+    elog(LOG, "ProcessBatchQueriesGPU: 参数检查 - nbatch=%d, k=%d, so->result_buffer=%p", 
+         nbatch, k, (void*)so->result_buffer);
+    if (so->result_buffer) {
+        elog(LOG, "ProcessBatchQueriesGPU: result_buffer 状态 - n_queries=%d, k=%d, mem_ctx=%p",
+             so->result_buffer->n_queries, so->result_buffer->k, (void*)so->result_buffer->mem_ctx);
+    }
+    elog(LOG, "ProcessBatchQueriesGPU: mapping_table=%p, cluster_size=%p, cluster_pages=%p, n_total_clusters=%d",
+         (void*)mapping_table, (void*)cluster_size, (void*)cluster_pages, n_total_clusters);
+    
     ConvertBatchPipelineResults(scan, topk_dist, topk_index, nbatch, k,
                                 so->result_buffer, mapping_table, cluster_size,
                                 cluster_pages, n_total_clusters);
-    elog(LOG, "ProcessBatchQueriesGPU: ConvertBatchPipelineResults 完成");
+    
+    elog(LOG, "ProcessBatchQueriesGPU: ConvertBatchPipelineResults 完成，准备清理 GPU 内存");
+    elog(LOG, "ProcessBatchQueriesGPU: 清理前 - so->result_buffer=%p", (void*)so->result_buffer);
+    if (so->result_buffer) {
+        elog(LOG, "ProcessBatchQueriesGPU: result_buffer 清理前状态 - n_queries=%d, k=%d",
+             so->result_buffer->n_queries, so->result_buffer->k);
+    }
     
     /* ========== 清理 GPU 内存 ========== */
+    elog(LOG, "ProcessBatchQueriesGPU: 开始清理 GPU 内存");
     CleanupGPUMemory(d_query_batch, d_cluster_size, d_cluster_vectors,
                     d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
+    elog(LOG, "ProcessBatchQueriesGPU: GPU 内存清理完成");
+    
+    elog(LOG, "ProcessBatchQueriesGPU: 准备返回，so->result_buffer=%p", (void*)so->result_buffer);
+    if (so->result_buffer) {
+        elog(LOG, "ProcessBatchQueriesGPU: result_buffer 返回前状态 - n_queries=%d, k=%d",
+             so->result_buffer->n_queries, so->result_buffer->k);
+    }
     
     return;
 }

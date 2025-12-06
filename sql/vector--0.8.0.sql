@@ -1000,10 +1000,10 @@ CREATE OPERATOR <#>> (
 CREATE FUNCTION cuda_is_available_sql() RETURNS boolean
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
--- 批量向量查询函数
+-- 批量向量查询函数（只支持 vector_batch 类型）
 CREATE FUNCTION batch_vector_search(
     index_oid oid,
-    query_vectors vector[],
+    query_vectors vector_batch,
     k integer DEFAULT 10
 ) RETURNS TABLE(
     query_id integer,

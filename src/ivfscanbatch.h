@@ -105,12 +105,14 @@ typedef IvfflatBatchScanOpaqueData* IvfflatBatchScanOpaque;
 /* 公共函数声明 */
 extern IndexScanDesc ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys);
 extern bool ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* values, bool* isnull, int k);
+extern bool ivfflatbatchgettuple_direct(IndexScanDesc scan, ScanDirection dir, Tuplestorestate *tupstore, TupleDesc tupdesc, int k);
 extern void ivfflatbatchendscan(IndexScanDesc scan);
 
 /* 批量处理函数声明 */
 extern BatchBuffer* CreateBatchBuffer(int n_queries, int k, int dimensions, MemoryContext mem_ctx);
 extern void ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k);
 extern void GetBatchResults(BatchBuffer* buffer, Datum* values, bool* isnull);
+extern void GetBatchResultsDirect(BatchBuffer* buffer, Tuplestorestate *tupstore, TupleDesc tupdesc);
 
 
 

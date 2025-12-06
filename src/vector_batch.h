@@ -40,6 +40,10 @@ typedef struct BatchQueryState
 #define VectorBatchGetVector(arr, idx) \
 	((Vector*) ((char*)(arr)->vectors + (idx) * VECTOR_SIZE((arr)->dim)))
 
+#define DatumGetVectorBatch(x)		((VectorBatch *) PG_DETOAST_DATUM(x))
+#define PG_GETARG_VECTOR_BATCH_P(x)	DatumGetVectorBatch(PG_GETARG_DATUM(x))
+#define PG_RETURN_VECTOR_BATCH_P(x)	PG_RETURN_POINTER(x)
+
 // 函数声明
 VectorBatch *InitVectorBatch(int count, int dim);
 void VectorBatchSetVector(VectorBatch *arr, int idx, Vector *vec);
