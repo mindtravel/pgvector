@@ -13,6 +13,9 @@
 #ifdef USE_CUDA
 #include "cuda/cuda_wrapper.h"
 
+/* 批处理大小控制 - 设为 64K 个向量，假设 1024 维 float，约 256MB，适合 PCIe 传输粒度 */
+#define PIPELINE_CHUNK_SIZE 65536
+
 /* batch_search_pipeline函数声明 */
 #ifdef __cplusplus
 extern "C" {
@@ -83,36 +86,33 @@ typedef struct IvfflatBatchScanOpaqueData
     bool batch_processing_complete; /* 批量处理是否完成 */
     
     BatchBuffer* result_buffer;         /* 结果缓冲区 */
-    
+    int maxProbes;                   /* 最大probe数量 */
+    int probes;                      /* 实际probe数量 */
+
 #ifdef USE_CUDA
-    /* GPU相关字段 */
-    CudaCenterSearchContext* cuda_ctx;  /* CUDA上下文 */
-    bool centers_uploaded;              /* 聚类中心是否已上传 */
-    float* gpu_batch_distances;         /* GPU批量距离结果 */
-    
     /* Lists相关字段（用于probe选择） */
     pairingheap *listQueue;          /* 列表优先级队列 */
     BlockNumber *listPages;          /* 每个查询选定的列表页面 */
     IvfflatScanList *lists;          /* 扫描列表数组 */
-    int maxProbes;                   /* 最大probe数量 */
-    int probes;                      /* 实际probe数量 */
+
     int listIndex;                   /* 当前列表索引 */
 #endif
 } IvfflatBatchScanOpaqueData;
 
 typedef IvfflatBatchScanOpaqueData* IvfflatBatchScanOpaque;
 
+
+
 /* 公共函数声明 */
 extern IndexScanDesc ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys);
-extern bool ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* values, bool* isnull, int k);
-extern bool ivfflatbatchgettuple_direct(IndexScanDesc scan, ScanDirection dir, Tuplestorestate *tupstore, TupleDesc tupdesc, int k);
+// extern bool ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* values, bool* isnull, int k);
+extern bool ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Tuplestorestate *tupstore, TupleDesc tupdesc, int k);
 extern void ivfflatbatchendscan(IndexScanDesc scan);
 
 /* 批量处理函数声明 */
 extern BatchBuffer* CreateBatchBuffer(int n_queries, int k, int dimensions, MemoryContext mem_ctx);
 extern void ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k);
-extern void GetBatchResults(BatchBuffer* buffer, Datum* values, bool* isnull);
-extern void GetBatchResultsDirect(BatchBuffer* buffer, Tuplestorestate *tupstore, TupleDesc tupdesc);
+extern void GetBatchResults(BatchBuffer* buffer, Tuplestorestate *tupstore, TupleDesc tupdesc);
 
 
 

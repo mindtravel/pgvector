@@ -31,11 +31,6 @@
 #include "ivfscanbatch.h"
 
 
-// 函数声明 - 与ivfscanbatch.h保持一致
-// extern IndexScanDesc ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys);
-// extern void ivfflatbatchendscan(IndexScanDesc scan);
-
-
 ScanKeyBatch
 ScanKeyBatchCreate(int nkeys, int vec_dim)
 {
@@ -158,7 +153,7 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
     
     /* 8. GPU 批处理：使用零拷贝版本，直接将结果写入 tuplestore */
     /* 这样可以减少内存分配和数据复制，提高性能 */
-    ivfflatbatchgettuple_direct(scan, ForwardScanDirection, tupstore, tupdesc, k);
+    ivfflatbatchgettuple(scan, ForwardScanDirection, tupstore, tupdesc, k);
     
     /* 9. 标记 tuplestore 完成 */
     tuplestore_donestoring(tupstore);
@@ -174,10 +169,6 @@ batch_vector_search_c(PG_FUNCTION_ARGS)
     
     return (Datum) 0;
 }
-
-/*
- * 向ScankeyBatch添加vectorbatch
- */
 
 void
 ScanKeyBatchAddData(ScanKeyBatch batch, Datum *vectors, bool *nulls, int n_vectors)

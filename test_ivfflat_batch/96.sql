@@ -94,7 +94,7 @@ SELECT id, category, description, embedding <-> :query4 as distance FROM test_ve
 \echo '批量查询结果:'
 SELECT * FROM batch_vector_search(
     (SELECT oid FROM pg_class WHERE relname = 'test_vectors_perf_ivfflat_idx'),
-    ARRAY[:query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4],
+    vector_batch_from_array(ARRAY[:query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4, :query1, :query2, :query3, :query4]),
     3
 );
 

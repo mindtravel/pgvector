@@ -56,11 +56,11 @@ Datum vector_array_recv(PG_FUNCTION_ARGS);
 Datum vector_array_send(PG_FUNCTION_ARGS);
 Datum vector_array_from_array(PG_FUNCTION_ARGS);
 
-Datum batch_l2_distance(PG_FUNCTION_ARGS);
-Datum batch_cosine_distance(PG_FUNCTION_ARGS);
-Datum batch_vector_negative_inner_product(PG_FUNCTION_ARGS);
+// Datum batch_l2_distance(PG_FUNCTION_ARGS);
+// Datum batch_cosine_distance(PG_FUNCTION_ARGS);
+// Datum batch_vector_negative_inner_product(PG_FUNCTION_ARGS);
 
-Datum batch_knn_search(PG_FUNCTION_ARGS);
-Datum batch_range_search(PG_FUNCTION_ARGS);
+// Datum batch_knn_search(PG_FUNCTION_ARGS);
+// Datum batch_range_search(PG_FUNCTION_ARGS);
 
 #endif /* VECTOR_BATCH_H */
