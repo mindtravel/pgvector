@@ -19,7 +19,11 @@
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "vector.h"
-// #include "ivfjl.h"	
+// #include "ivfjl.h"
+
+#ifdef USE_CUDA
+#include "ivfscanbatch.h"
+#endif	
 
 #if PG_VERSION_NUM >= 140000
 #include "utils/backend_progress.h"
@@ -270,6 +274,40 @@ InsertTuples(Relation index, IvfflatBuildState * buildstate, ForkNumber forkNum)
 
 	pgstat_progress_update_param(PROGRESS_CREATEIDX_TUPLES_TOTAL, buildstate->indtuples);
 
+#ifdef USE_CUDA
+	/* -----------------------------------------------------
+	   [GPU流式] 1. 初始化：获取句柄并分配显存 
+	----------------------------------------------------- */
+	void* gpu_handle = NULL;
+	int current_global_offset = 0;
+	int dim = buildstate->dimensions;
+	size_t vec_size = dim * sizeof(float);
+	
+	/* 获取 Index OID，用于后续注册 */
+	Oid index_relid = RelationGetRelid(index);
+	
+	/* 检查是否启用 GPU 加速 */
+	if (cuda_is_available())
+	{
+		gpu_handle = ivf_create_index_context_wrapper();
+		if (gpu_handle != NULL)
+		{
+			ivf_init_streaming_upload_wrapper(
+				gpu_handle,
+				buildstate->lists,
+				buildstate->indtuples,
+				dim
+			);
+			
+			/* 【关键修改】立即注册句柄，防止丢失 */
+			/* 这样同一个 Session 后续查询时可以通过 ivf_get_index_instance(oid) 拿到数据 */
+			ivf_register_index_instance(index_relid, gpu_handle);
+			
+			elog(INFO, "pgvector: GPU index context created for OID %u", index_relid);
+		}
+	}
+#endif
+
 	GetNextTuple(buildstate->sortstate, tupdesc, slot, &itup, &list);
 
 	for (int i = 0; i < buildstate->centers->length; i++)
@@ -289,6 +327,20 @@ InsertTuples(Relation index, IvfflatBuildState * buildstate, ForkNumber forkNum)
 
 		startPage = BufferGetBlockNumber(buf);
 
+#ifdef USE_CUDA
+		/* -----------------------------------------------------
+		   [GPU流式] 2. 准备当前 Cluster 的 CPU 临时缓冲
+		----------------------------------------------------- */
+		int cluster_count = 0;
+		int cluster_capacity = 256; /* 初始容量 */
+		float* cluster_buffer = NULL;
+		
+		if (gpu_handle != NULL)
+		{
+			cluster_buffer = (float*) palloc(cluster_capacity * vec_size);
+		}
+#endif
+
 		/* Get all tuples for list */
 		while (list == i)
 		{
@@ -301,6 +353,38 @@ InsertTuples(Relation index, IvfflatBuildState * buildstate, ForkNumber forkNum)
 			/* Add the item */
 			if (PageAddItem(page, (Item) itup, itemsz, InvalidOffsetNumber, false, false) == InvalidOffsetNumber)
 				elog(ERROR, "failed to add index item to \"%s\"", RelationGetRelationName(index));
+
+#ifdef USE_CUDA
+			/* B. [GPU流式] 收集数据到临时缓冲 */
+			if (gpu_handle != NULL)
+			{
+				/* 扩容检测 */
+				if (cluster_count >= cluster_capacity)
+				{
+					cluster_capacity *= 2;
+					cluster_buffer = (float*) repalloc(cluster_buffer, cluster_capacity * vec_size);
+				}
+				
+				/* 提取向量数据 */
+				bool isnull;
+				Datum vector_datum = index_getattr(itup, 1, tupdesc, &isnull);
+				
+				if (!isnull)
+				{
+					/* 【关键修改】使用 DatumGetPointer 转换，因为 IndexTuple 中的 vector 通常已经 detoast */
+					/* 但为了安全，也可以使用 DatumGetVector（它会调用 PG_DETOAST_DATUM） */
+					Vector* vec = DatumGetVector(vector_datum);
+					/* 复制到缓冲 */
+					memcpy(cluster_buffer + (cluster_count * dim), vec->x, vec_size);
+					cluster_count++;
+				}
+				else
+				{
+					/* 如果索引允许 NULL，这里必须处理，否则 GPU offset 会错位 */
+					/* ivfflat 默认不索引 NULL，所以这里其实是安全的，但作为健壮性代码需注意 */
+				}
+			}
+#endif
 
 			pfree(itup);
 
@@ -315,7 +399,51 @@ InsertTuples(Relation index, IvfflatBuildState * buildstate, ForkNumber forkNum)
 
 		/* Set the start and insert pages */
 		IvfflatUpdateList(index, buildstate->listInfo[i], insertPage, InvalidBlockNumber, startPage, forkNum);
+
+#ifdef USE_CUDA
+		/* -----------------------------------------------------
+		   [GPU流式] 3. 上传当前 Cluster 并释放 CPU 内存
+		----------------------------------------------------- */
+		if (gpu_handle != NULL)
+		{
+			ivf_append_cluster_data_wrapper(
+				gpu_handle,
+				i,                      /* cluster_id */
+				cluster_buffer,         /* data */
+				cluster_count,          /* count */
+				current_global_offset   /* start_offset */
+			);
+			
+			/* 更新全局偏移量 */
+			current_global_offset += cluster_count;
+			
+			/* 立即释放当前 cluster 的 CPU 内存 */
+			pfree(cluster_buffer);
+		}
+#endif
 	}
+
+#ifdef USE_CUDA
+	/* -----------------------------------------------------
+	   [GPU流式] 4. 收尾：上传聚类中心并计算 Norm
+	----------------------------------------------------- */
+	if (gpu_handle != NULL)
+	{
+		/* 准备展平的 centers 数据 */
+		float* flat_centers = (float*) palloc(buildstate->centers->length * vec_size);
+		for (int k = 0; k < buildstate->centers->length; k++)
+		{
+			Vector* v = (Vector*) VectorArrayGet(buildstate->centers, k);
+			memcpy(flat_centers + k * dim, v->x, vec_size);
+		}
+		
+		ivf_finalize_streaming_upload_wrapper(gpu_handle, flat_centers, current_global_offset);
+		
+		pfree(flat_centers);
+		
+		elog(INFO, "pgvector: GPU index build complete. Resident in session memory (OID %u).", index_relid);
+	}
+#endif
 }
 
 /*
@@ -1052,176 +1180,3 @@ ivfflatbuildempty(Relation index)
 
 	BuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
 }
-
-
-// IndexBuildResult *ivfjlbuild(Relation heap, Relation index, IndexInfo *indexInfo) {
-//     IndexBuildResult *result;
-//     IvfjlBuildState buildstate;
-
-//     IvfjlBuildIndex(heap, index, indexInfo, &buildstate, MAIN_FORKNUM);
-
-//     result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
-//     result->heap_tuples = buildstate.base.reltuples;
-//     result->index_tuples = buildstate.base.indtuples;
-
-//     return result;
-// }
-
-// /*
-//  * Build the index for an unlogged table with IVFJL
-//  */
-// void
-// ivfjlbuildempty(Relation index)
-// {
-//     IndexInfo  *indexInfo = BuildIndexInfo(index);
-//     IvfjlBuildState buildstate;
-
-//     IvfjlBuildIndex(NULL, index, indexInfo, &buildstate, INIT_FORKNUM);
-// }
-
-// /*
-//  * Build the IVFJL index
-//  */
-// static void
-// IvfjlBuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
-//                IvfjlBuildState * buildstate, ForkNumber forkNum)
-// {
-//     IvfjlInitBuildState(buildstate, heap, index, indexInfo);
-
-//     IvfjlComputeCenters(buildstate);
-
-//     /* Create pages */
-//     IvfjlCreateMetaPage(index, buildstate->base.dimensions, buildstate->base.lists, forkNum, &buildstate->jlproj);
-//     CreateListPages(index, buildstate->base.centers, buildstate->base.dimensions, buildstate->base.lists, forkNum, &buildstate->base.listInfo);
-//     CreateEntryPages(&buildstate->base, forkNum);
-
-//     /* Write WAL for initialization fork since GenericXLog functions do not */
-//     if (forkNum == INIT_FORKNUM)
-//         log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocksInFork(index, forkNum), true);
-
-//     IvfjlFreeBuildState(buildstate);
-// }
-
-// /*
-//  * Initialize the IVFJL build state
-//  */
-// static void
-// IvfjlInitBuildState(IvfjlBuildState * buildstate, Relation heap, Relation index, IndexInfo *indexInfo)
-// {
-//     /* Initialize the base ivfflat build state */
-//     InitBuildState(&buildstate->base, heap, index, indexInfo);
-    
-//     /* Initialize JL projection - set to zero initially */
-//     memset(&buildstate->jlproj, 0, sizeof(JLProjection));
-// }
-
-// /*
-//  * Compute centers for IVFJL with JL projection
-//  */
-// static void
-// IvfjlComputeCenters(IvfjlBuildState * buildstate)
-// {
-//     int numSamples;
-
-//     pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE, PROGRESS_IVFFLAT_PHASE_KMEANS);
-
-//     /* Target 50 samples per list, with at least 10000 samples */
-//     numSamples = buildstate->base.lists * 50;
-//     if (numSamples < 10000)
-//         numSamples = 10000;
-
-//     /* Skip samples for unlogged table */
-//     if (buildstate->base.heap == NULL)
-//         numSamples = 1;
-
-//     /* Sample rows with original dimensions first */
-//     buildstate->base.samples = VectorArrayInit(numSamples, buildstate->base.dimensions, buildstate->base.centers->itemsize);
-//     if (buildstate->base.heap != NULL)
-//     {
-//         SampleRows(&buildstate->base);
-
-//         if (buildstate->base.samples->length < buildstate->base.lists)
-//         {
-//             ereport(NOTICE,
-//                     (errmsg("ivfjl index created with little data"),
-//                      errdetail("This will result in poor performance."),
-//                      errhint("Consider increasing the number of sample rows.")));
-//         }
-//     }
-
-//     /* Generate JL projection matrix with original dimensions */
-//     GenerateJLProjection(&buildstate->jlproj, buildstate->base.dimensions, IVFJL_REDUCED_DIM, CurrentMemoryContext);
-
-//     /* Apply JL projection to samples */
-//     for (int i = 0; i < buildstate->base.samples->length; i++)
-//     {
-//         Vector *vec = (Vector *)VectorArrayGet(buildstate->base.samples, i);
-//         float *dst = (float *)palloc(sizeof(float) * IVFJL_REDUCED_DIM);
-        
-//         /* Project the vector */
-//         JLProjectVector(&buildstate->jlproj, vec->x, dst);
-        
-//         /* Replace original vector data with projected data */
-//         memcpy(vec->x, dst, sizeof(float) * IVFJL_REDUCED_DIM);
-//         vec->dim = IVFJL_REDUCED_DIM;
-        
-//         pfree(dst);
-//     }
-
-//     /* Update dimensions to reduced dimensions */
-//     buildstate->base.dimensions = IVFJL_REDUCED_DIM;
-    
-//     /* Reinitialize centers array with reduced dimensions */
-//     VectorArrayFree(buildstate->base.centers);
-//     buildstate->base.centers = VectorArrayInit(buildstate->base.lists, IVFJL_REDUCED_DIM, 
-//                                               buildstate->base.typeInfo->itemSize(IVFJL_REDUCED_DIM));
-
-//     /* Perform k-means clustering on projected samples */
-//     IvfflatBench("k-means", IvfflatKmeans(buildstate->base.index, buildstate->base.samples, buildstate->base.centers, buildstate->base.typeInfo));
-
-//     /* Free samples */
-//     VectorArrayFree(buildstate->base.samples);
-//     buildstate->base.samples = NULL;
-// }
-
-// // /*
-// //  * Create meta page for IVFJL with JL projection data
-// //  */
-// // static void
-// // IvfjlCreateMetaPage(Relation index, int dimensions, int lists, ForkNumber forkNum, JLProjection *jlproj)
-// // {
-// //     Buffer buf;
-// //     Page page;
-// //     GenericXLogState *state;
-// //     IvfflatMetaPage metap;
-
-// //     buf = IvfflatNewBuffer(index, forkNum);
-// //     IvfflatInitRegisterPage(index, &buf, &page, &state);
-
-// //     /* Initialize meta page */
-// //     metap = IvfflatPageGetMeta(page);
-// //     metap->magicNumber = IVFFLAT_MAGIC_NUMBER;
-// //     metap->version = IVFFLAT_VERSION;
-// //     metap->dimensions = dimensions;
-// //     metap->lists = lists;
-// //     metap->lastUsedOffset = 
-// //         ((char *) metap + sizeof(IvfflatMetaPageData)) - (char *) page;
-
-// //     /* Write JL projection data to meta page */
-// //     WriteJLToMetaPage(page, jlproj);
-
-// //     IvfflatCommitBuffer(buf, state);
-// // }
-
-// // /*
-// //  * Free resources for IVFJL build state
-// //  */
-// // static void
-// // IvfjlFreeBuildState(IvfjlBuildState * buildstate)
-// // {
-// //     /* Free JL projection */
-// //     FreeJLProjection(&buildstate->jlproj);
-    
-// //     /* Free base build state */
-// //     FreeBuildState(&buildstate->base);
-// // }

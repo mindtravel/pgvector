@@ -20,7 +20,7 @@ OBJS = \
 	cuda/l2norm/l2norm.o \
 	cuda/utils.o \
 	unit_tests/common/test_utils.o \
-	cuda/integrate_screen/integrate_screen.o \
+	cuda/integrate_screen/integrate_screen_separated.o \
 	cuda/integrate_screen/integrate_screen_wrapper.o \
 	src/bitutils.o \
 	src/bitvec.o \
@@ -139,8 +139,8 @@ unit_tests/common/test_utils.o: unit_tests/common/test_utils.cu
 	@mkdir -p unit_tests/common
 	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_70 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17 -O3 --use_fast_math
 
-# integrate_screen编译规则（需要包含unit_tests路径以访问test_utils.cuh）
-cuda/integrate_screen/integrate_screen.o: cuda/integrate_screen/integrate_screen.cu
+# integrate_screen_separated编译规则（需要包含unit_tests路径以访问test_utils.cuh）
+cuda/integrate_screen/integrate_screen_separated.o: cuda/integrate_screen/integrate_screen_separated.cu
 	@echo "编译CUDA文件: $< -> $@"
 	@mkdir -p cuda/integrate_screen
 	$(NVCC) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -arch=sm_70 --expt-relaxed-constexpr -Xcompiler -fPIC -I./cuda -I./unit_tests/common -std=c++17 -O3 --use_fast_math
