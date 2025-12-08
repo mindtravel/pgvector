@@ -23,11 +23,12 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug
 # 编译
 echo "编译项目..."
 # make -j$(nproc)
-# make test_integrated_coarse_fine -j$(nproc)
+make test_integrated_coarse_fine -j$(nproc)
+# make test_integrated_coarse_fine_pipeline -j$(nproc)
 # make test_fusion_cos_topk -j$(nproc)
 # make test_fusion_cos_topk_fine
 # make test_fusion_cos_topk_fine_v3_fixed_probe -j$(nproc)
-make test_fusion_cos_topk_fine_v5 -j$(nproc)
+# make test_fusion_cos_topk_fine_v5 -j$(nproc)
 # make test_count_query_probes_kernel -j$(nproc)
 # make test_fill_invalid_values_kernel -j$(nproc)
 # make test_select_k -j$(nproc)
@@ -66,13 +67,14 @@ echo "运行测试..."
 # ./test_final_topk/test_final_topk
 # echo "=================================="
 # echo "运行 integrated_coarse_fine 测试..."
-# ./test_integrated_coarse_fine/test_integrated_coarse_fine
+# ./test_integrated_coarse_fine_pipeline/test_integrated_coarse_fine_pipeline
+./test_integrated_coarse_fine/test_integrated_coarse_fine
 # echo "=================================="
 # echo "运行 fusion_cos_topk_fine_v3_fixed_probe 测试..."
 # ./test_fusion_cos_topk_fine_v3_fixed_probe/test_fusion_cos_topk_fine_v3_fixed_probe 
 # echo "=================================="
 # echo "运行 fusion_cos_topk_fine_v5 测试..."
-./test_fusion_cos_topk_fine_v5/test_fusion_cos_topk_fine_v5
+# ./test_fusion_cos_topk_fine_v5/test_fusion_cos_topk_fine_v5
 # echo "=================================="
 # echo "运行 select_k 测试..."
 # ./test_select_k/test_select_k 

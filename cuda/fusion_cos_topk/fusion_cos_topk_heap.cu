@@ -1,5 +1,5 @@
-#include <thrust/device_vector.h>
-#include <thrust/fill.h>
+#include "../utils.cuh"
+#include <cfloat>
 
 // #include ".h"
 
@@ -263,11 +263,14 @@ void cuda_cos_topk_heap(
         );
         // CHECK_CUDA_ERRORS;
 
-        /* 初始化距离数组（为一个小于-1的负数） */
-        thrust::fill(
-            thrust::device_pointer_cast(d_topk_cos_dist),/*使用pointer_cast不用创建临时对象*/
-            thrust::device_pointer_cast(d_topk_cos_dist) + (n_query * k),  /* 使用元素数量而非字节数 */
-            FLT_MAX
+        /* 初始化距离数组（使用fill kernel替代thrust::fill） */
+        dim3 fill_block(256);
+        int fill_grid_size = (n_query * k + fill_block.x - 1) / fill_block.x;
+        dim3 fill_grid(fill_grid_size);
+        fill_kernel<<<fill_grid, fill_block>>>(
+            d_topk_cos_dist,
+            FLT_MAX,
+            n_query * k
         );
         // cudaMemset((void*)d_topk_cos_dist, (int)0xEF, n_query * k * sizeof(float)) /*也可以投机取巧用memset，正好将数组为一个非常大的负数*/
         // table_cuda_2D("topk cos distance", d_topk_cos_dist, n_query, k);

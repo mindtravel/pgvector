@@ -85,6 +85,39 @@ set_target_properties(utils_lib PROPERTIES
     CUDA_ARCHITECTURES 70
 )
 
+# 创建共享的indexed_gemm库，避免重复编译
+# 被以下库使用：
+#   - fusion_cos_topk_warpsort_lib (indexed_gemm_v3_fixed_probe, indexed_gemm_v5)
+#   - integrate_screen_lib (indexed_gemm_v3_fixed_probe, indexed_gemm_v5)
+# 
+# 包含的文件（仅保留当前使用的版本）：
+#   - indexed_gemm_v3_fixed_probe.cu: v3固定probe版本（当前使用）
+#   - indexed_gemm_v5.cu: v5 entry-based版本（当前使用）
+# 
+# 注意：
+#   - indexed_gemm.cu, v1, v2, v3, v4 为弃用版本，不再编译
+#   - test_fusion_cos_topk_fine 如需测试弃用版本，需单独编译对应文件
+#   - inner_product_utils.cuh 是头文件，不需要添加到库中
+add_library(indexed_gemm_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/indexed_gemm/indexed_gemm_v3_fixed_probe.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/indexed_gemm/indexed_gemm_v5.cu
+)
+target_include_directories(indexed_gemm_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+)
+set_target_properties(indexed_gemm_lib PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    CUDA_ARCHITECTURES 70
+)
+# 链接依赖库：
+#   - utils_lib: inner_product_utils 函数（v2, v3, v3_fixed_probe, v5 使用）
+target_link_libraries(indexed_gemm_lib 
+    PUBLIC
+    utils_lib
+)
+
 # 创建共享的fusion_cos_topk_warpsort粗筛库（只包含粗筛实现）
 # 被以下测试使用：
 #   - test_fusion_cos_topk (只需要粗筛)
@@ -119,15 +152,14 @@ target_link_libraries(fusion_cos_topk_warpsort_coarse_lib
 #   - fusion_cos_topk_warpsort.cu: 粗筛实现（已在coarse_lib中，但为了完整性也包含）
 #   - fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu: 固定probe版本的精筛实现
 #   - fusion_cos_topk_warpsort_fine_v5.cu: v5 entry-based版本的精筛实现
-#   - indexed_gemm_v3_fixed_probe.cu: 固定probe版本的索引矩阵乘法
-#   - indexed_gemm_v5.cu: v5 entry-based版本的索引矩阵乘法
 #   - warpsort_topk.cu: warp-level top-k选择
+# 注意：
+#   - indexed_gemm_v3_fixed_probe.cu 和 indexed_gemm_v5.cu 已移到 indexed_gemm_lib 中
+#   - inner_product_utils.cuh 是头文件，不需要添加到库中
 add_library(fusion_cos_topk_warpsort_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v5.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/indexed_gemm/indexed_gemm_v3_fixed_probe.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/indexed_gemm/indexed_gemm_v5.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
 )
 target_include_directories(fusion_cos_topk_warpsort_lib PUBLIC
@@ -145,27 +177,33 @@ set_target_properties(fusion_cos_topk_warpsort_lib PROPERTIES
 )
 # 链接依赖库：
 #   - l2norm_lib: L2范数计算（fusion_cos_topk_warpsort需要l2_norm_kernel）
+#   - indexed_gemm_lib: indexed_gemm实现（v3_fixed_probe, v5）
 #   - cublas: CUDA基础线性代数库（某些操作需要）
 target_link_libraries(fusion_cos_topk_warpsort_lib 
     PUBLIC
     l2norm_lib 
     utils_lib
+    indexed_gemm_lib
     cublas
 )
 
-# 创建共享的integrate_screen库（用于test_integrated_coarse_fine）
-# 被以下测试使用：
-#   - test_integrated_coarse_fine (integrate_screen.cu已展开实现，不再需要fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu)
+# 创建共享的integrate_screen库（供pgvector主项目和测试使用）
+# 被以下使用：
+#   - pgvector主项目（ivfscanbatch.c 调用 batch_search_pipeline）
+#   - test_integrated_coarse_fine (测试integrate_screen.cu)
 # 
 # 包含的文件：
+#   - integrate_screen.cu: 主实现文件（包含batch_search_pipeline函数）
 #   - fusion_cos_topk_warpsort.cu: 粗筛实现（integrate_screen.cu的Step 1需要）
-#   - indexed_gemm_v3_fixed_probe.cu: 固定probe版本的索引矩阵乘法（integrate_screen.cu需要launch_indexed_inner_product_with_topk_kernel_v3_fixed_probe）
 #   - warpsort_topk.cu: warp-level top-k选择（integrate_screen.cu需要select_k）
 # 
-# 注意：utils.cu 已移到独立的 utils_lib 中，通过链接依赖引入
+# 注意：
+#   - indexed_gemm_v3_fixed_probe.cu 和 indexed_gemm_v5.cu 已移到 indexed_gemm_lib 中
+#   - utils.cu 已移到独立的 utils_lib 中，通过链接依赖引入
+#   - inner_product_utils.cuh 是头文件，不需要添加到库中
 add_library(integrate_screen_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/indexed_gemm/indexed_gemm_v3_fixed_probe.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
 )
 target_include_directories(integrate_screen_lib PUBLIC
@@ -181,6 +219,42 @@ target_link_libraries(integrate_screen_lib
     PUBLIC
     l2norm_lib 
     utils_lib
+    indexed_gemm_lib
+    cublas
+)
+
+# 创建共享的integrate_screen_pipeline库（供测试使用）
+# 被以下使用：
+#   - test_integrated_coarse_fine_pipeline (测试流水线版本)
+# 
+# 包含的文件：
+#   - integrate_screen_pipeline.cu: 流水线版本实现（包含batch_search_pipeline函数）
+#   - fusion_cos_topk_warpsort.cu: 粗筛实现（integrate_screen_pipeline.cu的Step 1需要）
+#   - warpsort_topk.cu: warp-level top-k选择（integrate_screen_pipeline.cu需要select_k）
+# 
+# 注意：
+#   - indexed_gemm_v3_fixed_probe.cu 和 indexed_gemm_v5.cu 已移到 indexed_gemm_lib 中
+#   - utils.cu 已移到独立的 utils_lib 中，通过链接依赖引入
+#   - inner_product_utils.cuh 是头文件，不需要添加到库中
+add_library(integrate_screen_pipeline_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen_pipeline.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
+)
+target_include_directories(integrate_screen_pipeline_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+)
+set_target_properties(integrate_screen_pipeline_lib PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    CUDA_ARCHITECTURES 70
+)
+target_link_libraries(integrate_screen_pipeline_lib 
+    PUBLIC
+    l2norm_lib 
+    utils_lib
+    indexed_gemm_lib
     cublas
 )
 
@@ -198,6 +272,7 @@ add_subdirectory(test_final_topk)
 add_subdirectory(test_fusion_cos_topk_fine_v3_fixed_probe)
 add_subdirectory(test_fusion_cos_topk_fine_v5)
 add_subdirectory(test_integrated_coarse_fine)
+add_subdirectory(test_integrated_coarse_fine_pipeline)
 add_subdirectory(test_select_k)
 
 # 统一测试目标
@@ -217,5 +292,6 @@ add_custom_target(run_all_tests
         test_stream_pass_data
         test_final_topk
         test_integrated_coarse_fine
+        test_integrated_coarse_fine_pipeline
     COMMENT "运行所有单元测试"
 )

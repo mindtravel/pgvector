@@ -2,6 +2,18 @@
 #ifndef PCH_H
 #define PCH_H
 
+// Standard library headers (must come before CUDA headers for Thrust compatibility)
+#ifndef __STDC_LIMIT_MACROS
+#define __STDC_LIMIT_MACROS
+#endif
+#ifndef __STDC_CONSTANT_MACROS
+#define __STDC_CONSTANT_MACROS
+#endif
+#include <limits.h>
+#include <climits>
+#include <limits>
+#include <cstddef>
+
 // CUDA headers
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>

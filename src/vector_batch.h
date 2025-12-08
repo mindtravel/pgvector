@@ -40,6 +40,10 @@ typedef struct BatchQueryState
 #define VectorBatchGetVector(arr, idx) \
 	((Vector*) ((char*)(arr)->vectors + (idx) * VECTOR_SIZE((arr)->dim)))
 
+#define DatumGetVectorBatch(x)		((VectorBatch *) PG_DETOAST_DATUM(x))
+#define PG_GETARG_VECTOR_BATCH_P(x)	DatumGetVectorBatch(PG_GETARG_DATUM(x))
+#define PG_RETURN_VECTOR_BATCH_P(x)	PG_RETURN_POINTER(x)
+
 // 函数声明
 VectorBatch *InitVectorBatch(int count, int dim);
 void VectorBatchSetVector(VectorBatch *arr, int idx, Vector *vec);
@@ -52,11 +56,11 @@ Datum vector_array_recv(PG_FUNCTION_ARGS);
 Datum vector_array_send(PG_FUNCTION_ARGS);
 Datum vector_array_from_array(PG_FUNCTION_ARGS);
 
-Datum batch_l2_distance(PG_FUNCTION_ARGS);
-Datum batch_cosine_distance(PG_FUNCTION_ARGS);
-Datum batch_vector_negative_inner_product(PG_FUNCTION_ARGS);
+// Datum batch_l2_distance(PG_FUNCTION_ARGS);
+// Datum batch_cosine_distance(PG_FUNCTION_ARGS);
+// Datum batch_vector_negative_inner_product(PG_FUNCTION_ARGS);
 
-Datum batch_knn_search(PG_FUNCTION_ARGS);
-Datum batch_range_search(PG_FUNCTION_ARGS);
+// Datum batch_knn_search(PG_FUNCTION_ARGS);
+// Datum batch_range_search(PG_FUNCTION_ARGS);
 
 #endif /* VECTOR_BATCH_H */
