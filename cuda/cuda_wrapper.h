@@ -60,6 +60,10 @@ extern void cuda_memcpy_d2h(void* h_dst, const void* d_src, size_t size);
 extern void cuda_memcpy_async_h2d(void* d_dst, const void* h_src, size_t size);
 extern void cuda_memcpy_async_d2h(void* h_dst, const void* d_src, size_t size);
 
+/* 辅助清理函数 */
+extern void cuda_cleanup_memory(float* d_query_batch, int* d_cluster_size, float* d_cluster_vectors,
+                                float* d_cluster_centers, int* d_initial_indices, float* d_topk_dist, int* d_topk_index);
+
 /* 流水线辅助函数*/
 extern void cuda_pipeline_init(GpuPipelineContext* ctx, int dim, size_t total_vectors, 
     float* d_vec_ptr);

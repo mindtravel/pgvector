@@ -296,6 +296,11 @@ static void ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, i
  * 获取或加载 GPU 索引
  * 如果缓存中有，直接返回；否则执行加载流程。
  */
+/* ========================================================================= */
+/*                              GPU 索引缓存函数 (核心加载逻辑)                */
+/* ========================================================================= */
+
+#ifdef USE_CUDA
 static GpuIndexCacheEntry*
 GetOrLoadGpuIndex(IndexScanDesc scan)
 {
@@ -303,204 +308,216 @@ GetOrLoadGpuIndex(IndexScanDesc scan)
     GpuIndexCacheEntry *entry;
     bool found;
     
-    /* 1. 初始化缓存表 */
-    if (g_gpu_index_cache == NULL) {
-        InitGpuIndexCache();
-    }
+    /* 1. 初始化并查找缓存 */
+    if (g_gpu_index_cache == NULL) InitGpuIndexCache();
     
-    /* 2. 查找缓存 */
     GpuIndexCacheKey key;
     key.index_oid = index_oid;
     
-    entry = (GpuIndexCacheEntry *) hash_search(g_gpu_index_cache,
-                                               &key,
-                                               HASH_ENTER,
-                                               &found);
+    entry = (GpuIndexCacheEntry *) hash_search(g_gpu_index_cache, &key, HASH_ENTER, &found);
     
-    /* 3. 如果命中缓存，直接返回 */
-    if (found && entry->idx_handle != NULL) {
-        /* TODO: 这里可以添加逻辑检查索引是否过期 (例如比较文件大小或版本号) */
-        /* 目前简单起见，假设 Session 期间索引不变 */
-        return entry;
-    }
+    /* 命中缓存直接返回 */
+    if (found && entry->idx_handle != NULL) return entry;
     
-    /* 3.5. 尝试从注册表获取（如果是在 Build 阶段创建的） */
+    /* 尝试从 Build 阶段的注册表获取 */
     void* registered_handle = ivf_get_index_instance(index_oid);
     
-    /* ================== 缓存未命中，执行加载流程 ================== */
+    /* ================== 开始加载流程 ================== */
     
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
     int dimensions = so->dimensions;
-    
-    /* 临时变量声明 */
-    int* predicted_cluster_sizes = NULL;
+    int* predicted_cluster_sizes = NULL; 
     BlockNumber* cluster_start_pages = NULL;
     float* cluster_centers_flat = NULL;
     int n_total_clusters = 0;
-    int n_total_vectors = 0;
+    int n_estimated_vectors = 0;
     
-    /* A. 准备元数据 */
+    /* 1. 快速准备元数据 (仅扫描 Meta Pages) */
     if (PrepareMetaInfoOnly(scan, &predicted_cluster_sizes, &cluster_start_pages, 
-                            &cluster_centers_flat, &n_total_clusters, &n_total_vectors) != 0) {
-        hash_search(g_gpu_index_cache, &key, HASH_REMOVE, NULL); /* 移除占位符 */
+                            &cluster_centers_flat, &n_total_clusters, &n_estimated_vectors) != 0) {
+        hash_search(g_gpu_index_cache, &key, HASH_REMOVE, NULL);
         elog(ERROR, "GPU Index Loading: 元数据准备失败");
         return NULL;
     }
     
-    if (n_total_clusters <= 0) {
-        hash_search(g_gpu_index_cache, &key, HASH_REMOVE, NULL);
-        elog(WARNING, "GPU Index Loading: 索引为空");
-        return NULL;
-    }
+    /* 2. 基于文件大小估算总向量数 (消除双重扫描) */
+    BlockNumber total_blocks = RelationGetNumberOfBlocks(scan->indexRelation);
+    /* 估算公式：总块数 * (块大小 / (向量大小 + 索引头大小)) * 填充率 */
+    size_t est_tuple_size = dimensions * sizeof(float) + sizeof(IndexTupleData) + sizeof(ItemIdData);
+    double fill_factor = 1.0; /* 假设填充率 */
+    n_estimated_vectors = (int)((total_blocks * BLCKSZ * fill_factor) / est_tuple_size);
+    n_estimated_vectors = Max(n_estimated_vectors, 10000); /* 最小保底 */
     
-    /* B. 初始化 GPU Handle */
+    elog(DEBUG1, "GPU Index Loading: 估算向量总数 %d (Blocks: %u)", n_estimated_vectors, total_blocks);
+
+    /* 3. 初始化 GPU Context */
     void* idx_handle = NULL;
     bool use_registered_handle = false;
     
-    /* 如果从注册表获取到了句柄，直接使用 */
     if (registered_handle != NULL) {
         idx_handle = registered_handle;
         use_registered_handle = true;
-        elog(INFO, "GPU Index Loading: 使用注册表中的句柄 (OID %u)", index_oid);
     } else {
-        /* 否则创建新的句柄 */
-        /* 注意：这里的内存 context 应该是 TopMemoryContext，
-           以保证 global_tids 在函数返回后不被释放 */
-        MemoryContext cacheCtx = TopMemoryContext; 
-        MemoryContext oldCtx = MemoryContextSwitchTo(cacheCtx);
-        
+        /* 使用估算值分配显存 */
         idx_handle = ivf_create_index_context_wrapper();
-        if (idx_handle == NULL) {
-            MemoryContextSwitchTo(oldCtx);
+        if (!idx_handle) {
             hash_search(g_gpu_index_cache, &key, HASH_REMOVE, NULL);
-            elog(ERROR, "GPU Index Loading: 无法创建 GPU Handle");
+            elog(ERROR, "GPU Index Loading: 无法创建 GPU Handle (可能是显存不足)");
             return NULL;
         }
-        
-        int max_vectors_capacity = (int)(n_total_vectors * 1.1) + 1000;
-        ivf_init_streaming_upload_wrapper(idx_handle, n_total_clusters, max_vectors_capacity, dimensions);
-        
-        MemoryContextSwitchTo(oldCtx); /* 切回原来的 Context */
+        /* 此处 n_estimated_vectors 决定了显存 malloc 大小，宁大勿小 */
+        ivf_init_streaming_upload_wrapper(idx_handle, n_total_clusters, n_estimated_vectors, dimensions);
     }
     
-    /* 分配 TID 映射表（无论是否从注册表获取，都需要 TID 映射） */
-    MemoryContext cacheCtx = TopMemoryContext; 
+    /* 4. 分配 CPU 端全局 TID 数组 (使用 TopMemoryContext 持久化) */
+    MemoryContext cacheCtx = TopMemoryContext;
     MemoryContext oldCtx = MemoryContextSwitchTo(cacheCtx);
-    int max_vectors_capacity = (int)(n_total_vectors * 1.1) + 1000;
-    ItemPointer global_tids = (ItemPointer)palloc0(max_vectors_capacity * sizeof(ItemPointerData));
+    
+    ItemPointer global_tids = (ItemPointer)palloc0(n_estimated_vectors * sizeof(ItemPointerData));
+    
     MemoryContextSwitchTo(oldCtx);
     
-    /* C. 扫描数据并流式上传 (包含内存泄漏修复) */
-    TupleDesc tupdesc = RelationGetDescr(scan->indexRelation);
+    /* =======================================================
+     * 优化 2: 使用 Pinned Memory + 异常安全处理
+     * ======================================================= */
+    
+    /* 分配 Pinned Memory */
+    int tmp_buf_cap = 4096; /* 每次缓冲 4K 个向量 */
+    size_t pinned_mem_size = tmp_buf_cap * dimensions * sizeof(float);
+    float* pinned_cluster_buffer = (float*)cuda_alloc_pinned(pinned_mem_size);
+    
+    if (!pinned_cluster_buffer) {
+        /* 回滚：清理资源 */
+        if (!use_registered_handle) ivf_destroy_index_context_wrapper(idx_handle);
+        pfree(global_tids);
+        hash_search(g_gpu_index_cache, &key, HASH_REMOVE, NULL);
+        elog(ERROR, "GPU Index Loading: 无法分配 Pinned Memory");
+        return NULL;
+    }
+
     int current_global_offset = 0;
-    size_t vec_size = dimensions * sizeof(float);
+    TupleDesc tupdesc = RelationGetDescr(scan->indexRelation);
     
-    /* === 关键修复：创建临时内存上下文用于解压 Vector === */
-    MemoryContext loopTmpCtx = AllocSetContextCreate(CurrentMemoryContext,
-                                                     "GPU Load Loop Context",
-                                                     ALLOCSET_DEFAULT_SIZES);
+    /* 临时内存上下文，用于循环内解压 Vector */
+    MemoryContext loopTmpCtx = AllocSetContextCreate(CurrentMemoryContext, "GPU Load Loop", ALLOCSET_DEFAULT_SIZES);
     
-    /* 临时 Buffer 分配 (在 oldCtx 中分配，确保在循环外可用) */
-    MemoryContextSwitchTo(oldCtx);
-    int tmp_buf_cap = 1024;
-    float* tmp_cluster_buffer = (float*)palloc(tmp_buf_cap * vec_size);
-    MemoryContextSwitchTo(loopTmpCtx);
-    
-    for (int i = 0; i < n_total_clusters; i++) {
-        BlockNumber searchPage = cluster_start_pages[i];
-        int cluster_vec_count = 0;
-        int cluster_start_offset = current_global_offset;
-        
-        while (BlockNumberIsValid(searchPage)) {
-            /* 在处理新 Buffer 前重置内存上下文 */
-            MemoryContextReset(loopTmpCtx);
-            MemoryContextSwitchTo(loopTmpCtx);
+    /* 批量读取策略，防止刷爆 Shared Buffers */
+    BufferAccessStrategy bas = GetAccessStrategy(BAS_BULKREAD);
+
+    /* 使用 PG_TRY 保护 Pinned Memory 的释放 */
+    PG_TRY();
+    {
+        for (int i = 0; i < n_total_clusters; i++) {
+            BlockNumber searchPage = cluster_start_pages[i];
+            int cluster_vec_count = 0;
+            int cluster_start_offset = current_global_offset;
             
-            Buffer buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, 
-                                          searchPage, RBM_NORMAL, NULL);
-            LockBuffer(buf, BUFFER_LOCK_SHARE);
-            Page page = BufferGetPage(buf);
-            OffsetNumber maxoffno = PageGetMaxOffsetNumber(page);
-            
-            for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno)) {
-                ItemId itemId = PageGetItemId(page, offno);
-                if (!ItemIdIsUsed(itemId)) continue;
+            while (BlockNumberIsValid(searchPage)) {
+                MemoryContextReset(loopTmpCtx);
+                MemoryContextSwitchTo(loopTmpCtx);
                 
-                IndexTuple itup = (IndexTuple) PageGetItem(page, itemId);
-                if (!itup) continue;
+                Buffer buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, searchPage, RBM_NORMAL, bas);
+                LockBuffer(buf, BUFFER_LOCK_SHARE);
+                Page page = BufferGetPage(buf);
+                OffsetNumber maxoffno = PageGetMaxOffsetNumber(page);
                 
-                bool isnull = false;
-                /* index_getattr 在 loopTmpCtx 中分配内存，不会泄露 */
-                Datum vector_datum = index_getattr(itup, 1, tupdesc, &isnull);
-                
-                if (!isnull) {
-                    if (current_global_offset >= max_vectors_capacity) {
-                        elog(WARNING, "GPU Index Loading: 向量数量超过预分配上限，截断处理");
-                        break;
-                    }
+                for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno)) {
+                    ItemId itemId = PageGetItemId(page, offno);
+                    if (!ItemIdIsUsed(itemId)) continue;
                     
-                    /* 记录 TID (内存是在 TopContext 分配的，安全) */
-                    MemoryContextSwitchTo(cacheCtx);
-                    global_tids[current_global_offset] = itup->t_tid;
-                    MemoryContextSwitchTo(loopTmpCtx);
+                    IndexTuple itup = (IndexTuple) PageGetItem(page, itemId);
                     
-                    /* 如果使用注册表句柄，数据已上传，只需要记录 TID */
-                    if (!use_registered_handle) {
-                        Vector *vec = DatumGetVector(vector_datum);
-                        
-                        /* 动态扩容 (需要切回 oldCtx 进行 repalloc) */
-                        if (cluster_vec_count >= tmp_buf_cap) {
-                            MemoryContextSwitchTo(oldCtx);
-                            tmp_buf_cap *= 2;
-                            tmp_cluster_buffer = (float*)repalloc(tmp_cluster_buffer, tmp_buf_cap * vec_size);
-                            MemoryContextSwitchTo(loopTmpCtx);
+                    /* 注意：TID 记录必须在 cacheCtx 下进行吗？不需要，global_tids 数组本身已分配 */
+                    /* 这里直接赋值即可 */
+                    
+                    bool isnull = false;
+                    Datum vector_datum = index_getattr(itup, 1, tupdesc, &isnull);
+                    
+                    if (!isnull) {
+                        /* 安全检查：防止估算偏小导致数组越界 */
+                        if (current_global_offset >= n_estimated_vectors) {
+                            /* 生产环境可能需要 realloc，这里简化为截断并警告 */
+                            static bool warned = false;
+                            if (!warned) {
+                                elog(WARNING, "GPU Index Loading: 实际向量超过估算值，部分数据被截断");
+                                warned = true;
+                            }
+                            continue;
                         }
                         
-                        memcpy(tmp_cluster_buffer + (cluster_vec_count * dimensions), 
-                               vec->x, vec_size);
-                        cluster_vec_count++;
+                        /* 如果不是复用 Build 阶段的 Handle，则需要拷贝向量数据 */
+                        if (!use_registered_handle) {
+                            Vector *vec = DatumGetVector(vector_datum);
+                            
+                            /* 缓冲区满，触发上传 */
+                            if (cluster_vec_count >= tmp_buf_cap) {
+                                ivf_append_cluster_data_wrapper(
+                                    idx_handle, i, pinned_cluster_buffer, cluster_vec_count, cluster_start_offset
+                                );
+                                cluster_start_offset += cluster_vec_count;
+                                cluster_vec_count = 0;
+                            }
+                            
+                            /* 拷贝到 Pinned Memory */
+                            memcpy(pinned_cluster_buffer + (cluster_vec_count * dimensions), 
+                                   vec->x, dimensions * sizeof(float));
+                        }
+                        
+                        /* 记录 TID */
+                        global_tids[current_global_offset] = itup->t_tid;
+                        
+                        current_global_offset++;
+                        if (!use_registered_handle) cluster_vec_count++;
                     }
-                    
-                    current_global_offset++;
                 }
+                
+                searchPage = IvfflatPageGetOpaque(page)->nextblkno;
+                UnlockReleaseBuffer(buf);
             }
             
-            searchPage = IvfflatPageGetOpaque(page)->nextblkno;
-            UnlockReleaseBuffer(buf);
-        }
-        
-        /* 上传数据 (数据在 tmp_cluster_buffer 中) */
-        /* 如果使用注册表的句柄，数据已经在 Build 阶段上传，这里只需要扫描 TID */
-        if (!use_registered_handle) {
-            ivf_append_cluster_data_wrapper(
-                idx_handle, i, tmp_cluster_buffer, cluster_vec_count, cluster_start_offset
-            );
+            /* 上传当前 Cluster 尾部数据 */
+            if (!use_registered_handle && cluster_vec_count > 0) {
+                ivf_append_cluster_data_wrapper(
+                    idx_handle, i, pinned_cluster_buffer, cluster_vec_count, cluster_start_offset
+                );
+            }
         }
     }
-    
-    /* 清理加载过程的临时资源 */
+    PG_CATCH();
+    {
+        /* 异常处理：释放 Pinned Memory，避免内存泄漏 */
+        cuda_free_pinned(pinned_cluster_buffer);
+        if (bas) FreeAccessStrategy(bas);
+        MemoryContextDelete(loopTmpCtx);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    /* 正常释放 */
+    cuda_free_pinned(pinned_cluster_buffer);
+    if (bas) FreeAccessStrategy(bas);
     MemoryContextDelete(loopTmpCtx);
-    MemoryContextSwitchTo(oldCtx);
     
-    pfree(tmp_cluster_buffer);
-    pfree(predicted_cluster_sizes);
-    pfree(cluster_start_pages);
-    
-    /* D. 完成上传（如果使用注册表句柄，数据已上传，跳过） */
+    /* 5. 完成上传 (计算 Norms 等) */
     if (!use_registered_handle) {
+        /* 注意：传入实际读取到的 current_global_offset */
         ivf_finalize_streaming_upload_wrapper(idx_handle, cluster_centers_flat, current_global_offset);
     }
     pfree(cluster_centers_flat);
-    
-    /* E. 填充缓存条目 */
+    pfree(cluster_start_pages); /* predicted_cluster_sizes 未使用 */
+
+    /* 6. 更新缓存条目 */
     entry->idx_handle = idx_handle;
     entry->global_tids = global_tids;
-    entry->n_total_vectors = current_global_offset; /* 使用实际值 */
+    entry->n_total_vectors = current_global_offset;
     entry->n_total_clusters = n_total_clusters;
     entry->dimensions = dimensions;
     
+    elog(INFO, "GPU Index Loading: 完成，加载向量 %d 个", current_global_offset);
+    
     return entry;
 }
+#endif /* USE_CUDA */
 #endif /* USE_CUDA */
 
 /* ========================================================================= */
@@ -606,10 +623,17 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
 /*                              元数据准备函数                                */
 /* ========================================================================= */
 
-/* 简化的元数据准备：只统计数量，不读向量数据 */
+/* ========================================================================= */
+/*                              元数据准备函数 (优化版)                        */
+/* ========================================================================= */
+
+/* 
+ * 优化 1: 消除双重扫描
+ * 只读取 Meta Pages 获取聚类中心和起始页，绝对不遍历数据页链表。
+ */
 static int
 PrepareMetaInfoOnly(IndexScanDesc scan,
-                    int** cluster_size_out,
+                    int** cluster_size_out, /* 为了接口兼容保留，设为 NULL 或 全0 */
                     BlockNumber** cluster_pages_out,
                     float** cluster_centers_flat_out,
                     int* n_total_clusters_out, 
@@ -618,17 +642,18 @@ PrepareMetaInfoOnly(IndexScanDesc scan,
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
     TupleDesc tupdesc = RelationGetDescr(scan->indexRelation);
     int totalLists = 0;
+    int dimensions = so->dimensions;
+
+    /* 获取总列表数 */
     IvfflatGetMetaPageInfo(scan->indexRelation, &totalLists, NULL);
     
     if (totalLists <= 0) return -1;
     
-    int dimensions = so->dimensions;
-    
     /* 分配输出数组 */
-    int* cluster_sizes = (int*)palloc0(totalLists * sizeof(int));
     BlockNumber* cluster_start_pages = (BlockNumber*)palloc(totalLists * sizeof(BlockNumber));
+    float* cluster_centers_flat = (float*)palloc(totalLists * dimensions * sizeof(float));
     
-    /* 1. 遍历 Meta Pages 获取 Cluster 起始页 */
+    /* 遍历 Meta Pages */
     BlockNumber nextblkno = IVFFLAT_HEAD_BLKNO;
     int center_idx = 0;
     
@@ -642,61 +667,14 @@ PrepareMetaInfoOnly(IndexScanDesc scan,
         for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno))
         {
             if (center_idx >= totalLists) break;
-            IvfflatList list = (IvfflatList) PageGetItem(cpage, PageGetItemId(cpage, offno));
-            cluster_start_pages[center_idx] = list->startPage;
-            center_idx++;
-        }
-        nextblkno = IvfflatPageGetOpaque(cpage)->nextblkno;
-        UnlockReleaseBuffer(cbuf);
-    }
-    
-    /* 2. 统计每个 cluster 的向量数量 */
-    int total_vectors = 0;
-    for (int i = 0; i < totalLists; i++) {
-        BlockNumber searchPage = cluster_start_pages[i];
-        while (BlockNumberIsValid(searchPage)) {
-            Buffer buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, 
-                                          searchPage, RBM_NORMAL, NULL);
-            LockBuffer(buf, BUFFER_LOCK_SHARE);
-            Page page = BufferGetPage(buf);
-            OffsetNumber maxoffno = PageGetMaxOffsetNumber(page);
             
-            for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno)) {
-                ItemId itemId = PageGetItemId(page, offno);
-                /* 关键修正: 严谨检查 Item 是否可用 */
-                if (!ItemIdIsUsed(itemId)) continue;
-                IndexTuple itup = (IndexTuple) PageGetItem(page, itemId);
-                if (!itup) continue;
-                
-                /* 这里只检查 Datum 是否存在，不解压 Vector，速度较快 */
-                bool isnull = false;
-                index_getattr(itup, 1, tupdesc, &isnull);
-                if (!isnull) {
-                    cluster_sizes[i]++;
-                    total_vectors++;
-                }
-            }
-            searchPage = IvfflatPageGetOpaque(page)->nextblkno;
-            UnlockReleaseBuffer(buf);
-        }
-    }
-    
-    /* 3. 获取 Cluster Centers (扁平化) */
-    float* cluster_centers_flat = (float*)palloc(totalLists * dimensions * sizeof(float));
-    nextblkno = IVFFLAT_HEAD_BLKNO;
-    center_idx = 0;
-    
-    while (BlockNumberIsValid(nextblkno))
-    {
-        Buffer cbuf = ReadBuffer(scan->indexRelation, nextblkno);
-        LockBuffer(cbuf, BUFFER_LOCK_SHARE);
-        Page cpage = BufferGetPage(cbuf);
-        OffsetNumber maxoffno = PageGetMaxOffsetNumber(cpage);
-
-        for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno))
-        {
-            if (center_idx >= totalLists) break;
+            /* 获取 List 元组 */
             IndexTuple itup = (IndexTuple) PageGetItem(cpage, PageGetItemId(cpage, offno));
+            IvfflatList list = (IvfflatList) itup; /* IvfflatList 结构体头部就是 IndexTuple */
+            
+            cluster_start_pages[center_idx] = list->startPage;
+            
+            /* 读取聚类中心向量 */
             bool isnull = false;
             Datum center_datum = index_getattr(itup, 1, tupdesc, &isnull);
             
@@ -704,6 +682,9 @@ PrepareMetaInfoOnly(IndexScanDesc scan,
                 Vector *center_vec = DatumGetVector(center_datum);
                 memcpy(cluster_centers_flat + center_idx * dimensions, 
                        center_vec->x, dimensions * sizeof(float));
+            } else {
+                /* 理论上中心点不应为空，置 0 防御 */
+                memset(cluster_centers_flat + center_idx * dimensions, 0, dimensions * sizeof(float));
             }
             center_idx++;
         }
@@ -711,11 +692,11 @@ PrepareMetaInfoOnly(IndexScanDesc scan,
         UnlockReleaseBuffer(cbuf);
     }
     
-    *cluster_size_out = cluster_sizes;
+    *cluster_size_out = NULL; /* 不再统计精确大小 */
     *cluster_pages_out = cluster_start_pages;
     *cluster_centers_flat_out = cluster_centers_flat;
     *n_total_clusters_out = totalLists;
-    *n_total_vectors_out = total_vectors;
+    *n_total_vectors_out = 0; /* 占位符，由调用者估算 */
     
     return 0;
 }
