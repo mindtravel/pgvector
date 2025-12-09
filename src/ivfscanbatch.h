@@ -13,6 +13,10 @@
 #ifdef USE_CUDA
 #include "cuda/cuda_wrapper.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* 批处理大小控制 - 设为 64K 个向量，假设 1024 维 float，约 256MB，适合 PCIe 传输粒度 */
 #define PIPELINE_CHUNK_SIZE 65536
 

@@ -633,14 +633,14 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
  */
 static int
 PrepareMetaInfoOnly(IndexScanDesc scan,
-                    int** cluster_size_out, /* 为了接口兼容保留，设为 NULL 或 全0 */
+                    int** cluster_size_out,
                     BlockNumber** cluster_pages_out,
                     float** cluster_centers_flat_out,
                     int* n_total_clusters_out, 
                     int* n_total_vectors_out)
 {
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
-    TupleDesc tupdesc = RelationGetDescr(scan->indexRelation);
+    /* 不需要 tupdesc，因为我们直接读取结构体 */
     int totalLists = 0;
     int dimensions = so->dimensions;
 
@@ -653,7 +653,7 @@ PrepareMetaInfoOnly(IndexScanDesc scan,
     BlockNumber* cluster_start_pages = (BlockNumber*)palloc(totalLists * sizeof(BlockNumber));
     float* cluster_centers_flat = (float*)palloc(totalLists * dimensions * sizeof(float));
     
-    /* 遍历 Meta Pages */
+    /* 遍历 Meta Pages (存储聚类中心列表的页面) */
     BlockNumber nextblkno = IVFFLAT_HEAD_BLKNO;
     int center_idx = 0;
     
@@ -668,55 +668,89 @@ PrepareMetaInfoOnly(IndexScanDesc scan,
         {
             if (center_idx >= totalLists) break;
             
-            /* 获取 List 元组 */
-            IndexTuple itup = (IndexTuple) PageGetItem(cpage, PageGetItemId(cpage, offno));
-            IvfflatList list = (IvfflatList) itup; /* IvfflatList 结构体头部就是 IndexTuple */
+            ItemId itemId = PageGetItemId(cpage, offno);
+            if (!ItemIdIsUsed(itemId)) continue;
             
+            /* 【修复点】: 这里是 IvfflatList 结构体，不是 IndexTuple */
+            IvfflatList list = (IvfflatList) PageGetItem(cpage, itemId);
+            
+            /* 直接从结构体获取起始页 */
             cluster_start_pages[center_idx] = list->startPage;
             
-            /* 读取聚类中心向量 */
-            bool isnull = false;
-            Datum center_datum = index_getattr(itup, 1, tupdesc, &isnull);
+            /* 直接从结构体获取聚类中心向量 */
+            /* IvfflatList 结构体定义中包含 Vector center; 它是变长的，但在内存中是连续的 */
+            Vector *center_vec = &list->center;
             
-            if (!isnull) {
-                Vector *center_vec = DatumGetVector(center_datum);
-                memcpy(cluster_centers_flat + center_idx * dimensions, 
-                       center_vec->x, dimensions * sizeof(float));
-            } else {
-                /* 理论上中心点不应为空，置 0 防御 */
-                memset(cluster_centers_flat + center_idx * dimensions, 0, dimensions * sizeof(float));
-            }
+            /* 注意：这里不需要 index_getattr，因为不是 Tuple */
+            memcpy(cluster_centers_flat + center_idx * dimensions, 
+                   center_vec->x, dimensions * sizeof(float));
+            
             center_idx++;
         }
         nextblkno = IvfflatPageGetOpaque(cpage)->nextblkno;
         UnlockReleaseBuffer(cbuf);
     }
     
-    *cluster_size_out = NULL; /* 不再统计精确大小 */
+    *cluster_size_out = NULL;
     *cluster_pages_out = cluster_start_pages;
     *cluster_centers_flat_out = cluster_centers_flat;
-    *n_total_clusters_out = totalLists;
-    *n_total_vectors_out = 0; /* 占位符，由调用者估算 */
+    *n_total_clusters_out = center_idx;
+    *n_total_vectors_out = 0;
     
     return 0;
 }
 
 /* ========================================================================= */
-/*                              结果转换函数 (延迟回表)                        */
+/*                              结果转换函数 (优化版：TID 排序回表)            */
 /* ========================================================================= */
+
+#ifdef USE_CUDA
+
+/* 用于回表排序的辅助结构 */
+typedef struct HeapFetchRequest {
+    ItemPointerData tid;
+    int32   query_idx;
+    int32   k_idx;
+    float   distance;
+    int32   original_index; /* 保持稳定排序或调试用 */
+} HeapFetchRequest;
+
+/* qsort 比较函数：按 BlockNumber 升序，OffNumber 升序 */
+static int
+compare_fetch_requests(const void *a, const void *b)
+{
+    const HeapFetchRequest *ra = (const HeapFetchRequest *)a;
+    const HeapFetchRequest *rb = (const HeapFetchRequest *)b;
+    
+    BlockNumber ba = ItemPointerGetBlockNumber(&ra->tid);
+    BlockNumber bb = ItemPointerGetBlockNumber(&rb->tid);
+    
+    if (ba < bb) return -1;
+    if (ba > bb) return 1;
+    
+    OffsetNumber oa = ItemPointerGetOffsetNumber(&ra->tid);
+    OffsetNumber ob = ItemPointerGetOffsetNumber(&rb->tid);
+    
+    if (oa < ob) return -1;
+    if (oa > ob) return 1;
+    
+    return 0;
+}
+
+#endif /* USE_CUDA */
 
 static void
 ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_index,
                             int n_query, int k, BatchBuffer* result_buffer,
                             ItemPointer global_tids, int n_total_vectors, Relation indexRelation)
 {
-    /* 打开堆表（只在这里打开一次） */
+    /* 1. 准备堆表访问 */
     Oid heapRelid = IndexGetRelation(RelationGetRelid(indexRelation), false);
     Relation heapRelation = table_open(heapRelid, AccessShareLock);
     TupleDesc heapDesc = RelationGetDescr(heapRelation);
     Snapshot snapshot = GetActiveSnapshot();
     
-    /* 查找 ID 列 */
+    /* 查找 ID 列 (假设用户需要 id 列作为 payload) */
     int id_attnum = -1;
     for (int i = 1; i <= heapDesc->natts; i++) {
         Form_pg_attribute attr = TupleDescAttr(heapDesc, i - 1);
@@ -726,64 +760,86 @@ ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_in
         }
     }
     
-    /* 初始化 buffer */
-    int buffer_size = result_buffer->n_queries * result_buffer->k;
-    memset(result_buffer->query_ids, -1, buffer_size * sizeof(int));
-    memset(result_buffer->global_vector_indices, -1, buffer_size * sizeof(int));
-    memset(result_buffer->distances, 0, buffer_size * sizeof(float));
+#ifdef USE_CUDA
+    int total_items = n_query * k;
+    int valid_items_count = 0;
     
-    /* 填充结果 */
-    for (int query_idx = 0; query_idx < n_query; query_idx++) {
+    /* 2. 收集所有有效的 Fetch 请求 */
+    /* 我们在 Stack 上或者 palloc 一个临时数组来存请求，避免多次 palloc */
+    HeapFetchRequest *requests = (HeapFetchRequest *)palloc(total_items * sizeof(HeapFetchRequest));
+    
+    /* 初始化 result_buffer 为默认值 (NULLs) */
+    memset(result_buffer->query_ids, -1, total_items * sizeof(int));
+    memset(result_buffer->global_vector_indices, -1, total_items * sizeof(int));
+    memset(result_buffer->distances, 0, total_items * sizeof(float));
+    
+    for (int q = 0; q < n_query; q++) {
         for (int i = 0; i < k; i++) {
-            int buffer_idx = query_idx * k + i;
-            int vec_idx = topk_index[query_idx][i];
+            int vec_idx = topk_index[q][i];
+            int buffer_idx = q * k + i;
             
-            /* 增加对 vec_idx 的有效性检查 */
-            if (vec_idx < 0) {
-                result_buffer->query_ids[buffer_idx] = query_idx;
-                ItemPointerSetInvalid(&result_buffer->vector_ids[buffer_idx]);
-                result_buffer->distances[buffer_idx] = INFINITY;
-                continue;
-            }
+            /* 设置默认值 */
+            result_buffer->query_ids[buffer_idx] = q;
+            ItemPointerSetInvalid(&result_buffer->vector_ids[buffer_idx]);
+            result_buffer->distances[buffer_idx] = (vec_idx < 0) ? INFINITY : topk_dist[q][i];
             
-            /* 边界检查：确保 vec_idx 在有效范围内 */
-            if (vec_idx >= n_total_vectors) {
-                elog(WARNING, "ConvertBatchPipelineResults: vec_idx %d >= n_total_vectors %d, skipping", 
-                     vec_idx, n_total_vectors);
-                result_buffer->query_ids[buffer_idx] = query_idx;
-                ItemPointerSetInvalid(&result_buffer->vector_ids[buffer_idx]);
-                result_buffer->distances[buffer_idx] = INFINITY;
-                continue;
-            }
+            /* 过滤无效结果 */
+            if (vec_idx < 0 || vec_idx >= n_total_vectors) continue;
             
-            /* 1. 从 CPU 数组获取 TID */
-            /* 这里的 global_tids 现在和 GPU 的 d_cluster_vectors 是严格对应的 */
+            /* 构造请求 */
             ItemPointer tid = &global_tids[vec_idx];
             
-            /* 调试日志：如果发现结果还是不对，可以打开这个查看 TID 是否合理 */
-            /* elog(LOG, "Query %d Top %d: FlatIdx %d -> TID (%u, %u)", 
-                 query_idx, i, vec_idx, 
-                 ItemPointerGetBlockNumber(tid), ItemPointerGetOffsetNumber(tid)); */
-            result_buffer->query_ids[buffer_idx] = query_idx;
-            result_buffer->vector_ids[buffer_idx] = *tid;
-            result_buffer->distances[buffer_idx] = topk_dist[query_idx][i];
+            /* 这里可以做一个简单的可见性检查预判（可选），但主要依靠 heap_fetch */
             
-            /* 2. 延迟回表：只对 Top-K 结果执行 heap_fetch */
-            int32_t row_id = -1;
-            if (id_attnum > 0) {
-                Buffer buffer;
-                HeapTupleData tuple;
-                tuple.t_self = *tid;
-                if (heap_fetch(heapRelation, snapshot, &tuple, &buffer, false)) {
-                    bool isnull;
-                    Datum d = heap_getattr(&tuple, id_attnum, heapDesc, &isnull);
-                    if (!isnull) row_id = DatumGetInt32(d);
-                    ReleaseBuffer(buffer);
-                }
-            }
-            result_buffer->global_vector_indices[buffer_idx] = row_id;
+            requests[valid_items_count].tid = *tid;
+            requests[valid_items_count].query_idx = q;
+            requests[valid_items_count].k_idx = i;
+            requests[valid_items_count].distance = topk_dist[q][i];
+            requests[valid_items_count].original_index = buffer_idx;
+            valid_items_count++;
         }
     }
     
+    /* 3. 关键步骤：对 TID 进行排序 */
+    /* 这会将访问同一 Page 的请求聚在一起，并使磁盘访问顺序化 */
+    if (valid_items_count > 0) {
+        qsort(requests, valid_items_count, sizeof(HeapFetchRequest), compare_fetch_requests);
+    }
+    
+    /* 4. 按顺序执行回表 */
+    for (int i = 0; i < valid_items_count; i++) {
+        HeapFetchRequest *req = &requests[i];
+        int buffer_dest_idx = req->query_idx * k + req->k_idx; /* 原始结果集中的位置 */
+        
+        /* 填充结果集中的 TID 和 Distance (这些不需要回表) */
+        result_buffer->vector_ids[buffer_dest_idx] = req->tid;
+        /* distances 已经在初始化时填了，这里可以不填 */
+        
+        int32_t row_id = -1;
+        
+        /* 只有当我们需要获取 payload (id列) 时才真正回表 */
+        if (id_attnum > 0) {
+            HeapTupleData tuple;
+            tuple.t_self = req->tid;
+            
+            /* 优化：Buffer Access Strategy 也可以在这里用，但 heap_fetch 内部封装较深，
+               这里主要依靠 OS Page Cache 和 PG Buffer Pool 的命中率提升 */
+            
+            Buffer buf;
+            if (heap_fetch(heapRelation, snapshot, &tuple, &buf, false)) {
+                bool isnull;
+                Datum d = heap_getattr(&tuple, id_attnum, heapDesc, &isnull);
+                if (!isnull) row_id = DatumGetInt32(d);
+                ReleaseBuffer(buf);
+            }
+        }
+        
+        result_buffer->global_vector_indices[buffer_dest_idx] = row_id;
+    }
+    
+    pfree(requests);
+#else
+    elog(ERROR, "ConvertBatchPipelineResults: CUDA support required");
+#endif
     table_close(heapRelation, AccessShareLock);
 }
