@@ -93,7 +93,7 @@ __global__ void fusion_l2_topk_warpsort_kernel(
         float data_norm = d_data_norm[i];
         float inner_product = row_inner_product[i];
         IdxT index = row_index[i];  /* 修复：使用正确的索引值 */
-        float l2_similarity = query_norm + data_norm - 2.0f * inner_product;
+        float l2_similarity = query_norm*query_norm + data_norm*data_norm - 2.0f * inner_product;
         queue.add(l2_distance, index);
     }
     
