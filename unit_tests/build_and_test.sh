@@ -70,9 +70,13 @@ echo "运行测试..."
 # ./test_integrated_coarse_fine_pipeline/test_integrated_coarse_fine_pipeline
 ./test_integrated_coarse_fine/test_integrated_coarse_fine
 # echo "=================================="
-# echo "运行 fusion_cos_topk_fine_v3_fixed_probe 测试..."
-# ./test_fusion_cos_topk_fine_v3_fixed_probe/test_fusion_cos_topk_fine_v3_fixed_probe 
-# echo "=================================="
+echo "运行 fusion_cos_topk_fine_v3_fixed_probe 测试..."
+nsys profile -o fusion_cos_topk_v3_nvtx \
+    --stats=true \
+    --trace=cuda,nvtx \
+    --force-overwrite=true \
+    ./test_fusion_cos_topk_fine_v3_fixed_probe/test_fusion_cos_topk_fine_v3_fixed_probe
+echo "=================================="
 # echo "运行 fusion_cos_topk_fine_v5 测试..."
 # ./test_fusion_cos_topk_fine_v5/test_fusion_cos_topk_fine_v5
 # echo "=================================="

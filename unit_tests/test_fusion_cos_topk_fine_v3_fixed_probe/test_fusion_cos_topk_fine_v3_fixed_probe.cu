@@ -17,6 +17,9 @@
 #include "../common/params_macros.cuh"
 #include "../common/output_macros.cuh"
 
+#include <nvtx3/nvToolsExt.h>
+#include <cuda_runtime.h>
+
 #define EPSILON 1e-2f
 
 /**
@@ -309,7 +312,7 @@ std::vector<double> test_single_config(
             k
         );
     );
-    
+    nvtxRangePushA("GPU");
     // 6. GPU 实现
     float* d_query_group = nullptr;
     float* d_cluster_vector = nullptr;
@@ -389,7 +392,7 @@ std::vector<double> test_single_config(
     cudaMemcpy(h_topk_dist_gpu[0], d_topk_dist, n_query * k * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_topk_index_gpu[0], d_topk_index, n_query * k * sizeof(int), cudaMemcpyDeviceToHost);
     CHECK_CUDA_ERRORS;
-    
+    nvtxRangePop();
     // 7. 验证结果（使用 test_utils.cuh 的 compare_set_2D）
     bool pass = true;
     pass &= compare_set_2D(h_topk_dist_gpu, h_topk_dist_cpu, n_query, k, EPSILON);

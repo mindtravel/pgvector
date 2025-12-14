@@ -33,8 +33,10 @@ set_target_properties(test_fusion_cos_topk_fine_v3_fixed_probe PROPERTIES
 )
 
 # 链接CUDA库
+# and nvtx
 target_link_libraries(test_fusion_cos_topk_fine_v3_fixed_probe
     ${CUDA_LIBRARIES}
+    "/usr/local/cuda-12.1/targets/x86_64-linux/include/nvtx3/nvToolsExt.h"
 )
 
 # 添加测试
