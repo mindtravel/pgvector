@@ -300,6 +300,27 @@ void launch_indexed_inner_product_with_topk_kernel_v5_entry_based(
     int* __restrict__ d_topk_index,
     cudaStream_t stream);
 
+template<int Capacity, bool Ascending, int QueriesPerBlock>
+void launch_indexed_inner_product_with_topk_kernel_v5_entry_based_l2(
+    dim3 block,
+    int n_dim,
+    float* __restrict__ d_query_group,
+    float* __restrict__ d_cluster_vector,
+    int* __restrict__ d_probe_vector_offset,
+    int* __restrict__ d_probe_vector_count,
+    int* __restrict__ d_entry_cluster_id,  // [n_entry] 每个entry对应的cluster_id
+    int* __restrict__ d_entry_query_start,  // [n_entry] 每个entry的query起始位置
+    int* __restrict__ d_entry_query_count,  // [n_entry] 每个entry的query数量
+    int* __restrict__ d_entry_queries,  // [total_queries_in_entries] 所有entry的query列表
+    int* __restrict__ d_entry_probe_indices,  // [total_queries_in_entries] 所有entry的probe_indices
+    float* __restrict__ d_query_norm,
+    float* __restrict__ d_cluster_vector_norm,
+    int n_entry,  // entry总数
+    int n_probes,  // 每个query的probe数量
+    int k,
+    float* __restrict__ d_topk_dist,
+    int* __restrict__ d_topk_index,
+    cudaStream_t stream);
 #endif
 
 
