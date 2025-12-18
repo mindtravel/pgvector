@@ -141,17 +141,27 @@ static float cosine_distance(const float* a, const float* b, int dim) {
     return 1.0f - dot / denom;
 }
 
+static float l2_distance_sq(const float* a, const float* b, int dim) {
+    float s = 0.0f;
+    for (int i = 0; i < dim; ++i) {
+        float d = a[i] - b[i];
+        s += d * d;
+    }
+    return s;
+}
+
 
 
 
 static void cpu_coarse_fine_search(const BenchmarkCase& config,
-                                   float** query_batch,
-                                   const ClusterDataset& dataset,
-                                   float** centers,
-                                   int* initial_indices,
-                                   int** out_index,
-                                   float** out_dist
-                                ) {
+                                              float** query_batch,
+                                              const ClusterDataset& dataset,
+                                              float** centers,
+                                              int* initial_indices,
+                                              int** out_index,
+                                              float** out_dist,
+                                              int mode /*0: cos, 1: l2*/
+                                          ) {
     const int n_query = config.n_query;
     const int n_dim = config.vector_dim;
     const int n_total_clusters = config.n_total_clusters;
@@ -169,7 +179,8 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
             const int* query_initial_indices = initial_indices + qi * n_total_clusters;
             for (int idx = 0; idx < n_total_clusters; ++idx) {
                 int cid = query_initial_indices[idx];  // 使用传入的索引
-                tmp[idx] = {cosine_distance(query, centers[cid], n_dim), cid};
+                float dist = (mode == 1) ? l2_distance_sq(query, centers[cid], n_dim) : cosine_distance(query, centers[cid], n_dim);
+                tmp[idx] = {dist, cid};
             }
             // 粗筛选择 n_probes 个 cluster
             std::partial_sort(tmp.begin(), tmp.begin() + config.n_probes, tmp.end(),
@@ -194,7 +205,8 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
                     const float* vec = base + static_cast<size_t>(vid) * n_dim;
                     // 存储全局索引：cluster 的全局偏移 + cluster 内的局部索引
                     int global_idx = cluster_global_offset + vid;
-                    fine_buffer.push_back({cosine_distance(query, vec, n_dim), global_idx});
+                    float dist = (mode == 1) ? l2_distance_sq(query, vec, n_dim) : cosine_distance(query, vec, n_dim);
+                    fine_buffer.push_back({dist, global_idx});
                 }
             }
             // 从所有候选向量中选择 top-k
@@ -275,7 +287,8 @@ static std::vector<double> run_case(const BenchmarkCase& config,
                                cluster_center_data,
                                initial_indices,  /* 传入初始索引（一维数组） */
                                cpu_idx,
-                               cpu_dist
+                               cpu_dist,
+                               mode
         );
     );
 
@@ -375,7 +388,8 @@ static std::vector<double> run_case(const BenchmarkCase& config,
     cudaFree(d_topk_dist);
     cudaFree(d_topk_index);
     
-    bool pass = compare_set_2D<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-4f);
+    bool pass = mode ? compare_set_2D_relative<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-4f) :
+                       compare_set_2D<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-5f);
     
     double pass_rate = pass ? 1.0 : 0.0;
 

@@ -36,7 +36,10 @@ set_target_properties(test_fusion_cos_topk_fine_v3_fixed_probe PROPERTIES
 # and nvtx
 target_link_libraries(test_fusion_cos_topk_fine_v3_fixed_probe
     ${CUDA_LIBRARIES}
-    "/usr/local/cuda-12.1/targets/x86_64-linux/include/nvtx3/nvToolsExt.h"
+#    "/usr/local/cuda-12.1/targets/x86_64-linux/include/nvtx3/nvToolsExt.h"
+#注：正常而言nvtx库会随着CUDA一起安装，可以通过在cuda目录下搜索nvtx来查看是否有ntToolsExt.h文件存在
+#如果存在直接#include <nvtx3/nvToolsExt.h>即可使用
+#如果报错，在library里面添加nvToolsExt.h的绝对地址即可使用
 )
 
 # 添加测试
