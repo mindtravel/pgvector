@@ -68,4 +68,20 @@ void batch_search_pipeline(
     int n_probes,
     int k
 );
+void batch_search_pipeline_choose(
+    float* d_query_batch,
+    int* d_cluster_size,
+    float* d_cluster_vectors,
+    float* d_cluster_centers,
+    int* d_initial_indices,
+    float* d_topk_dist,
+    int* d_topk_index,
+    int n_query,
+    int n_dim,
+    int n_total_cluster,
+    int n_total_vectors,
+    int n_probes,
+    int k,
+    int mode
+);
 #endif  // PGVECTOR_CUDA_INTEGRATE_SCREEN_CUH
