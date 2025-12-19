@@ -191,6 +191,35 @@ bool compare_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
     return false;
 }
 
+template<typename T>
+bool compare_set_2D_relative(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
+    int err_happens = 0;
+    for(int i = 0; i < nx; ++i){
+        std::sort(a[i], a[i] + ny);
+        std::sort(b[i], b[i] + ny);
+
+        for (int j = 0; j < ny; j++) {
+            if (!compare_numbers_relative(a[i][j], b[i][j], epsilon)) {
+                if(DEBUG){
+                    if(err_happens == 0){
+                        COUT_ENDL("mismatch!");
+                        COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
+                    }                    
+                    COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
+                }
+    
+                err_happens ++;
+            }
+        }
+    }
+    if(err_happens == 0){
+        return true;
+    }
+    if(DEBUG)
+        COUT_ENDL(err_happens);
+    return false;
+}
+
 /**
  * 计算两个集合（一维数组）中完全相同的元素个数（考虑epsilon容差）
  * 使用双指针方式遍历已排序的a/b，统计相等元素个数
