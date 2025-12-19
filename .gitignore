@@ -5,6 +5,7 @@
 *.o
 *.bc
 *.so
+*.d
 cuda/pch.h.pch
 
 

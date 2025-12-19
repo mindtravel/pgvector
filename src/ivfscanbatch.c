@@ -23,6 +23,55 @@
 
 #include "cuda/cuda_wrapper.h"
 
+/* 引入新的 Pipeline 接口 */
+#ifdef USE_CUDA
+/* 函数声明已在 ivfscanbatch.h 中 */
+#include "utils/hsearch.h"
+#endif
+
+/* ========================================================================= */
+/*                              GPU 索引缓存管理                              */
+/* ========================================================================= */
+
+#ifdef USE_CUDA
+/* 缓存键：使用 Index 的 OID */
+typedef struct GpuIndexCacheKey {
+    Oid index_oid;
+} GpuIndexCacheKey;
+
+/* 缓存条目 */
+typedef struct GpuIndexCacheEntry {
+    GpuIndexCacheKey key;      /* Hash Key */
+    
+    /* 缓存的数据 */
+    void* idx_handle;          /* GPU Handle */
+    ItemPointer global_tids;   /* CPU端 TID 映射表 */
+    int n_total_vectors;       /* 向量总数 (用于校验) */
+    int n_total_clusters;      /* 聚类总数 */
+    int dimensions;            /* 维度 */
+} GpuIndexCacheEntry;
+
+/* 静态全局变量，存储当前会话的缓存 */
+static HTAB *g_gpu_index_cache = NULL;
+
+/* 初始化缓存表 */
+static void
+InitGpuIndexCache(void)
+{
+    HASHCTL info;
+    
+    memset(&info, 0, sizeof(info));
+    info.keysize = sizeof(GpuIndexCacheKey);
+    info.entrysize = sizeof(GpuIndexCacheEntry);
+    info.hcxt = TopMemoryContext;  /* 使用 TopMemoryContext 确保缓存持久化 */
+    
+    g_gpu_index_cache = hash_create("GPU Index Cache",
+                                    16, /* 初始大小 */
+                                    &info,
+                                    HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+#endif /* USE_CUDA */
+
 /* ========================================================================= */
 /*                               辅助宏与结构定义                            */
 /* ========================================================================= */
@@ -237,17 +286,239 @@ static void ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, i
                                         int n_query, int k, BatchBuffer* result_buffer,
                                         ItemPointer global_tids, int n_total_vectors, Relation indexRelation);
 
-/* C++ Wrapper 声明 */
-extern int batch_search_pipeline_wrapper(float* d_query_batch,
-                                         int* d_cluster_size,
-                                         float* d_cluster_vectors,
-                                         float* d_cluster_centers,
-                                         int* d_initial_indices,
-                                         float* d_topk_dist,
-                                         int* d_topk_index,
-                                         int n_query, int n_dim, int n_total_cluster,
-                                         int n_total_vectors, int n_probes, int k);
 
+/* ========================================================================= */
+/*                              GPU 索引缓存函数                              */
+/* ========================================================================= */
+
+#ifdef USE_CUDA
+/* 
+ * 获取或加载 GPU 索引
+ * 如果缓存中有，直接返回；否则执行加载流程。
+ */
+/* ========================================================================= */
+/*                              GPU 索引缓存函数 (核心加载逻辑)                */
+/* ========================================================================= */
+
+#ifdef USE_CUDA
+static GpuIndexCacheEntry*
+GetOrLoadGpuIndex(IndexScanDesc scan)
+{
+    Oid index_oid = RelationGetRelid(scan->indexRelation);
+    GpuIndexCacheEntry *entry;
+    bool found;
+    
+    /* 1. 初始化并查找缓存 */
+    if (g_gpu_index_cache == NULL) InitGpuIndexCache();
+    
+    GpuIndexCacheKey key;
+    key.index_oid = index_oid;
+    
+    entry = (GpuIndexCacheEntry *) hash_search(g_gpu_index_cache, &key, HASH_ENTER, &found);
+    
+    /* 命中缓存直接返回 */
+    if (found && entry->idx_handle != NULL) return entry;
+    
+    /* 尝试从 Build 阶段的注册表获取 */
+    void* registered_handle = ivf_get_index_instance(index_oid);
+    
+    /* ================== 开始加载流程 ================== */
+    
+    IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
+    int dimensions = so->dimensions;
+    int* predicted_cluster_sizes = NULL; 
+    BlockNumber* cluster_start_pages = NULL;
+    float* cluster_centers_flat = NULL;
+    int n_total_clusters = 0;
+    int n_estimated_vectors = 0;
+    
+    /* 1. 快速准备元数据 (仅扫描 Meta Pages) */
+    if (PrepareMetaInfoOnly(scan, &predicted_cluster_sizes, &cluster_start_pages, 
+                            &cluster_centers_flat, &n_total_clusters, &n_estimated_vectors) != 0) {
+        hash_search(g_gpu_index_cache, &key, HASH_REMOVE, NULL);
+        elog(ERROR, "GPU Index Loading: 元数据准备失败");
+        return NULL;
+    }
+    
+    /* 2. 基于文件大小估算总向量数 (消除双重扫描) */
+    BlockNumber total_blocks = RelationGetNumberOfBlocks(scan->indexRelation);
+    /* 估算公式：总块数 * (块大小 / (向量大小 + 索引头大小)) * 填充率 */
+    size_t est_tuple_size = dimensions * sizeof(float) + sizeof(IndexTupleData) + sizeof(ItemIdData);
+    double fill_factor = 1.0; /* 假设填充率 */
+    n_estimated_vectors = (int)((total_blocks * BLCKSZ * fill_factor) / est_tuple_size);
+    n_estimated_vectors = Max(n_estimated_vectors, 10000); /* 最小保底 */
+    
+    elog(DEBUG1, "GPU Index Loading: 估算向量总数 %d (Blocks: %u)", n_estimated_vectors, total_blocks);
+
+    /* 3. 初始化 GPU Context */
+    void* idx_handle = NULL;
+    bool use_registered_handle = false;
+    
+    if (registered_handle != NULL) {
+        idx_handle = registered_handle;
+        use_registered_handle = true;
+    } else {
+        /* 使用估算值分配显存 */
+        idx_handle = ivf_create_index_context_wrapper();
+        if (!idx_handle) {
+            hash_search(g_gpu_index_cache, &key, HASH_REMOVE, NULL);
+            elog(ERROR, "GPU Index Loading: 无法创建 GPU Handle (可能是显存不足)");
+            return NULL;
+        }
+        /* 此处 n_estimated_vectors 决定了显存 malloc 大小，宁大勿小 */
+        ivf_init_streaming_upload_wrapper(idx_handle, n_total_clusters, n_estimated_vectors, dimensions);
+    }
+    
+    /* 4. 分配 CPU 端全局 TID 数组 (使用 TopMemoryContext 持久化) */
+    MemoryContext cacheCtx = TopMemoryContext;
+    MemoryContext oldCtx = MemoryContextSwitchTo(cacheCtx);
+    
+    ItemPointer global_tids = (ItemPointer)palloc0(n_estimated_vectors * sizeof(ItemPointerData));
+    
+    MemoryContextSwitchTo(oldCtx);
+    
+    /* =======================================================
+     * 优化 2: 使用 Pinned Memory + 异常安全处理
+     * ======================================================= */
+    
+    /* 分配 Pinned Memory */
+    int tmp_buf_cap = 4096; /* 每次缓冲 4K 个向量 */
+    size_t pinned_mem_size = tmp_buf_cap * dimensions * sizeof(float);
+    float* pinned_cluster_buffer = (float*)cuda_alloc_pinned(pinned_mem_size);
+    
+    if (!pinned_cluster_buffer) {
+        /* 回滚：清理资源 */
+        if (!use_registered_handle) ivf_destroy_index_context_wrapper(idx_handle);
+        pfree(global_tids);
+        hash_search(g_gpu_index_cache, &key, HASH_REMOVE, NULL);
+        elog(ERROR, "GPU Index Loading: 无法分配 Pinned Memory");
+        return NULL;
+    }
+
+    int current_global_offset = 0;
+    TupleDesc tupdesc = RelationGetDescr(scan->indexRelation);
+    
+    /* 临时内存上下文，用于循环内解压 Vector */
+    MemoryContext loopTmpCtx = AllocSetContextCreate(CurrentMemoryContext, "GPU Load Loop", ALLOCSET_DEFAULT_SIZES);
+    
+    /* 批量读取策略，防止刷爆 Shared Buffers */
+    BufferAccessStrategy bas = GetAccessStrategy(BAS_BULKREAD);
+
+    /* 使用 PG_TRY 保护 Pinned Memory 的释放 */
+    PG_TRY();
+    {
+        for (int i = 0; i < n_total_clusters; i++) {
+            BlockNumber searchPage = cluster_start_pages[i];
+            int cluster_vec_count = 0;
+            int cluster_start_offset = current_global_offset;
+            
+            while (BlockNumberIsValid(searchPage)) {
+                MemoryContextReset(loopTmpCtx);
+                MemoryContextSwitchTo(loopTmpCtx);
+                
+                Buffer buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, searchPage, RBM_NORMAL, bas);
+                LockBuffer(buf, BUFFER_LOCK_SHARE);
+                Page page = BufferGetPage(buf);
+                OffsetNumber maxoffno = PageGetMaxOffsetNumber(page);
+                
+                for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno)) {
+                    ItemId itemId = PageGetItemId(page, offno);
+                    if (!ItemIdIsUsed(itemId)) continue;
+                    
+                    IndexTuple itup = (IndexTuple) PageGetItem(page, itemId);
+                    
+                    /* 注意：TID 记录必须在 cacheCtx 下进行吗？不需要，global_tids 数组本身已分配 */
+                    /* 这里直接赋值即可 */
+                    
+                    bool isnull = false;
+                    Datum vector_datum = index_getattr(itup, 1, tupdesc, &isnull);
+                    
+                    if (!isnull) {
+                        /* 安全检查：防止估算偏小导致数组越界 */
+                        if (current_global_offset >= n_estimated_vectors) {
+                            /* 生产环境可能需要 realloc，这里简化为截断并警告 */
+                            static bool warned = false;
+                            if (!warned) {
+                                elog(WARNING, "GPU Index Loading: 实际向量超过估算值，部分数据被截断");
+                                warned = true;
+                            }
+                            continue;
+                        }
+                        
+                        /* 如果不是复用 Build 阶段的 Handle，则需要拷贝向量数据 */
+                        if (!use_registered_handle) {
+                            Vector *vec = DatumGetVector(vector_datum);
+                            
+                            /* 缓冲区满，触发上传 */
+                            if (cluster_vec_count >= tmp_buf_cap) {
+                                ivf_append_cluster_data_wrapper(
+                                    idx_handle, i, pinned_cluster_buffer, cluster_vec_count, cluster_start_offset
+                                );
+                                cluster_start_offset += cluster_vec_count;
+                                cluster_vec_count = 0;
+                            }
+                            
+                            /* 拷贝到 Pinned Memory */
+                            memcpy(pinned_cluster_buffer + (cluster_vec_count * dimensions), 
+                                   vec->x, dimensions * sizeof(float));
+                        }
+                        
+                        /* 记录 TID */
+                        global_tids[current_global_offset] = itup->t_tid;
+                        
+                        current_global_offset++;
+                        if (!use_registered_handle) cluster_vec_count++;
+                    }
+                }
+                
+                searchPage = IvfflatPageGetOpaque(page)->nextblkno;
+                UnlockReleaseBuffer(buf);
+            }
+            
+            /* 上传当前 Cluster 尾部数据 */
+            if (!use_registered_handle && cluster_vec_count > 0) {
+                ivf_append_cluster_data_wrapper(
+                    idx_handle, i, pinned_cluster_buffer, cluster_vec_count, cluster_start_offset
+                );
+            }
+        }
+    }
+    PG_CATCH();
+    {
+        /* 异常处理：释放 Pinned Memory，避免内存泄漏 */
+        cuda_free_pinned(pinned_cluster_buffer);
+        if (bas) FreeAccessStrategy(bas);
+        MemoryContextDelete(loopTmpCtx);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    /* 正常释放 */
+    cuda_free_pinned(pinned_cluster_buffer);
+    if (bas) FreeAccessStrategy(bas);
+    MemoryContextDelete(loopTmpCtx);
+    
+    /* 5. 完成上传 (计算 Norms 等) */
+    if (!use_registered_handle) {
+        /* 注意：传入实际读取到的 current_global_offset */
+        ivf_finalize_streaming_upload_wrapper(idx_handle, cluster_centers_flat, current_global_offset);
+    }
+    pfree(cluster_centers_flat);
+    pfree(cluster_start_pages); /* predicted_cluster_sizes 未使用 */
+
+    /* 6. 更新缓存条目 */
+    entry->idx_handle = idx_handle;
+    entry->global_tids = global_tids;
+    entry->n_total_vectors = current_global_offset;
+    entry->n_total_clusters = n_total_clusters;
+    entry->dimensions = dimensions;
+    
+    elog(INFO, "GPU Index Loading: 完成，加载向量 %d 个", current_global_offset);
+    
+    return entry;
+}
+#endif /* USE_CUDA */
+#endif /* USE_CUDA */
 
 /* ========================================================================= */
 /*                              核心处理逻辑                                  */
@@ -256,35 +527,18 @@ extern int batch_search_pipeline_wrapper(float* d_query_batch,
 /*
  * ProcessBatchQueriesGPU
  * 
- * 流程优化：
- * 1. PrepareMetaInfoOnly: 快速扫描元数据，计算需要的显存大小。
- * 2. cuda_malloc: 一次性分配 GPU 显存。
- * 3. Pipeline Loop: 再次扫描索引，将向量读入 Pinned Buffer，满了就 Async 发送。
- * 4. Kernel: GPU 计算 TopK。
- * 5. Convert: 将 GPU 返回的 index 映射回 TID，并延迟回表 (Heap Fetch)。
+ * 使用缓存机制优化后的版本：
+ * 1. 获取或加载 GPU 索引 (GetOrLoadGpuIndex) - 带缓存复用
+ * 2. 准备 Batch Query 并执行 (ivf_pipeline_stage*)
+ * 3. 获取结果并转换
  */
 void
 ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
 {
-    IvfflatBatchScanOpaque so;
-    int nbatch;
-    int dimensions;
-
-    int* predicted_cluster_sizes;
-    BlockNumber* cluster_start_pages;
-    float* cluster_centers_flat;
-    int n_total_clusters;
-    int n_total_vectors;
-
-    float* query_batch_flat;
-    ItemPointer global_tids;
-
-    float *d_query_batch, *d_cluster_vectors, *d_cluster_centers, *d_topk_dist;
-    int *d_cluster_size, *d_initial_indices, *d_topk_index;
-
-    so = (IvfflatBatchScanOpaque)scan->opaque;
-    nbatch = batch_keys->nkeys;
-    dimensions = so->dimensions;
+#ifdef USE_CUDA
+    IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
+    int nbatch = batch_keys->nkeys;
+    int dimensions = so->dimensions;
     so->batch_processing_complete = false;
     
     /* 重新创建 result_buffer */
@@ -294,204 +548,46 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
         }
     }
     
-    /* ========== 步骤1: 获取预估元数据 (用于分配内存) ========== */
-    predicted_cluster_sizes = NULL;  /* 预估值，用于内存分配 */
-    cluster_start_pages = NULL;
-    cluster_centers_flat = NULL;
-    n_total_clusters = 0;
-    n_total_vectors = 0;
-    
-    if (PrepareMetaInfoOnly(scan, &predicted_cluster_sizes, &cluster_start_pages, 
-                            &cluster_centers_flat, &n_total_clusters, &n_total_vectors) != 0) {
-        elog(ERROR, "ProcessBatchQueriesGPU: 元数据准备失败");
+    /* 1. 获取 GPU 索引 (复用或加载) */
+    GpuIndexCacheEntry *index_entry = GetOrLoadGpuIndex(scan);
+    if (!index_entry || index_entry->idx_handle == NULL) {
+        /* 错误已在内部记录 */
         return;
     }
     
-    if (n_total_clusters <= 0 || n_total_vectors <= 0) {
-        elog(ERROR, "ProcessBatchQueriesGPU: 无效的元数据 (n_total_clusters=%d, n_total_vectors=%d)",
-             n_total_clusters, n_total_vectors);
-        return;
-    }
-    
-    /* ========== 步骤2: 准备 query_batch (扁平化) ========== */
-    query_batch_flat = (float*)palloc(nbatch * dimensions * sizeof(float));
-    /* 正确提取向量数据：VectorBatch 中的向量是连续存储的，但每个向量包含 Vector 结构头 */
-    /* 需要逐个提取每个向量的 x[] 数组部分 */
+    /* 2. 准备 Query Data */
+    float* query_batch_flat = (float*)palloc(nbatch * dimensions * sizeof(float));
     for (int i = 0; i < nbatch; i++) {
         Datum vec_datum = ScanKeyBatchGetVector(batch_keys, i);
         Vector *vec = DatumGetVector(vec_datum);
         memcpy(query_batch_flat + i * dimensions, vec->x, dimensions * sizeof(float));
     }
     
+    /* 3. 创建临时 Batch Handle (每次查询独立) */
+    void* batch_handle = ivf_create_batch_context_wrapper(
+        nbatch, dimensions, so->maxProbes, k, 
+        index_entry->n_total_clusters
+    );
     
-    /* ========== 步骤3: CPU 端分配扁平的 TID 映射表 (不传 GPU) ========== */
-    /* 
-     * 注意：分配稍微多一点的内存以防万一 Pass 2 读到的比 Pass 1 多
-     * (虽然在没有并发插入的情况下不太可能，但为了安全)
-     */
-    int max_vectors = (int)(n_total_vectors * 1.1) + 1000;
-    global_tids = (ItemPointer)palloc0(max_vectors * sizeof(ItemPointerData));
-    
-    /* ========== 步骤3.5: 准备实际大小统计数组 (用于修正) ========== */
-    int* actual_cluster_sizes = (int*)palloc0(n_total_clusters * sizeof(int));
-    
-    /* GPU 内存指针 */
-    d_query_batch = NULL;
-    d_cluster_vectors = NULL;
-    d_cluster_centers = NULL;
-    d_topk_dist = NULL;
-    d_cluster_size = NULL;
-    d_initial_indices = NULL;
-    d_topk_index = NULL;
-    
-    /* 计算分配大小 */
-    size_t query_batch_size = (size_t)nbatch * dimensions * sizeof(float);
-    size_t cluster_size_size = (size_t)n_total_clusters * sizeof(int);
-    size_t cluster_vectors_size = (size_t)max_vectors * dimensions * sizeof(float);  /* 使用 max_vectors 安全 */
-    size_t cluster_centers_size = (size_t)n_total_clusters * dimensions * sizeof(float);
-    size_t initial_indices_size = (size_t)nbatch * n_total_clusters * sizeof(int);
-    size_t topk_dist_size = (size_t)nbatch * k * sizeof(float);
-    size_t topk_index_size = (size_t)nbatch * k * sizeof(int);
-    
-    /* ========== 步骤4: GPU 内存分配 ========== */
-    cuda_malloc((void**)&d_query_batch, query_batch_size);
-    cuda_malloc((void**)&d_cluster_size, cluster_size_size);
-    cuda_malloc((void**)&d_cluster_vectors, cluster_vectors_size);
-    cuda_malloc((void**)&d_cluster_centers, cluster_centers_size);
-    cuda_malloc((void**)&d_topk_dist, topk_dist_size);
-    cuda_malloc((void**)&d_initial_indices, initial_indices_size);
-    cuda_malloc((void**)&d_topk_index, topk_index_size);
-    
-    /* ========== 步骤5: CPU -> GPU 静态数据复制 ========== */
-    cuda_memcpy_h2d(d_query_batch, query_batch_flat, query_batch_size);
-    /* 注意：这里先不要复制 d_cluster_size，等读取完实际数据后再复制 */
-    cuda_memcpy_h2d(d_cluster_centers, cluster_centers_flat, cluster_centers_size);
-    
-    pfree(query_batch_flat);
-    pfree(cluster_centers_flat);
-    
-    /* ========== 步骤6: 流式读取向量数据并传输 (Gather Loop) ========== */
-    GpuPipelineContext pipeline_ctx;
-    /* 初始化双缓冲流水线 */
-    cuda_pipeline_init(&pipeline_ctx, dimensions, max_vectors, d_cluster_vectors);
-    
-    TupleDesc tupdesc = RelationGetDescr(scan->indexRelation);
-    int global_vec_idx = 0;
-    
-    for (int i = 0; i < n_total_clusters; i++) {
-        BlockNumber searchPage = cluster_start_pages[i];
-        int cluster_vec_count = 0;  /* 当前 Cluster 的实际计数器 */
-        
-        while (BlockNumberIsValid(searchPage)) {
-            Buffer buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, 
-                                          searchPage, RBM_NORMAL, NULL);
-            LockBuffer(buf, BUFFER_LOCK_SHARE);
-            Page page = BufferGetPage(buf);
-            OffsetNumber maxoffno = PageGetMaxOffsetNumber(page);
-            
-            for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno)) {
-                ItemId itemId = PageGetItemId(page, offno);
-                
-                /* 关键修正: 严谨检查 Item 是否可用 */
-                if (!ItemIdIsUsed(itemId)) continue;
-                
-                IndexTuple itup = (IndexTuple) PageGetItem(page, itemId);
-                if (!itup) continue;
-                
-                bool isnull = false;
-                Datum vector_datum = index_getattr(itup, 1, tupdesc, &isnull);
-                
-                if (!isnull) {
-                    /* 安全检查：防止溢出缓冲区 */
-                    if (global_vec_idx >= max_vectors) {
-                        /* 这种情况极少见，除非有大量并发插入 */
-                        elog(WARNING, "ProcessBatchQueriesGPU: Scan exceeded allocated buffer size, truncating.");
-                        break;
-                    }
-                    
-                    Vector *vec = DatumGetVector(vector_datum);
-                    
-                    /* === 双缓冲逻辑修改开始 === */
-                    
-                    /* 1. 获取当前活跃的 Buffer 指针 */
-                    int active_idx = pipeline_ctx.active_buf_idx;
-                    float* current_buffer = pipeline_ctx.h_vec_buffers[active_idx];
-                    
-                    /* 2. 计算在当前 Buffer 中的偏移量 */
-                    size_t buf_offset = pipeline_ctx.current_counts[active_idx] * dimensions;
-                    
-                    /* 3. 拷贝数据 */
-                    memcpy(current_buffer + buf_offset, vec->x, dimensions * sizeof(float));
-                    
-                    /* 4. 更新计数 */
-                    pipeline_ctx.current_counts[active_idx]++;
-                    
-                    /* 5. 缓冲区满？Flush! (这会自动切换 buffer 并等待) */
-                    if (pipeline_ctx.current_counts[active_idx] >= pipeline_ctx.chunk_capacity) {
-                        cuda_pipeline_flush_vectors_only(&pipeline_ctx);
-                    }
-                    /* === 双缓冲逻辑修改结束 === */
-                    
-                    /* 记录 TID */
-                    global_tids[global_vec_idx] = itup->t_tid;
-                    
-                    global_vec_idx++;
-                    cluster_vec_count++;
-                }
-            }
-            searchPage = IvfflatPageGetOpaque(page)->nextblkno;
-            UnlockReleaseBuffer(buf);
-        }
-        
-        /* 记录该 Cluster 的实际大小 */
-        actual_cluster_sizes[i] = cluster_vec_count;
-    }
-    
-    /* 刷新剩余数据 */
-    cuda_pipeline_flush_vectors_only(&pipeline_ctx);
-    /* 清理 */
-    cuda_pipeline_free(&pipeline_ctx);
-    
-    /* ========== 关键步骤6.5: 将实际统计的 Cluster Size 传给 GPU ========== */
-    /* 
-     * 如果这里不更新，GPU 依然使用 Pass 1 的 predicted_sizes 来计算偏移，
-     * 一旦有偏差，后续所有 Cluster 的读取都会错位。
-     */
-    cuda_memcpy_h2d(d_cluster_size, actual_cluster_sizes, cluster_size_size);
-
-    /* ========== 步骤7: 初始化 d_initial_indices (Coarse-Quantization Optimization) ========== */
-    int* initial_indices_host = (int*)palloc(nbatch * n_total_clusters * sizeof(int));
-    for (int query_idx = 0; query_idx < nbatch; query_idx++) {
-        for (int cluster_idx = 0; cluster_idx < n_total_clusters; cluster_idx++) {
-            initial_indices_host[query_idx * n_total_clusters + cluster_idx] = cluster_idx;
-        }
-    }
-    cuda_memcpy_h2d(d_initial_indices, initial_indices_host, nbatch * n_total_clusters * sizeof(int));
-    pfree(initial_indices_host);
-
-    /* ========== 步骤8: 调用 GPU Kernel ========== */
-
-    /* 传递 total_vectors 应为实际读取的数量 */
-    int result = batch_search_pipeline_wrapper(d_query_batch, d_cluster_size, d_cluster_vectors,
-                                                d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index,
-                                                nbatch, dimensions, n_total_clusters,
-                                                global_vec_idx /* 使用实际总数 */, so->probes, k);
-    
-    if (result != 0) {
-        elog(ERROR, "ProcessBatchQueriesGPU: Kernel 执行失败 (Error: %d)", result);
-        cuda_cleanup_memory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                        d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
+    if (!batch_handle) {
+        pfree(query_batch_flat);
+        elog(ERROR, "ProcessBatchQueriesGPU: 无法创建 GPU Batch Handle");
         return;
     }
-
-    /* ========== 步骤9: GPU -> CPU 结果回传 ========== */
+    
+    /* 4. 执行 Pipeline */
+    ivf_pipeline_stage1_prepare_wrapper(batch_handle, query_batch_flat, nbatch);
+    
+    ivf_pipeline_stage2_compute_wrapper(batch_handle, index_entry->idx_handle, 
+                                        nbatch, so->probes, k);
+    
+    /* 5. 获取结果 */
     float* topk_dist_flat = (float*)palloc(nbatch * k * sizeof(float));
     int* topk_index_flat = (int*)palloc(nbatch * k * sizeof(int));
     
-    cuda_memcpy_d2h(topk_dist_flat, d_topk_dist, nbatch * k * sizeof(float));
-    cuda_memcpy_d2h(topk_index_flat, d_topk_index, nbatch * k * sizeof(int)); 
-
-    /* 组织为二维指针数组 (兼容旧接口) */
+    ivf_pipeline_get_results_wrapper(batch_handle, topk_dist_flat, topk_index_flat, nbatch, k);
+    
+    /* 指针数组转换 */
     float** topk_dist = (float**)palloc(nbatch * sizeof(float*));
     int** topk_index = (int**)palloc(nbatch * sizeof(int*));
     for (int i = 0; i < nbatch; i++) {
@@ -499,20 +595,27 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
         topk_index[i] = topk_index_flat + i * k;
     }
     
-    /* ========== 步骤10: 转换结果 (延迟回表) ========== */
+    /* 6. 结果转换 (ID Mapping) */
     so->result_buffer = CreateBatchBuffer(nbatch, k, dimensions, CurrentMemoryContext);
     
     ConvertBatchPipelineResults(scan, topk_dist, topk_index, nbatch, k,
-                                so->result_buffer, global_tids, global_vec_idx, scan->indexRelation);
+                                so->result_buffer, 
+                                index_entry->global_tids, /* 使用缓存的 TID 表 */
+                                index_entry->n_total_vectors, 
+                                scan->indexRelation);
     
-    /* ========== 清理资源 ========== */
-    pfree(global_tids);
-    pfree(actual_cluster_sizes);
-    pfree(predicted_cluster_sizes);
-    pfree(cluster_start_pages);
+    /* 7. 资源清理 (只清理 Batch 相关的，保留 Index 相关的) */
+    ivf_destroy_batch_context_wrapper(batch_handle);
+    /* 注意：千万不要调用 ivf_destroy_index_context_wrapper(index_entry->idx_handle) */
     
-    cuda_cleanup_memory(d_query_batch, d_cluster_size, d_cluster_vectors,
-                    d_cluster_centers, d_initial_indices, d_topk_dist, d_topk_index);
+    pfree(query_batch_flat);
+    pfree(topk_dist_flat);
+    pfree(topk_index_flat);
+    pfree(topk_dist);
+    pfree(topk_index);
+#else
+    elog(ERROR, "ProcessBatchQueriesGPU: CUDA support not compiled");
+#endif /* USE_CUDA */
 }
 
 
@@ -520,7 +623,14 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
 /*                              元数据准备函数                                */
 /* ========================================================================= */
 
-/* 简化的元数据准备：只统计数量，不读向量数据 */
+/* ========================================================================= */
+/*                              元数据准备函数 (优化版)                        */
+/* ========================================================================= */
+
+/* 
+ * 优化 1: 消除双重扫描
+ * 只读取 Meta Pages 获取聚类中心和起始页，绝对不遍历数据页链表。
+ */
 static int
 PrepareMetaInfoOnly(IndexScanDesc scan,
                     int** cluster_size_out,
@@ -530,19 +640,20 @@ PrepareMetaInfoOnly(IndexScanDesc scan,
                     int* n_total_vectors_out)
 {
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
-    TupleDesc tupdesc = RelationGetDescr(scan->indexRelation);
+    /* 不需要 tupdesc，因为我们直接读取结构体 */
     int totalLists = 0;
+    int dimensions = so->dimensions;
+
+    /* 获取总列表数 */
     IvfflatGetMetaPageInfo(scan->indexRelation, &totalLists, NULL);
     
     if (totalLists <= 0) return -1;
     
-    int dimensions = so->dimensions;
-    
     /* 分配输出数组 */
-    int* cluster_sizes = (int*)palloc0(totalLists * sizeof(int));
     BlockNumber* cluster_start_pages = (BlockNumber*)palloc(totalLists * sizeof(BlockNumber));
+    float* cluster_centers_flat = (float*)palloc(totalLists * dimensions * sizeof(float));
     
-    /* 1. 遍历 Meta Pages 获取 Cluster 起始页 */
+    /* 遍历 Meta Pages (存储聚类中心列表的页面) */
     BlockNumber nextblkno = IVFFLAT_HEAD_BLKNO;
     int center_idx = 0;
     
@@ -556,100 +667,90 @@ PrepareMetaInfoOnly(IndexScanDesc scan,
         for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno))
         {
             if (center_idx >= totalLists) break;
-            IvfflatList list = (IvfflatList) PageGetItem(cpage, PageGetItemId(cpage, offno));
+            
+            ItemId itemId = PageGetItemId(cpage, offno);
+            if (!ItemIdIsUsed(itemId)) continue;
+            
+            /* 【修复点】: 这里是 IvfflatList 结构体，不是 IndexTuple */
+            IvfflatList list = (IvfflatList) PageGetItem(cpage, itemId);
+            
+            /* 直接从结构体获取起始页 */
             cluster_start_pages[center_idx] = list->startPage;
+            
+            /* 直接从结构体获取聚类中心向量 */
+            /* IvfflatList 结构体定义中包含 Vector center; 它是变长的，但在内存中是连续的 */
+            Vector *center_vec = &list->center;
+            
+            /* 注意：这里不需要 index_getattr，因为不是 Tuple */
+            memcpy(cluster_centers_flat + center_idx * dimensions, 
+                   center_vec->x, dimensions * sizeof(float));
+            
             center_idx++;
         }
         nextblkno = IvfflatPageGetOpaque(cpage)->nextblkno;
         UnlockReleaseBuffer(cbuf);
     }
     
-    /* 2. 统计每个 cluster 的向量数量 */
-    int total_vectors = 0;
-    for (int i = 0; i < totalLists; i++) {
-        BlockNumber searchPage = cluster_start_pages[i];
-        while (BlockNumberIsValid(searchPage)) {
-            Buffer buf = ReadBufferExtended(scan->indexRelation, MAIN_FORKNUM, 
-                                          searchPage, RBM_NORMAL, NULL);
-            LockBuffer(buf, BUFFER_LOCK_SHARE);
-            Page page = BufferGetPage(buf);
-            OffsetNumber maxoffno = PageGetMaxOffsetNumber(page);
-            
-            for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno)) {
-                ItemId itemId = PageGetItemId(page, offno);
-                /* 关键修正: 严谨检查 Item 是否可用 */
-                if (!ItemIdIsUsed(itemId)) continue;
-                IndexTuple itup = (IndexTuple) PageGetItem(page, itemId);
-                if (!itup) continue;
-                
-                /* 这里只检查 Datum 是否存在，不解压 Vector，速度较快 */
-                bool isnull = false;
-                index_getattr(itup, 1, tupdesc, &isnull);
-                if (!isnull) {
-                    cluster_sizes[i]++;
-                    total_vectors++;
-                }
-            }
-            searchPage = IvfflatPageGetOpaque(page)->nextblkno;
-            UnlockReleaseBuffer(buf);
-        }
-    }
-    
-    /* 3. 获取 Cluster Centers (扁平化) */
-    float* cluster_centers_flat = (float*)palloc(totalLists * dimensions * sizeof(float));
-    nextblkno = IVFFLAT_HEAD_BLKNO;
-    center_idx = 0;
-    
-    while (BlockNumberIsValid(nextblkno))
-    {
-        Buffer cbuf = ReadBuffer(scan->indexRelation, nextblkno);
-        LockBuffer(cbuf, BUFFER_LOCK_SHARE);
-        Page cpage = BufferGetPage(cbuf);
-        OffsetNumber maxoffno = PageGetMaxOffsetNumber(cpage);
-
-        for (OffsetNumber offno = FirstOffsetNumber; offno <= maxoffno; offno = OffsetNumberNext(offno))
-        {
-            if (center_idx >= totalLists) break;
-            IndexTuple itup = (IndexTuple) PageGetItem(cpage, PageGetItemId(cpage, offno));
-            bool isnull = false;
-            Datum center_datum = index_getattr(itup, 1, tupdesc, &isnull);
-            
-            if (!isnull) {
-                Vector *center_vec = DatumGetVector(center_datum);
-                memcpy(cluster_centers_flat + center_idx * dimensions, 
-                       center_vec->x, dimensions * sizeof(float));
-            }
-            center_idx++;
-        }
-        nextblkno = IvfflatPageGetOpaque(cpage)->nextblkno;
-        UnlockReleaseBuffer(cbuf);
-    }
-    
-    *cluster_size_out = cluster_sizes;
+    *cluster_size_out = NULL;
     *cluster_pages_out = cluster_start_pages;
     *cluster_centers_flat_out = cluster_centers_flat;
-    *n_total_clusters_out = totalLists;
-    *n_total_vectors_out = total_vectors;
+    *n_total_clusters_out = center_idx;
+    *n_total_vectors_out = 0;
     
     return 0;
 }
 
 /* ========================================================================= */
-/*                              结果转换函数 (延迟回表)                        */
+/*                              结果转换函数 (优化版：TID 排序回表)            */
 /* ========================================================================= */
+
+#ifdef USE_CUDA
+
+/* 用于回表排序的辅助结构 */
+typedef struct HeapFetchRequest {
+    ItemPointerData tid;
+    int32   query_idx;
+    int32   k_idx;
+    float   distance;
+    int32   original_index; /* 保持稳定排序或调试用 */
+} HeapFetchRequest;
+
+/* qsort 比较函数：按 BlockNumber 升序，OffNumber 升序 */
+static int
+compare_fetch_requests(const void *a, const void *b)
+{
+    const HeapFetchRequest *ra = (const HeapFetchRequest *)a;
+    const HeapFetchRequest *rb = (const HeapFetchRequest *)b;
+    
+    BlockNumber ba = ItemPointerGetBlockNumber(&ra->tid);
+    BlockNumber bb = ItemPointerGetBlockNumber(&rb->tid);
+    
+    if (ba < bb) return -1;
+    if (ba > bb) return 1;
+    
+    OffsetNumber oa = ItemPointerGetOffsetNumber(&ra->tid);
+    OffsetNumber ob = ItemPointerGetOffsetNumber(&rb->tid);
+    
+    if (oa < ob) return -1;
+    if (oa > ob) return 1;
+    
+    return 0;
+}
+
+#endif /* USE_CUDA */
 
 static void
 ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_index,
                             int n_query, int k, BatchBuffer* result_buffer,
                             ItemPointer global_tids, int n_total_vectors, Relation indexRelation)
 {
-    /* 打开堆表（只在这里打开一次） */
+    /* 1. 准备堆表访问 */
     Oid heapRelid = IndexGetRelation(RelationGetRelid(indexRelation), false);
     Relation heapRelation = table_open(heapRelid, AccessShareLock);
     TupleDesc heapDesc = RelationGetDescr(heapRelation);
     Snapshot snapshot = GetActiveSnapshot();
     
-    /* 查找 ID 列 */
+    /* 查找 ID 列 (假设用户需要 id 列作为 payload) */
     int id_attnum = -1;
     for (int i = 1; i <= heapDesc->natts; i++) {
         Form_pg_attribute attr = TupleDescAttr(heapDesc, i - 1);
@@ -659,64 +760,86 @@ ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_in
         }
     }
     
-    /* 初始化 buffer */
-    int buffer_size = result_buffer->n_queries * result_buffer->k;
-    memset(result_buffer->query_ids, -1, buffer_size * sizeof(int));
-    memset(result_buffer->global_vector_indices, -1, buffer_size * sizeof(int));
-    memset(result_buffer->distances, 0, buffer_size * sizeof(float));
+#ifdef USE_CUDA
+    int total_items = n_query * k;
+    int valid_items_count = 0;
     
-    /* 填充结果 */
-    for (int query_idx = 0; query_idx < n_query; query_idx++) {
+    /* 2. 收集所有有效的 Fetch 请求 */
+    /* 我们在 Stack 上或者 palloc 一个临时数组来存请求，避免多次 palloc */
+    HeapFetchRequest *requests = (HeapFetchRequest *)palloc(total_items * sizeof(HeapFetchRequest));
+    
+    /* 初始化 result_buffer 为默认值 (NULLs) */
+    memset(result_buffer->query_ids, -1, total_items * sizeof(int));
+    memset(result_buffer->global_vector_indices, -1, total_items * sizeof(int));
+    memset(result_buffer->distances, 0, total_items * sizeof(float));
+    
+    for (int q = 0; q < n_query; q++) {
         for (int i = 0; i < k; i++) {
-            int buffer_idx = query_idx * k + i;
-            int vec_idx = topk_index[query_idx][i];
+            int vec_idx = topk_index[q][i];
+            int buffer_idx = q * k + i;
             
-            /* 增加对 vec_idx 的有效性检查 */
-            if (vec_idx < 0) {
-                result_buffer->query_ids[buffer_idx] = query_idx;
-                ItemPointerSetInvalid(&result_buffer->vector_ids[buffer_idx]);
-                result_buffer->distances[buffer_idx] = INFINITY;
-                continue;
-            }
+            /* 设置默认值 */
+            result_buffer->query_ids[buffer_idx] = q;
+            ItemPointerSetInvalid(&result_buffer->vector_ids[buffer_idx]);
+            result_buffer->distances[buffer_idx] = (vec_idx < 0) ? INFINITY : topk_dist[q][i];
             
-            /* 边界检查：确保 vec_idx 在有效范围内 */
-            if (vec_idx >= n_total_vectors) {
-                elog(WARNING, "ConvertBatchPipelineResults: vec_idx %d >= n_total_vectors %d, skipping", 
-                     vec_idx, n_total_vectors);
-                result_buffer->query_ids[buffer_idx] = query_idx;
-                ItemPointerSetInvalid(&result_buffer->vector_ids[buffer_idx]);
-                result_buffer->distances[buffer_idx] = INFINITY;
-                continue;
-            }
+            /* 过滤无效结果 */
+            if (vec_idx < 0 || vec_idx >= n_total_vectors) continue;
             
-            /* 1. 从 CPU 数组获取 TID */
-            /* 这里的 global_tids 现在和 GPU 的 d_cluster_vectors 是严格对应的 */
+            /* 构造请求 */
             ItemPointer tid = &global_tids[vec_idx];
             
-            /* 调试日志：如果发现结果还是不对，可以打开这个查看 TID 是否合理 */
-            /* elog(LOG, "Query %d Top %d: FlatIdx %d -> TID (%u, %u)", 
-                 query_idx, i, vec_idx, 
-                 ItemPointerGetBlockNumber(tid), ItemPointerGetOffsetNumber(tid)); */
-            result_buffer->query_ids[buffer_idx] = query_idx;
-            result_buffer->vector_ids[buffer_idx] = *tid;
-            result_buffer->distances[buffer_idx] = topk_dist[query_idx][i];
+            /* 这里可以做一个简单的可见性检查预判（可选），但主要依靠 heap_fetch */
             
-            /* 2. 延迟回表：只对 Top-K 结果执行 heap_fetch */
-            int32_t row_id = -1;
-            if (id_attnum > 0) {
-                Buffer buffer;
-                HeapTupleData tuple;
-                tuple.t_self = *tid;
-                if (heap_fetch(heapRelation, snapshot, &tuple, &buffer, false)) {
-                    bool isnull;
-                    Datum d = heap_getattr(&tuple, id_attnum, heapDesc, &isnull);
-                    if (!isnull) row_id = DatumGetInt32(d);
-                    ReleaseBuffer(buffer);
-                }
-            }
-            result_buffer->global_vector_indices[buffer_idx] = row_id;
+            requests[valid_items_count].tid = *tid;
+            requests[valid_items_count].query_idx = q;
+            requests[valid_items_count].k_idx = i;
+            requests[valid_items_count].distance = topk_dist[q][i];
+            requests[valid_items_count].original_index = buffer_idx;
+            valid_items_count++;
         }
     }
     
+    /* 3. 关键步骤：对 TID 进行排序 */
+    /* 这会将访问同一 Page 的请求聚在一起，并使磁盘访问顺序化 */
+    if (valid_items_count > 0) {
+        qsort(requests, valid_items_count, sizeof(HeapFetchRequest), compare_fetch_requests);
+    }
+    
+    /* 4. 按顺序执行回表 */
+    for (int i = 0; i < valid_items_count; i++) {
+        HeapFetchRequest *req = &requests[i];
+        int buffer_dest_idx = req->query_idx * k + req->k_idx; /* 原始结果集中的位置 */
+        
+        /* 填充结果集中的 TID 和 Distance (这些不需要回表) */
+        result_buffer->vector_ids[buffer_dest_idx] = req->tid;
+        /* distances 已经在初始化时填了，这里可以不填 */
+        
+        int32_t row_id = -1;
+        
+        /* 只有当我们需要获取 payload (id列) 时才真正回表 */
+        if (id_attnum > 0) {
+            HeapTupleData tuple;
+            tuple.t_self = req->tid;
+            
+            /* 优化：Buffer Access Strategy 也可以在这里用，但 heap_fetch 内部封装较深，
+               这里主要依靠 OS Page Cache 和 PG Buffer Pool 的命中率提升 */
+            
+            Buffer buf;
+            if (heap_fetch(heapRelation, snapshot, &tuple, &buf, false)) {
+                bool isnull;
+                Datum d = heap_getattr(&tuple, id_attnum, heapDesc, &isnull);
+                if (!isnull) row_id = DatumGetInt32(d);
+                ReleaseBuffer(buf);
+            }
+        }
+        
+        result_buffer->global_vector_indices[buffer_dest_idx] = row_id;
+    }
+    
+    pfree(requests);
+#else
+    elog(ERROR, "ConvertBatchPipelineResults: CUDA support required");
+#endif
     table_close(heapRelation, AccessShareLock);
 }

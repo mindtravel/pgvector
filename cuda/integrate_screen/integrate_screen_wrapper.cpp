@@ -76,5 +76,282 @@ int batch_search_pipeline_wrapper(float* d_query_batch,
         return -1;
     }
 }
+
+/* 
+ * 分离流水线函数的 C wrapper
+ * 这些函数从 C 代码调用，处理 C++ 异常
+ */
+
+void* ivf_create_index_context_wrapper(void) {
+    try {
+        return ivf_create_index_context();
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_create_index_context_wrapper: 异常 - %s\n", e.what());
+        return nullptr;
+    } catch (...) {
+        fprintf(stderr, "ivf_create_index_context_wrapper: 未知异常\n");
+        return nullptr;
+    }
+}
+
+void ivf_destroy_index_context_wrapper(void* ctx_ptr) {
+    try {
+        ivf_destroy_index_context(ctx_ptr);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_destroy_index_context_wrapper: 异常 - %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "ivf_destroy_index_context_wrapper: 未知异常\n");
+    }
+}
+
+int ivf_load_dataset_wrapper(
+    void* idx_ctx_ptr,
+    int* d_cluster_size,
+    float* d_cluster_vectors,
+    float* d_cluster_centers,
+    int n_total_clusters,
+    int n_total_vectors,
+    int n_dim
+) {
+    try {
+        return ivf_load_dataset(idx_ctx_ptr, d_cluster_size, d_cluster_vectors, d_cluster_centers,
+                               n_total_clusters, n_total_vectors, n_dim);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_load_dataset_wrapper: 异常 - %s\n", e.what());
+        return -1;
+    } catch (...) {
+        fprintf(stderr, "ivf_load_dataset_wrapper: 未知异常\n");
+        return -1;
+    }
+}
+
+void* ivf_create_batch_context_wrapper(int max_n_query, int n_dim, int max_n_probes, int max_k, int n_total_clusters) {
+    try {
+        return ivf_create_batch_context(max_n_query, n_dim, max_n_probes, max_k, n_total_clusters);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_create_batch_context_wrapper: 异常 - %s\n", e.what());
+        return nullptr;
+    } catch (...) {
+        fprintf(stderr, "ivf_create_batch_context_wrapper: 未知异常\n");
+        return nullptr;
+    }
+}
+
+void ivf_destroy_batch_context_wrapper(void* ctx_ptr) {
+    try {
+        ivf_destroy_batch_context(ctx_ptr);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_destroy_batch_context_wrapper: 异常 - %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "ivf_destroy_batch_context_wrapper: 未知异常\n");
+    }
+}
+
+void ivf_pipeline_stage1_prepare_wrapper(
+    void* batch_ctx_ptr,
+    float* query_batch_host,
+    int n_query
+) {
+    try {
+        ivf_pipeline_stage1_prepare(batch_ctx_ptr, query_batch_host, n_query);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_pipeline_stage1_prepare_wrapper: 异常 - %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "ivf_pipeline_stage1_prepare_wrapper: 未知异常\n");
+    }
+}
+
+void ivf_pipeline_stage2_compute_wrapper(
+    void* batch_ctx_ptr,
+    void* idx_ctx_ptr,
+    int n_query,
+    int n_probes,
+    int k
+) {
+    try {
+        ivf_pipeline_stage2_compute(batch_ctx_ptr, idx_ctx_ptr, n_query, n_probes, k);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: 异常 - %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: 未知异常\n");
+    }
+}
+
+void ivf_pipeline_get_results_wrapper(
+    void* batch_ctx_ptr,
+    float* topk_dist,
+    int* topk_index,
+    int n_query,
+    int k
+) {
+    try {
+        ivf_pipeline_get_results(batch_ctx_ptr, topk_dist, topk_index, n_query, k);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_pipeline_get_results_wrapper: 异常 - %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "ivf_pipeline_get_results_wrapper: 未知异常\n");
+    }
+}
+
+void ivf_pipeline_sync_batch_wrapper(void* batch_ctx_ptr) {
+    try {
+        ivf_pipeline_sync_batch(batch_ctx_ptr);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_pipeline_sync_batch_wrapper: 异常 - %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "ivf_pipeline_sync_batch_wrapper: 未知异常\n");
+    }
+}
+
+/* 流式上传函数的 C wrapper */
+void ivf_init_streaming_upload_wrapper(
+    void* idx_ctx_ptr,
+    int n_total_clusters,
+    int n_total_vectors,
+    int n_dim
+) {
+    try {
+        ivf_init_streaming_upload(idx_ctx_ptr, n_total_clusters, n_total_vectors, n_dim);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_init_streaming_upload_wrapper: 异常 - %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "ivf_init_streaming_upload_wrapper: 未知异常\n");
+    }
+}
+
+void ivf_append_cluster_data_wrapper(
+    void* idx_ctx_ptr,
+    int cluster_id,
+    float* host_vector_data,
+    int count,
+    int start_offset_idx
+) {
+    try {
+        ivf_append_cluster_data(idx_ctx_ptr, cluster_id, host_vector_data, count, start_offset_idx);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_append_cluster_data_wrapper: 异常 - %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "ivf_append_cluster_data_wrapper: 未知异常\n");
+    }
+}
+
+void ivf_finalize_streaming_upload_wrapper(
+    void* idx_ctx_ptr,
+    float* center_data_flat,
+    int total_vectors_check
+) {
+    try {
+        ivf_finalize_streaming_upload(idx_ctx_ptr, center_data_flat, total_vectors_check);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ivf_finalize_streaming_upload_wrapper: 异常 - %s\n", e.what());
+    } catch (...) {
+        fprintf(stderr, "ivf_finalize_streaming_upload_wrapper: 未知异常\n");
+    }
+}
+
+/* ========================================================================= */
+/*                              索引句柄注册表                                */
+/* ========================================================================= */
+
+/* 简单的注册表实现（进程内，Session级别） */
+#define MAX_GPU_INDICES 64
+
+typedef struct {
+    unsigned int index_oid;  /* Oid 类型在 C++ 中通常映射为 unsigned int */
+    void* handle;
+    bool active;
+} GpuIndexEntry;
+
+static GpuIndexEntry g_gpu_indices[MAX_GPU_INDICES] = {0};
+static int g_gpu_indices_count = 0;
+
+/**
+ * 注册索引实例到全局注册表
+ * 
+ * @param index_oid 索引的 OID
+ * @param gpu_handle GPU 句柄
+ */
+void ivf_register_index_instance(unsigned int index_oid, void* gpu_handle) {
+    if (gpu_handle == NULL) {
+        fprintf(stderr, "ivf_register_index_instance: gpu_handle 为 NULL\n");
+        return;
+    }
+    
+    /* 查找是否已存在该 OID 的条目 */
+    for (int i = 0; i < g_gpu_indices_count; i++) {
+        if (g_gpu_indices[i].active && g_gpu_indices[i].index_oid == index_oid) {
+            /* 如果已存在，先释放旧的句柄 */
+            if (g_gpu_indices[i].handle != NULL) {
+                ivf_destroy_index_context_wrapper(g_gpu_indices[i].handle);
+            }
+            g_gpu_indices[i].handle = gpu_handle;
+            fprintf(stderr, "ivf_register_index_instance: 更新索引 OID %u 的句柄\n", index_oid);
+            return;
+        }
+    }
+    
+    /* 查找空位或添加新条目 */
+    if (g_gpu_indices_count < MAX_GPU_INDICES) {
+        g_gpu_indices[g_gpu_indices_count].index_oid = index_oid;
+        g_gpu_indices[g_gpu_indices_count].handle = gpu_handle;
+        g_gpu_indices[g_gpu_indices_count].active = true;
+        g_gpu_indices_count++;
+        fprintf(stderr, "ivf_register_index_instance: 注册索引 OID %u，当前注册数: %d\n", index_oid, g_gpu_indices_count);
+    } else {
+        /* 查找是否有非活跃的条目可以重用 */
+        for (int i = 0; i < MAX_GPU_INDICES; i++) {
+            if (!g_gpu_indices[i].active) {
+                g_gpu_indices[i].index_oid = index_oid;
+                g_gpu_indices[i].handle = gpu_handle;
+                g_gpu_indices[i].active = true;
+                fprintf(stderr, "ivf_register_index_instance: 重用槽位 %d 注册索引 OID %u\n", i, index_oid);
+                return;
+            }
+        }
+        fprintf(stderr, "ivf_register_index_instance: 错误 - 注册表已满（最大 %d 个索引）\n", MAX_GPU_INDICES);
+    }
+}
+
+/**
+ * 根据索引 OID 获取 GPU 句柄
+ * 
+ * @param index_oid 索引的 OID
+ * @return GPU 句柄，如果不存在则返回 NULL
+ */
+void* ivf_get_index_instance(unsigned int index_oid) {
+    for (int i = 0; i < g_gpu_indices_count; i++) {
+        if (g_gpu_indices[i].active && g_gpu_indices[i].index_oid == index_oid) {
+            return g_gpu_indices[i].handle;
+        }
+    }
+    
+    /* 也检查所有槽位（包括非活跃的，以防 count 不准确） */
+    for (int i = 0; i < MAX_GPU_INDICES; i++) {
+        if (g_gpu_indices[i].active && g_gpu_indices[i].index_oid == index_oid) {
+            return g_gpu_indices[i].handle;
+        }
+    }
+    
+    return NULL;
+}
+
+/**
+ * 注销索引实例（可选，用于清理）
+ * 
+ * @param index_oid 索引的 OID
+ */
+void ivf_unregister_index_instance(unsigned int index_oid) {
+    for (int i = 0; i < MAX_GPU_INDICES; i++) {
+        if (g_gpu_indices[i].active && g_gpu_indices[i].index_oid == index_oid) {
+            if (g_gpu_indices[i].handle != NULL) {
+                ivf_destroy_index_context_wrapper(g_gpu_indices[i].handle);
+            }
+            g_gpu_indices[i].active = false;
+            g_gpu_indices[i].handle = NULL;
+            fprintf(stderr, "ivf_unregister_index_instance: 注销索引 OID %u\n", index_oid);
+            return;
+        }
+    }
+}
 }
 

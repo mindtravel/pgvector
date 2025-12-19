@@ -759,9 +759,3 @@ void batch_search_pipeline(float** query_batch,
     
     CHECK_CUDA_ERRORS;
 }
-
-void run_integrate_pipeline() {
-    // TODO: 后续补充粗筛 + 精筛整体调度
-    cudaDeviceSynchronize();
-    CHECK_CUDA_ERRORS;
-}
