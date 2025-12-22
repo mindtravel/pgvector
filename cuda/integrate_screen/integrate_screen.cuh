@@ -48,6 +48,7 @@ void cleanup_persistent_data();
  * @param n_total_vectors       向量总数
  * @param n_probes              每个 query 精筛的 cluster 数
  * @param k                     top-k 数量
+ * @param distance_mode         距离选项
  */
 void batch_search_pipeline(
     float* d_query_batch,
@@ -162,7 +163,8 @@ extern "C" void ivf_pipeline_stage2_compute(
     void* idx_ctx_ptr,
     int n_query,
     int n_probes,
-    int k
+    int k,
+    int distance_mode
 );
 
 /**

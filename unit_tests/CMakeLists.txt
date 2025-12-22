@@ -188,7 +188,8 @@ target_link_libraries(fusion_dist_topk_warpsort_lib
 # 
 # 包含的文件：
 #   - integrate_screen.cu: 主实现文件（包含batch_search_pipeline函数）
-#   - fusion_cos_topk_warpsort.cu: 粗筛实现（integrate_screen.cu的Step 1需要）
+#   - fusion_cos_topk_warpsort.cu: 粗筛实现（cosine距离版本）
+#   - fusion_l2_topk_warpsort.cu: 粗筛实现（L2距离版本，integrate_screen.cu需要）
 #   - warpsort_topk.cu: warp-level top-k选择（integrate_screen.cu需要select_k）
 # 
 # 注意：
@@ -198,6 +199,7 @@ target_link_libraries(fusion_dist_topk_warpsort_lib
 add_library(integrate_screen_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_dist_topk/fusion_cos_topk_warpsort.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_dist_topk/fusion_l2_topk_warpsort.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
 )
 target_include_directories(integrate_screen_lib PUBLIC
@@ -222,13 +224,17 @@ target_link_libraries(integrate_screen_lib
 #   - test_integrated_coarse_fine_pipeline (测试流水线版本)
 # 
 # 包含的文件：
-#   - integrate_screen_pipeline.cu: 流水线版本实现（包含batch_search_pipeline函数）
-#   - fusion_cos_topk_warpsort.cu: 粗筛实现（integrate_screen_pipeline.cu的Step 1需要）
+#   - integrate_screen.cu: 主实现文件（包含batch_search_pipeline函数，接受float*参数）
+#   - integrate_screen_pipeline.cu: 流水线版本实现（包含batch_search_pipeline函数，接受float**参数）
+#   - fusion_cos_topk_warpsort.cu: 粗筛实现（cosine距离版本）
+#   - fusion_l2_topk_warpsort.cu: 粗筛实现（L2距离版本，integrate_screen.cu和integrate_screen_pipeline.cu需要）
 #   - warpsort_topk.cu: warp-level top-k选择（integrate_screen_pipeline.cu需要select_k）
 
 add_library(integrate_screen_pipeline_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen_pipeline.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_dist_topk/fusion_cos_topk_warpsort.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_dist_topk/fusion_l2_topk_warpsort.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
 )
 target_include_directories(integrate_screen_pipeline_lib PUBLIC

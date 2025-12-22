@@ -422,10 +422,59 @@ void ivf_pipeline_stage2_compute(
     void* idx_ctx_ptr,
     int n_query,
     int n_probes,
-    int k
+    int k,
+    int distance_mode
 ) {
+    /* 安全检查：空指针检查 */
+    if (!batch_ctx_ptr) {
+        throw std::invalid_argument("ivf_pipeline_stage2_compute: batch_ctx_ptr is NULL");
+    }
+    if (!idx_ctx_ptr) {
+        throw std::invalid_argument("ivf_pipeline_stage2_compute: idx_ctx_ptr is NULL");
+    }
+    
     IVFQueryBatchContext* q_ctx = (IVFQueryBatchContext*)batch_ctx_ptr;
     IVFIndexContext* idx_ctx = (IVFIndexContext*)idx_ctx_ptr;
+    
+    /* 安全检查：索引上下文初始化状态 */
+    if (!idx_ctx->is_initialized) {
+        throw std::runtime_error("ivf_pipeline_stage2_compute: 索引上下文未初始化 (is_initialized=false)");
+    }
+    
+    /* 安全检查：关键 GPU 内存指针 */
+    if (!idx_ctx->d_cluster_centers) {
+        throw std::runtime_error("ivf_pipeline_stage2_compute: d_cluster_centers is NULL");
+    }
+    if (!idx_ctx->d_cluster_centers_norm) {
+        throw std::runtime_error("ivf_pipeline_stage2_compute: d_cluster_centers_norm is NULL");
+    }
+    if (!idx_ctx->d_cluster_vectors) {
+        throw std::runtime_error("ivf_pipeline_stage2_compute: d_cluster_vectors is NULL");
+    }
+    if (!idx_ctx->d_cluster_vector_norm) {
+        throw std::runtime_error("ivf_pipeline_stage2_compute: d_cluster_vector_norm is NULL");
+    }
+    if (!idx_ctx->d_probe_vector_offset) {
+        throw std::runtime_error("ivf_pipeline_stage2_compute: d_probe_vector_offset is NULL");
+    }
+    if (!idx_ctx->d_probe_vector_count) {
+        throw std::runtime_error("ivf_pipeline_stage2_compute: d_probe_vector_count is NULL");
+    }
+    
+    /* 安全检查：参数有效性 */
+    if (idx_ctx->n_total_clusters <= 0) {
+        throw std::invalid_argument("ivf_pipeline_stage2_compute: n_total_clusters <= 0");
+    }
+    if (idx_ctx->n_dim <= 0) {
+        throw std::invalid_argument("ivf_pipeline_stage2_compute: n_dim <= 0");
+    }
+    if (n_probes > idx_ctx->n_total_clusters) {
+        throw std::invalid_argument("ivf_pipeline_stage2_compute: n_probes > n_total_clusters");
+    }
+    
+    /* 检查 CUDA 错误状态 */
+    CHECK_CUDA_ERRORS;
+    
     cudaStream_t stream = get_stream(q_ctx);
     
     // ---------------- Coarse Search ----------------
@@ -536,37 +585,73 @@ void ivf_pipeline_stage2_compute(
         dim3 block(kQueriesPerBlock * 32);
         
         // 根据capacity选择kernel实例
-        if (capacity <= 32) {
-            launch_indexed_inner_product_with_cos_topk_kernel<64, true, kQueriesPerBlock>(
-                block, idx_ctx->n_dim, q_ctx->d_queries,
-                idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
-                q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
-                q_ctx->d_entry_queries, q_ctx->d_entry_probe_indices,
-                q_ctx->d_query_norm, idx_ctx->d_cluster_vector_norm,
-                n_entry, n_probes, k,
-                q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
-            );
-        } else if (capacity <= 64) {
-            launch_indexed_inner_product_with_cos_topk_kernel<128, true, kQueriesPerBlock>(
-                block, idx_ctx->n_dim, q_ctx->d_queries,
-                idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
-                q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
-                q_ctx->d_entry_queries, q_ctx->d_entry_probe_indices,
-                q_ctx->d_query_norm, idx_ctx->d_cluster_vector_norm,
-                n_entry, n_probes, k,
-                q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
-            );
-        } else {
-            launch_indexed_inner_product_with_cos_topk_kernel<256, true, kQueriesPerBlock>(
-                block, idx_ctx->n_dim, q_ctx->d_queries,
-                idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
-                q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
-                q_ctx->d_entry_queries, q_ctx->d_entry_probe_indices,
-                q_ctx->d_query_norm, idx_ctx->d_cluster_vector_norm,
-                n_entry, n_probes, k,
-                q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
-            );
+        if (distance_mode == COSINE_DISTANCE){
+            if (capacity <= 32) {
+                launch_indexed_inner_product_with_cos_topk_kernel<64, true, kQueriesPerBlock>(
+                    block, idx_ctx->n_dim, q_ctx->d_queries,
+                    idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
+                    q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
+                    q_ctx->d_entry_queries, q_ctx->d_entry_probe_indices,
+                    q_ctx->d_query_norm, idx_ctx->d_cluster_vector_norm,
+                    n_entry, n_probes, k,
+                    q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
+                );
+            } else if (capacity <= 64) {
+                launch_indexed_inner_product_with_cos_topk_kernel<128, true, kQueriesPerBlock>(
+                    block, idx_ctx->n_dim, q_ctx->d_queries,
+                    idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
+                    q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
+                    q_ctx->d_entry_queries, q_ctx->d_entry_probe_indices,
+                    q_ctx->d_query_norm, idx_ctx->d_cluster_vector_norm,
+                    n_entry, n_probes, k,
+                    q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
+                );
+            } else {
+                launch_indexed_inner_product_with_cos_topk_kernel<256, true, kQueriesPerBlock>(
+                    block, idx_ctx->n_dim, q_ctx->d_queries,
+                    idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
+                    q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
+                    q_ctx->d_entry_queries, q_ctx->d_entry_probe_indices,
+                    q_ctx->d_query_norm, idx_ctx->d_cluster_vector_norm,
+                    n_entry, n_probes, k,
+                    q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
+                );
+            }
         }
+        else if(distance_mode == L2_DISTANCE){
+            if (capacity <= 32) {
+                launch_indexed_inner_product_with_l2_topk_kernel<64, true, kQueriesPerBlock>(
+                    block, idx_ctx->n_dim, q_ctx->d_queries,
+                    idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
+                    q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
+                    q_ctx->d_entry_queries, q_ctx->d_entry_probe_indices,
+                    q_ctx->d_query_norm, idx_ctx->d_cluster_vector_norm,
+                    n_entry, n_probes, k,
+                    q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
+                );
+            } else if (capacity <= 64) {
+                launch_indexed_inner_product_with_l2_topk_kernel<128, true, kQueriesPerBlock>(
+                    block, idx_ctx->n_dim, q_ctx->d_queries,
+                    idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
+                    q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
+                    q_ctx->d_entry_queries, q_ctx->d_entry_probe_indices,
+                    q_ctx->d_query_norm, idx_ctx->d_cluster_vector_norm,
+                    n_entry, n_probes, k,
+                    q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
+                );
+            } else {
+                launch_indexed_inner_product_with_l2_topk_kernel<256, true, kQueriesPerBlock>(
+                    block, idx_ctx->n_dim, q_ctx->d_queries,
+                    idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
+                    q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
+                    q_ctx->d_entry_queries, q_ctx->d_entry_probe_indices,
+                    q_ctx->d_query_norm, idx_ctx->d_cluster_vector_norm,
+                    n_entry, n_probes, k,
+                    q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
+                );
+            }
+        }
+
         
         // ---------------- Selection & Mapping ----------------
         select_k<float, int>(q_ctx->d_topk_dist_candidate, n_query, n_probes * k, k,

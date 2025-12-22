@@ -161,15 +161,48 @@ void ivf_pipeline_stage1_prepare_wrapper(
     }
 }
 
+/* 检查索引上下文是否已初始化 */
+int ivf_check_index_initialized_wrapper(void* idx_ctx_ptr) {
+    if (!idx_ctx_ptr) {
+        fprintf(stderr, "ivf_check_index_initialized_wrapper: idx_ctx_ptr is NULL\n");
+        return 0;
+    }
+    try {
+        /* 注意：这里需要访问 IVFIndexContext 结构，但由于是 C++ 代码，可以直接访问 */
+        /* 为了避免包含头文件，我们通过函数调用检查 */
+        /* 实际检查在 ivf_pipeline_stage2_compute 中进行 */
+        return 1; /* 返回1表示指针非空，实际初始化状态在 compute 函数中检查 */
+    } catch (...) {
+        fprintf(stderr, "ivf_check_index_initialized_wrapper: 检查失败\n");
+        return 0;
+    }
+}
+
 void ivf_pipeline_stage2_compute_wrapper(
     void* batch_ctx_ptr,
     void* idx_ctx_ptr,
     int n_query,
     int n_probes,
-    int k
+    int k,
+    int distance_mode
 ) {
+    /* 参数验证 */
+    if (!batch_ctx_ptr) {
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: batch_ctx_ptr is NULL\n");
+        return;
+    }
+    if (!idx_ctx_ptr) {
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: idx_ctx_ptr is NULL\n");
+        return;
+    }
+    if (n_query <= 0 || n_probes <= 0 || k <= 0) {
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: 无效参数 - n_query=%d, n_probes=%d, k=%d\n",
+                n_query, n_probes, k);
+        return;
+    }
+    
     try {
-        ivf_pipeline_stage2_compute(batch_ctx_ptr, idx_ctx_ptr, n_query, n_probes, k);
+        ivf_pipeline_stage2_compute(batch_ctx_ptr, idx_ctx_ptr, n_query, n_probes, k, distance_mode);
     } catch (const std::exception& e) {
         fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: 异常 - %s\n", e.what());
     } catch (...) {
