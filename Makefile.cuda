@@ -17,8 +17,10 @@ OBJS = $(SRCS_C:.c=.o)
 # [CUDA] 源文件列表
 OBJS_CUDA_LIST = \
 	cuda/cuda_wrapper.o \
-	cuda/indexed_gemm/indexed_gemm_v5.o \
-	cuda/fusion_cos_topk/fusion_cos_topk_warpsort.o \
+	cuda/indexed_gemm/indexed_gemm_cos.o \
+	cuda/indexed_gemm/indexed_gemm_l2.o \
+	cuda/fusion_dist_topk/fusion_cos_topk_warpsort.o \
+	cuda/fusion_dist_topk/fusion_l2_topk_warpsort.o \
 	cuda/l2norm/l2norm.o \
 	cuda/utils.o \
 	unit_tests/common/test_utils.o \

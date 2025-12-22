@@ -947,15 +947,15 @@ CREATE TYPE vector_batch (
 CREATE FUNCTION vector_batch_from_array(vector[]) RETURNS vector_batch
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
--- 批量距离计算函数
-CREATE FUNCTION batch_l2_distance(vector_batch, vector) RETURNS float8[]
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+-- -- 批量距离计算函数
+-- CREATE FUNCTION batch_l2_distance(vector_batch, vector) RETURNS float8[]
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION batch_cosine_distance(vector_batch, vector) RETURNS float8[]
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+-- CREATE FUNCTION batch_cosine_distance(vector_batch, vector) RETURNS float8[]
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE FUNCTION batch_vector_negative_inner_product(vector_batch, vector) RETURNS float8[]
-	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+-- CREATE FUNCTION batch_vector_negative_inner_product(vector_batch, vector) RETURNS float8[]
+-- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- -- 批量最近邻查询函数
 -- CREATE FUNCTION batch_knn_search(
@@ -977,31 +977,31 @@ CREATE FUNCTION batch_vector_negative_inner_product(vector_batch, vector) RETURN
 -- ) RETURNS SETOF record
 -- 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE PARALLEL SAFE;
 
--- 创建批量查询操作符
-CREATE OPERATOR <->> (
-	LEFTARG = vector_batch, 
-	RIGHTARG = vector, 
-	PROCEDURE = batch_l2_distance
-);
+-- -- 创建批量查询操作符
+-- CREATE OPERATOR <->> (
+-- 	LEFTARG = vector_batch, 
+-- 	RIGHTARG = vector, 
+-- 	PROCEDURE = batch_l2_distance
+-- );
 
-CREATE OPERATOR <=>> (
-	LEFTARG = vector_batch, 
-	RIGHTARG = vector, 
-	PROCEDURE = batch_cosine_distance
-);
+-- CREATE OPERATOR <=>> (
+-- 	LEFTARG = vector_batch, 
+-- 	RIGHTARG = vector, 
+-- 	PROCEDURE = batch_cosine_distance
+-- );
 
-CREATE OPERATOR <#>> (
-	LEFTARG = vector_batch, 
-	RIGHTARG = vector, 
-	PROCEDURE = batch_vector_negative_inner_product
-);
+-- CREATE OPERATOR <#>> (
+-- 	LEFTARG = vector_batch, 
+-- 	RIGHTARG = vector, 
+-- 	PROCEDURE = batch_vector_negative_inner_product
+-- );
 
 -- CUDA支持函数
 CREATE FUNCTION cuda_is_available_sql() RETURNS boolean
 	AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- 批量向量查询函数（只支持 vector_batch 类型）
-CREATE FUNCTION batch_vector_search(
+CREATE FUNCTION batch_vector_search_cos(
     index_oid oid,
     query_vectors vector_batch,
     k integer DEFAULT 10
@@ -1010,6 +1010,18 @@ CREATE FUNCTION batch_vector_search(
     vector_id integer,
     distance float8
 )
-AS 'vector', 'batch_vector_search_c'
+AS 'vector', 'batch_vector_search_cos'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION batch_vector_search_l2(
+    index_oid oid,
+    query_vectors vector_batch,
+    k integer DEFAULT 10
+) RETURNS TABLE(
+    query_id integer,
+    vector_id integer,
+    distance float8
+)
+AS 'vector', 'batch_vector_search_l2'
 LANGUAGE C STRICT;
 

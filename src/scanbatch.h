@@ -9,6 +9,9 @@
 #include "executor/tuptable.h"
 #include "vector.h"
 
+#define COSINE_DISTANCE 0
+#define L2_DISTANCE 1
+
 // 前向声明
 struct IndexScanDescData;
 typedef struct IndexScanDescData *IndexScanDesc;

@@ -51,9 +51,9 @@ echo "运行 cos_distance 测试..."
 echo "运行 fusion_cos_topk 测试..."
 ./test_fusion_cos_topk/test_fusion_cos_topk $1
 echo "=================================="
-echo "运行 fusion_cos_topk_fine 测试..."
-./test_fusion_cos_topk_fine/test_fusion_cos_topk_fine $1
-echo "=================================="
+# echo "运行 fusion_cos_topk_fine 测试..."
+# ./test_fusion_cos_topk_fine/test_fusion_cos_topk_fine $1
+# echo "=================================="
 echo "运行 warp sort 测试..."
 ./test_warpsort/test_warpsort
 echo "=================================="

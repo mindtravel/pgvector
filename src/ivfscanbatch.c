@@ -6,6 +6,7 @@
 #include "access/relscan.h"
 #include "access/tableam.h"
 #include "access/heapam.h"
+#include "access/htup_details.h"  /* 用于 MaxHeapTuplesPerPage */
 #include "access/sysattr.h"
 #include "storage/bufmgr.h"
 #include "utils/memutils.h"
@@ -164,13 +165,13 @@ ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys)
 
 
 bool
-ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Tuplestorestate *tupstore, TupleDesc tupdesc, int k)
+ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Tuplestorestate *tupstore, TupleDesc tupdesc, int k, int distance_mode)
 {
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
     int nbatch;
 
     if (!so->batch_processing_complete) {
-        ProcessBatchQueriesGPU(scan, so->batch_keys, k);
+        ProcessBatchQueriesGPU(scan, so->batch_keys, k, distance_mode);
         so->batch_processing_complete = true;
     }
     
@@ -348,15 +349,35 @@ GetOrLoadGpuIndex(IndexScanDesc scan)
     n_estimated_vectors = (int)((total_blocks * BLCKSZ * fill_factor) / est_tuple_size);
     n_estimated_vectors = Max(n_estimated_vectors, 10000); /* 最小保底 */
     
-    elog(DEBUG1, "GPU Index Loading: 估算向量总数 %d (Blocks: %u)", n_estimated_vectors, total_blocks);
+    elog(LOG, "GPU Index Loading: 估算向量总数 %d (Blocks: %u)", n_estimated_vectors, total_blocks);
 
     /* 3. 初始化 GPU Context */
     void* idx_handle = NULL;
     bool use_registered_handle = false;
     
     if (registered_handle != NULL) {
+        /* 安全检查：验证注册的 handle 是否已初始化 */
+        /* 注意：由于无法直接访问 C++ 结构体，我们通过尝试访问来验证 */
+        /* 如果 handle 未初始化，在后续调用时会抛出异常 */
         idx_handle = registered_handle;
         use_registered_handle = true;
+        
+        /* 验证维度一致性：需要从元数据中获取维度信息 */
+        /* 注意：这里假设 Build 阶段和 Scan 阶段的维度应该一致 */
+        elog(INFO, "GPU Index Loading: 使用 Build 阶段注册的 handle (OID %u), n_total_clusters=%d, dimensions=%d", 
+             index_oid, n_total_clusters, dimensions);
+        
+        /* 等待 Build 阶段的异步操作完成（如果有） */
+        /* 注意：ivf_finalize_streaming_upload 内部已经同步，但为了安全起见，这里再次同步 */
+        cuda_device_synchronize();
+        
+        /* 检查 CUDA 错误状态 */
+        if (cuda_check_last_error()) {
+            elog(WARNING, "GPU Index Loading: CUDA 错误状态 (可能来自 Build 阶段): %s", 
+                 cuda_get_last_error_string());
+            /* 清除错误状态，继续执行 */
+            cuda_check_last_error();
+        }
     } else {
         /* 使用估算值分配显存 */
         idx_handle = ivf_create_index_context_wrapper();
@@ -373,7 +394,19 @@ GetOrLoadGpuIndex(IndexScanDesc scan)
     MemoryContext cacheCtx = TopMemoryContext;
     MemoryContext oldCtx = MemoryContextSwitchTo(cacheCtx);
     
-    ItemPointer global_tids = (ItemPointer)palloc0(n_estimated_vectors * sizeof(ItemPointerData));
+    /* 关键修复：确保 ItemPointerData 对齐正确 */
+    /* ItemPointerData 是 6 字节，但可能被编译器对齐到 8 字节 */
+    size_t tid_array_size = n_estimated_vectors * sizeof(ItemPointerData);
+    ItemPointer global_tids = (ItemPointer)palloc0(tid_array_size);
+    
+    /* 验证对齐：确保数组元素之间的偏移量正确 */
+    if (n_estimated_vectors > 1) {
+        size_t actual_offset = (char*)&global_tids[1] - (char*)&global_tids[0];
+        if (actual_offset != sizeof(ItemPointerData)) {
+            elog(WARNING, "GetOrLoadGpuIndex: ItemPointerData 对齐异常 - sizeof=%zu, actual_offset=%zu", 
+                 sizeof(ItemPointerData), actual_offset);
+        }
+    }
     
     MemoryContextSwitchTo(oldCtx);
     
@@ -509,11 +542,17 @@ GetOrLoadGpuIndex(IndexScanDesc scan)
     /* 6. 更新缓存条目 */
     entry->idx_handle = idx_handle;
     entry->global_tids = global_tids;
-    entry->n_total_vectors = current_global_offset;
+    /* 重要：n_total_vectors 不能超过 global_tids 数组的实际大小 */
+    /* 如果发生截断，current_global_offset 可能等于 n_estimated_vectors */
+    entry->n_total_vectors = Min(current_global_offset, n_estimated_vectors);
     entry->n_total_clusters = n_total_clusters;
     entry->dimensions = dimensions;
     
-    elog(INFO, "GPU Index Loading: 完成，加载向量 %d 个", current_global_offset);
+    if (current_global_offset > n_estimated_vectors) {
+        elog(WARNING, "GPU Index Loading: 实际向量数 %d 超过估算值 %d，已截断", 
+             current_global_offset, n_estimated_vectors);
+    }
+    elog(INFO, "GPU Index Loading: 完成，加载向量 %d 个", entry->n_total_vectors);
     
     return entry;
 }
@@ -533,7 +572,7 @@ GetOrLoadGpuIndex(IndexScanDesc scan)
  * 3. 获取结果并转换
  */
 void
-ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
+ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k, int distance_mode)
 {
 #ifdef USE_CUDA
     IvfflatBatchScanOpaque so = (IvfflatBatchScanOpaque)scan->opaque;
@@ -561,6 +600,31 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
         return;
     }
     
+    /* 安全检查：验证索引条目字段 */
+    if (index_entry->n_total_clusters <= 0) {
+        elog(ERROR, "ProcessBatchQueriesGPU: index_entry->n_total_clusters (%d) <= 0", 
+             index_entry->n_total_clusters);
+        return;
+    }
+    if (index_entry->dimensions <= 0) {
+        elog(ERROR, "ProcessBatchQueriesGPU: index_entry->dimensions (%d) <= 0", 
+             index_entry->dimensions);
+        return;
+    }
+    if (dimensions != index_entry->dimensions) {
+        elog(ERROR, "ProcessBatchQueriesGPU: 维度不匹配 - scan->dimensions=%d, index_entry->dimensions=%d",
+             dimensions, index_entry->dimensions);
+        return;
+    }
+    if (so->probes > index_entry->n_total_clusters) {
+        elog(ERROR, "ProcessBatchQueriesGPU: probes (%d) > n_total_clusters (%d)",
+             so->probes, index_entry->n_total_clusters);
+        return;
+    }
+    
+    elog(LOG, "ProcessBatchQueriesGPU: 使用索引 - n_total_clusters=%d, n_total_vectors=%d, dimensions=%d, probes=%d, k=%d",
+         index_entry->n_total_clusters, index_entry->n_total_vectors, index_entry->dimensions, so->probes, k);
+    
     /* 2. 准备 Query Data */
     float* query_batch_flat = (float*)palloc(nbatch * dimensions * sizeof(float));
     for (int i = 0; i < nbatch; i++) {
@@ -582,16 +646,72 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
     }
     
     /* 4. 执行 Pipeline */
+    /* 安全检查：在调用前验证 handle */
+    if (!batch_handle) {
+        elog(ERROR, "ProcessBatchQueriesGPU: batch_handle is NULL before stage1");
+        pfree(query_batch_flat);
+        return;
+    }
+    if (!index_entry->idx_handle) {
+        elog(ERROR, "ProcessBatchQueriesGPU: index_entry->idx_handle is NULL before stage2");
+        pfree(query_batch_flat);
+        ivf_destroy_batch_context_wrapper(batch_handle);
+        return;
+    }
+    
+    elog(LOG, "ProcessBatchQueriesGPU: 调用 stage1_prepare - nbatch=%d, dimensions=%d", nbatch, dimensions);
     ivf_pipeline_stage1_prepare_wrapper(batch_handle, query_batch_flat, nbatch);
     
+    /* 检查 CUDA 错误 */
+    if (cuda_check_last_error()) {
+        elog(ERROR, "ProcessBatchQueriesGPU: CUDA 错误在 stage1 之后: %s", cuda_get_last_error_string());
+        pfree(query_batch_flat);
+        ivf_destroy_batch_context_wrapper(batch_handle);
+        return;
+    }
+    
+    elog(LOG, "ProcessBatchQueriesGPU: 调用 stage2_compute - nbatch=%d, n_probes=%d, k=%d, distance_mode=%d",
+         nbatch, so->probes, k, distance_mode);
     ivf_pipeline_stage2_compute_wrapper(batch_handle, index_entry->idx_handle, 
-                                        nbatch, so->probes, k);
+                                        nbatch, so->probes, k, distance_mode);
+    
+    /* 检查 CUDA 错误 */
+    if (cuda_check_last_error()) {
+        elog(ERROR, "ProcessBatchQueriesGPU: CUDA 错误在 stage2 之后: %s", cuda_get_last_error_string());
+        pfree(query_batch_flat);
+        ivf_destroy_batch_context_wrapper(batch_handle);
+        return;
+    }
     
     /* 5. 获取结果 */
     float* topk_dist_flat = (float*)palloc(nbatch * k * sizeof(float));
     int* topk_index_flat = (int*)palloc(nbatch * k * sizeof(int));
     
     ivf_pipeline_get_results_wrapper(batch_handle, topk_dist_flat, topk_index_flat, nbatch, k);
+    
+    /* 关键修复：强制同步，确保 GPU 完全写完 CPU 内存 */
+    /* 虽然 wrapper 内部已经有 cudaStreamSynchronize，但为了安全起见，这里再次同步 */
+    cuda_device_synchronize();
+    
+    elog(LOG, "[1] get_results返回");
+    
+    /* 检查 CUDA 错误 */
+    if (cuda_check_last_error()) {
+        elog(ERROR, "ProcessBatchQueriesGPU: CUDA 错误在 get_results 之后: %s", cuda_get_last_error_string());
+        pfree(query_batch_flat);
+        pfree(topk_dist_flat);
+        pfree(topk_index_flat);
+        ivf_destroy_batch_context_wrapper(batch_handle);
+        return;
+    }
+    
+    /* 验证 GPU 返回的数据合理性 */
+    for (int i = 0; i < nbatch * k && i < 100; i++) {
+        if (topk_index_flat[i] < -1 || topk_index_flat[i] >= index_entry->n_total_vectors) {
+            elog(WARNING, "ProcessBatchQueriesGPU: GPU返回异常索引[%d]=%d (范围: [0, %d))", 
+                 i, topk_index_flat[i], index_entry->n_total_vectors);
+        }
+    }
     
     /* 安全检查：确保结果数组不为 NULL */
     if (!topk_dist_flat || !topk_index_flat) {
@@ -616,6 +736,7 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
         topk_dist[i] = topk_dist_flat + i * k;
         topk_index[i] = topk_index_flat + i * k;
     }
+    elog(LOG, "[2] 指针数组转换完成");
     
     /* 6. 结果转换 (ID Mapping) */
     so->result_buffer = CreateBatchBuffer(nbatch, k, dimensions, CurrentMemoryContext);
@@ -629,12 +750,27 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
         ivf_destroy_batch_context_wrapper(batch_handle);
         return;
     }
+    elog(LOG, "[3] CreateBatchBuffer完成");
     
+    /* 安全检查：确保 global_tids 有效 */
+    if (!index_entry->global_tids) {
+        elog(ERROR, "ProcessBatchQueriesGPU: index_entry->global_tids is NULL before ConvertBatchPipelineResults");
+        pfree(query_batch_flat);
+        pfree(topk_dist_flat);
+        pfree(topk_index_flat);
+        pfree(topk_dist);
+        pfree(topk_index);
+        ivf_destroy_batch_context_wrapper(batch_handle);
+        return;
+    }
+    
+    elog(LOG, "[4] 准备调用ConvertBatchPipelineResults");
     ConvertBatchPipelineResults(scan, topk_dist, topk_index, nbatch, k,
                                 so->result_buffer, 
                                 index_entry->global_tids, /* 使用缓存的 TID 表 */
                                 index_entry->n_total_vectors, 
                                 scan->indexRelation);
+    elog(LOG, "[5] ConvertBatchPipelineResults返回");
     
     /* 7. 资源清理 (只清理 Batch 相关的，保留 Index 相关的) */
     ivf_destroy_batch_context_wrapper(batch_handle);
@@ -776,19 +912,29 @@ ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_in
                             int n_query, int k, BatchBuffer* result_buffer,
                             ItemPointer global_tids, int n_total_vectors, Relation indexRelation)
 {
-    /* 参数安全检查 */
-    if (!topk_dist || !topk_index || !result_buffer || !indexRelation) {
-        elog(ERROR, "ConvertBatchPipelineResults: NULL parameter");
+    /* 1. 安全检查 */
+    if (!result_buffer || !global_tids || !indexRelation) {
+        elog(ERROR, "ConvertBatchPipelineResults: 关键参数为 NULL");
         return;
     }
-    
-    /* 1. 准备堆表访问 */
+    if (!topk_dist || !topk_index) {
+        elog(ERROR, "ConvertBatchPipelineResults: topk_dist 或 topk_index 为 NULL");
+        return;
+    }
+
+    /* 2. 获取快照并校验 */
+    Snapshot snapshot = GetActiveSnapshot();
+    if (snapshot == NULL) {
+        elog(ERROR, "ConvertBatchPipelineResults: 无法获取活跃快照");
+        return;
+    }
+
+    /* 3. 打开堆表 */
     Oid heapRelid = IndexGetRelation(RelationGetRelid(indexRelation), false);
     Relation heapRelation = table_open(heapRelid, AccessShareLock);
     TupleDesc heapDesc = RelationGetDescr(heapRelation);
-    Snapshot snapshot = GetActiveSnapshot();
     
-    /* 查找 ID 列 (假设用户需要 id 列作为 payload) */
+    /* 4. 查找 payload 列 */
     int id_attnum = -1;
     for (int i = 1; i <= heapDesc->natts; i++) {
         Form_pg_attribute attr = TupleDescAttr(heapDesc, i - 1);
@@ -797,25 +943,25 @@ ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_in
             break;
         }
     }
-    
+
 #ifdef USE_CUDA
     int total_items = n_query * k;
     int valid_items_count = 0;
     
-    /* 2. 收集所有有效的 Fetch 请求 */
-    /* 我们在 Stack 上或者 palloc 一个临时数组来存请求，避免多次 palloc */
+    /* 5. 分配请求数组 (使用当前上下文) */
     HeapFetchRequest *requests = (HeapFetchRequest *)palloc(total_items * sizeof(HeapFetchRequest));
-    
-    /* 初始化 result_buffer 为默认值 (NULLs) */
-    memset(result_buffer->query_ids, -1, total_items * sizeof(int));
-    memset(result_buffer->global_vector_indices, -1, total_items * sizeof(int));
-    memset(result_buffer->distances, 0, total_items * sizeof(float));
-    
-    /* 安全检查：确保 global_tids 不为 NULL */
-    if (global_tids == NULL) {
-        elog(ERROR, "ConvertBatchPipelineResults: global_tids is NULL");
-        table_close(heapRelation, AccessShareLock);
-        return;
+
+    /* 6. 收集并预校验 TID */
+    /* 关键修复：添加对齐检查 */
+    if (n_total_vectors > 1) {
+        size_t actual_offset = (char*)&global_tids[1] - (char*)&global_tids[0];
+        if (actual_offset != sizeof(ItemPointerData)) {
+            elog(ERROR, "ConvertBatchPipelineResults: ItemPointerData 对齐异常 - sizeof=%zu, actual_offset=%zu", 
+                 sizeof(ItemPointerData), actual_offset);
+            pfree(requests);
+            table_close(heapRelation, AccessShareLock);
+            return;
+        }
     }
     
     for (int q = 0; q < n_query; q++) {
@@ -825,63 +971,141 @@ ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_in
             
             /* 设置默认值 */
             result_buffer->query_ids[buffer_idx] = q;
-            ItemPointerSetInvalid(&result_buffer->vector_ids[buffer_idx]);
+            result_buffer->global_vector_indices[buffer_idx] = -1; // 默认值
             result_buffer->distances[buffer_idx] = (vec_idx < 0) ? INFINITY : topk_dist[q][i];
+            ItemPointerSetInvalid(&result_buffer->vector_ids[buffer_idx]);
             
-            /* 过滤无效结果 */
-            if (vec_idx < 0 || vec_idx >= n_total_vectors) continue;
-            
-            /* 构造请求 */
-            ItemPointer tid = &global_tids[vec_idx];
-            
-            /* 这里可以做一个简单的可见性检查预判（可选），但主要依靠 heap_fetch */
-            
-            requests[valid_items_count].tid = *tid;
-            requests[valid_items_count].query_idx = q;
-            requests[valid_items_count].k_idx = i;
-            requests[valid_items_count].distance = topk_dist[q][i];
-            requests[valid_items_count].original_index = buffer_idx;
-            valid_items_count++;
+            /* 关键修复：更严格的边界检查 */
+            if (vec_idx >= 0 && vec_idx < n_total_vectors) {
+                /* 验证 vec_idx 不会导致指针越界 */
+                ItemPointer tid = &global_tids[vec_idx];
+                
+                /* 验证 TID 指针在合法范围内 */
+                ItemPointer first_tid = &global_tids[0];
+                ItemPointer last_tid = &global_tids[n_total_vectors - 1];
+                if (tid < first_tid || tid > last_tid) {
+                    elog(WARNING, "ConvertBatchPipelineResults: TID 指针越界 - vec_idx=%d, tid=%p, range=[%p, %p]", 
+                         vec_idx, (void*)tid, (void*)first_tid, (void*)last_tid);
+                    continue;
+                }
+                
+                /* 物理合法性检查 */
+                if (ItemPointerIsValid(tid)) {
+                    BlockNumber block = ItemPointerGetBlockNumber(tid);
+                    OffsetNumber offset = ItemPointerGetOffsetNumber(tid);
+                    
+                    /* 验证 BlockNumber 和 OffsetNumber 的合理性 */
+                    if (block == InvalidBlockNumber || offset == InvalidOffsetNumber || 
+                        offset == 0 || offset > MaxHeapTuplesPerPage) {
+                        elog(DEBUG2, "ConvertBatchPipelineResults: TID 物理值无效 - vec_idx=%d, block=%u, offset=%u", 
+                             vec_idx, block, offset);
+                        continue;
+                    }
+                    
+                    requests[valid_items_count].tid = *tid;
+                    requests[valid_items_count].query_idx = q;
+                    requests[valid_items_count].k_idx = i;
+                    requests[valid_items_count].original_index = buffer_idx;
+                    valid_items_count++;
+                }
+            } else if (vec_idx != -1) {
+                /* 记录异常索引值 */
+                elog(DEBUG2, "ConvertBatchPipelineResults: GPU返回异常索引 - vec_idx=%d, n_total_vectors=%d", 
+                     vec_idx, n_total_vectors);
+            }
         }
     }
-    
-    /* 3. 关键步骤：对 TID 进行排序 */
-    /* 这会将访问同一 Page 的请求聚在一起，并使磁盘访问顺序化 */
+
+    /* 7. TID 排序：极大地提高磁盘 I/O 效率 */
     if (valid_items_count > 0) {
         qsort(requests, valid_items_count, sizeof(HeapFetchRequest), compare_fetch_requests);
     }
+
+    /* 8. 批量回表 - 核心修复点 */
+    BufferAccessStrategy bas = GetAccessStrategy(BAS_BULKREAD); // 使用批量读取策略
     
-    /* 4. 按顺序执行回表 */
+    /* 关键修复：验证 k 的一致性，防止 buffer_dest_idx 计算错误 */
+    if (result_buffer->k != k) {
+        elog(ERROR, "ConvertBatchPipelineResults: k 不一致 - result_buffer->k=%d, 参数k=%d", 
+             result_buffer->k, k);
+        FreeAccessStrategy(bas);
+        pfree(requests);
+        table_close(heapRelation, AccessShareLock);
+        return;
+    }
+    
     for (int i = 0; i < valid_items_count; i++) {
         HeapFetchRequest *req = &requests[i];
-        int buffer_dest_idx = req->query_idx * k + req->k_idx; /* 原始结果集中的位置 */
         
-        /* 填充结果集中的 TID 和 Distance (这些不需要回表) */
+        /* 关键修复：严格验证所有索引 */
+        if (req->query_idx < 0 || req->query_idx >= n_query) {
+            elog(WARNING, "ConvertBatchPipelineResults: 无效的query_idx=%d (n_query=%d)", 
+                 req->query_idx, n_query);
+            continue;
+        }
+        if (req->k_idx < 0 || req->k_idx >= k) {
+            elog(WARNING, "ConvertBatchPipelineResults: 无效的k_idx=%d (k=%d)", 
+                 req->k_idx, k);
+            continue;
+        }
+        
+        int buffer_dest_idx = req->query_idx * k + req->k_idx;
+        
+        /* 再次验证索引安全性 */
+        if (buffer_dest_idx < 0 || buffer_dest_idx >= total_items) {
+            elog(WARNING, "ConvertBatchPipelineResults: buffer_dest_idx越界 - idx=%d, total=%d, query_idx=%d, k_idx=%d", 
+                 buffer_dest_idx, total_items, req->query_idx, req->k_idx);
+            continue;
+        }
+
+        /* 关键修复：验证 TID 的物理合法性 */
+        BlockNumber block = ItemPointerGetBlockNumber(&req->tid);
+        OffsetNumber offset = ItemPointerGetOffsetNumber(&req->tid);
+        if (block == InvalidBlockNumber || offset == InvalidOffsetNumber || 
+            offset == 0 || offset > MaxHeapTuplesPerPage) {
+            elog(DEBUG2, "ConvertBatchPipelineResults: TID 物理值无效 - block=%u, offset=%u", 
+                 block, offset);
+            result_buffer->global_vector_indices[buffer_dest_idx] = -1;
+            continue;
+        }
+
+        /* 设置 TID */
         result_buffer->vector_ids[buffer_dest_idx] = req->tid;
-        /* distances 已经在初始化时填了，这里可以不填 */
-        
-        int32_t row_id = -1;
-        
-        /* 只有当我们需要获取 payload (id列) 时才真正回表 */
+
         if (id_attnum > 0) {
+            /* 关键修复：确保 snapshot 仍然有效 */
+            if (snapshot == NULL) {
+                elog(ERROR, "ConvertBatchPipelineResults: snapshot 在循环中变为 NULL");
+                FreeAccessStrategy(bas);
+                pfree(requests);
+                table_close(heapRelation, AccessShareLock);
+                return;
+            }
+            
             HeapTupleData tuple;
             tuple.t_self = req->tid;
-            
-            /* 优化：Buffer Access Strategy 也可以在这里用，但 heap_fetch 内部封装较深，
-               这里主要依靠 OS Page Cache 和 PG Buffer Pool 的命中率提升 */
-            
-            Buffer buf;
+            Buffer buf = InvalidBuffer;
+
+            /* 使用更安全的 TAM 接口 */
             if (heap_fetch(heapRelation, snapshot, &tuple, &buf, false)) {
                 bool isnull;
                 Datum d = heap_getattr(&tuple, id_attnum, heapDesc, &isnull);
-                if (!isnull) row_id = DatumGetInt32(d);
-                ReleaseBuffer(buf);
+                if (!isnull) {
+                    result_buffer->global_vector_indices[buffer_dest_idx] = DatumGetInt32(d);
+                } else {
+                    result_buffer->global_vector_indices[buffer_dest_idx] = -1;
+                }
+                if (BufferIsValid(buf)) {
+                    ReleaseBuffer(buf);
+                }
+            } else {
+                /* 如果 TID 在当前快照不可见或已失效 */
+                result_buffer->global_vector_indices[buffer_dest_idx] = -1;
             }
         }
-        
-        result_buffer->global_vector_indices[buffer_dest_idx] = row_id;
     }
-    
+
+    FreeAccessStrategy(bas);
     pfree(requests);
 #else
     elog(ERROR, "ConvertBatchPipelineResults: CUDA support required");

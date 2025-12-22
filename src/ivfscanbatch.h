@@ -109,7 +109,8 @@ extern void ivf_pipeline_stage2_compute_wrapper(
     void* idx_ctx_ptr,
     int n_query,
     int n_probes,
-    int k
+    int k,
+    int distance_mode
 );
 extern void ivf_pipeline_get_results_wrapper(
     void* batch_ctx_ptr,
@@ -123,6 +124,7 @@ extern void ivf_pipeline_sync_batch_wrapper(void* batch_ctx_ptr);
 /* 流式上传接口的 C wrapper（带异常处理） */
 extern void* ivf_create_index_context_wrapper(void);
 extern void ivf_destroy_index_context_wrapper(void* ctx_ptr);
+extern int ivf_check_index_initialized_wrapper(void* idx_ctx_ptr);
 extern void ivf_init_streaming_upload_wrapper(
     void* idx_ctx_ptr,
     int n_total_clusters,
@@ -218,12 +220,12 @@ typedef IvfflatBatchScanOpaqueData* IvfflatBatchScanOpaque;
 /* 公共函数声明 */
 extern IndexScanDesc ivfflatbatchbeginscan(Relation index, int norderbys, ScanKeyBatch batch_keys);
 // extern bool ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Datum* values, bool* isnull, int k);
-extern bool ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Tuplestorestate *tupstore, TupleDesc tupdesc, int k);
+extern bool ivfflatbatchgettuple(IndexScanDesc scan, ScanDirection dir, Tuplestorestate *tupstore, TupleDesc tupdesc, int k, int distance_mode);
 extern void ivfflatbatchendscan(IndexScanDesc scan);
 
 /* 批量处理函数声明 */
 extern BatchBuffer* CreateBatchBuffer(int n_queries, int k, int dimensions, MemoryContext mem_ctx);
-extern void ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k);
+extern void ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k, int distance_mode);
 extern void GetBatchResults(BatchBuffer* buffer, Tuplestorestate *tupstore, TupleDesc tupdesc);
 
 

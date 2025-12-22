@@ -188,25 +188,38 @@ void ivf_pipeline_stage2_compute_wrapper(
 ) {
     /* 参数验证 */
     if (!batch_ctx_ptr) {
-        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: batch_ctx_ptr is NULL\n");
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: ERROR - batch_ctx_ptr is NULL\n");
+        fflush(stderr);
         return;
     }
     if (!idx_ctx_ptr) {
-        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: idx_ctx_ptr is NULL\n");
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: ERROR - idx_ctx_ptr is NULL\n");
+        fflush(stderr);
         return;
     }
     if (n_query <= 0 || n_probes <= 0 || k <= 0) {
-        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: 无效参数 - n_query=%d, n_probes=%d, k=%d\n",
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: ERROR - 无效参数 - n_query=%d, n_probes=%d, k=%d\n",
                 n_query, n_probes, k);
+        fflush(stderr);
         return;
     }
     
+    fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: 开始调用 - batch_ctx_ptr=%p, idx_ctx_ptr=%p, n_query=%d, n_probes=%d, k=%d\n",
+            batch_ctx_ptr, idx_ctx_ptr, n_query, n_probes, k);
+    fflush(stderr);
+    
     try {
         ivf_pipeline_stage2_compute(batch_ctx_ptr, idx_ctx_ptr, n_query, n_probes, k, distance_mode);
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: 调用成功完成\n");
+        fflush(stderr);
     } catch (const std::exception& e) {
-        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: 异常 - %s\n", e.what());
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: EXCEPTION - %s\n", e.what());
+        fflush(stderr);
+        /* 注意：这里不抛出异常，因为 C 代码无法处理 C++ 异常 */
+        /* 错误信息已记录到 stderr，PostgreSQL 会将其记录到日志 */
     } catch (...) {
-        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: 未知异常\n");
+        fprintf(stderr, "ivf_pipeline_stage2_compute_wrapper: UNKNOWN EXCEPTION\n");
+        fflush(stderr);
     }
 }
 
@@ -217,12 +230,38 @@ void ivf_pipeline_get_results_wrapper(
     int n_query,
     int k
 ) {
+    /* 参数验证 */
+    if (!batch_ctx_ptr) {
+        fprintf(stderr, "ivf_pipeline_get_results_wrapper: ERROR - batch_ctx_ptr is NULL\n");
+        fflush(stderr);
+        return;
+    }
+    if (!topk_dist || !topk_index) {
+        fprintf(stderr, "ivf_pipeline_get_results_wrapper: ERROR - topk_dist or topk_index is NULL\n");
+        fflush(stderr);
+        return;
+    }
+    if (n_query <= 0 || k <= 0) {
+        fprintf(stderr, "ivf_pipeline_get_results_wrapper: ERROR - 无效参数 - n_query=%d, k=%d\n",
+                n_query, k);
+        fflush(stderr);
+        return;
+    }
+    
+    fprintf(stderr, "ivf_pipeline_get_results_wrapper: 开始调用 - batch_ctx_ptr=%p, n_query=%d, k=%d\n",
+            batch_ctx_ptr, n_query, k);
+    fflush(stderr);
+    
     try {
         ivf_pipeline_get_results(batch_ctx_ptr, topk_dist, topk_index, n_query, k);
+        fprintf(stderr, "ivf_pipeline_get_results_wrapper: 调用成功完成\n");
+        fflush(stderr);
     } catch (const std::exception& e) {
-        fprintf(stderr, "ivf_pipeline_get_results_wrapper: 异常 - %s\n", e.what());
+        fprintf(stderr, "ivf_pipeline_get_results_wrapper: EXCEPTION - %s\n", e.what());
+        fflush(stderr);
     } catch (...) {
-        fprintf(stderr, "ivf_pipeline_get_results_wrapper: 未知异常\n");
+        fprintf(stderr, "ivf_pipeline_get_results_wrapper: UNKNOWN EXCEPTION\n");
+        fflush(stderr);
     }
 }
 
