@@ -555,6 +555,12 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
         return;
     }
     
+    /* 安全检查：确保 global_tids 已初始化 */
+    if (!index_entry->global_tids) {
+        elog(ERROR, "ProcessBatchQueriesGPU: index_entry->global_tids is NULL");
+        return;
+    }
+    
     /* 2. 准备 Query Data */
     float* query_batch_flat = (float*)palloc(nbatch * dimensions * sizeof(float));
     for (int i = 0; i < nbatch; i++) {
@@ -587,9 +593,25 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
     
     ivf_pipeline_get_results_wrapper(batch_handle, topk_dist_flat, topk_index_flat, nbatch, k);
     
+    /* 安全检查：确保结果数组不为 NULL */
+    if (!topk_dist_flat || !topk_index_flat) {
+        elog(ERROR, "ProcessBatchQueriesGPU: GPU results are NULL");
+        pfree(query_batch_flat);
+        ivf_destroy_batch_context_wrapper(batch_handle);
+        return;
+    }
+    
     /* 指针数组转换 */
     float** topk_dist = (float**)palloc(nbatch * sizeof(float*));
     int** topk_index = (int**)palloc(nbatch * sizeof(int*));
+    if (!topk_dist || !topk_index) {
+        elog(ERROR, "ProcessBatchQueriesGPU: Failed to allocate pointer arrays");
+        pfree(query_batch_flat);
+        pfree(topk_dist_flat);
+        pfree(topk_index_flat);
+        ivf_destroy_batch_context_wrapper(batch_handle);
+        return;
+    }
     for (int i = 0; i < nbatch; i++) {
         topk_dist[i] = topk_dist_flat + i * k;
         topk_index[i] = topk_index_flat + i * k;
@@ -597,6 +619,16 @@ ProcessBatchQueriesGPU(IndexScanDesc scan, ScanKeyBatch batch_keys, int k)
     
     /* 6. 结果转换 (ID Mapping) */
     so->result_buffer = CreateBatchBuffer(nbatch, k, dimensions, CurrentMemoryContext);
+    if (!so->result_buffer) {
+        elog(ERROR, "ProcessBatchQueriesGPU: Failed to create result buffer");
+        pfree(query_batch_flat);
+        pfree(topk_dist_flat);
+        pfree(topk_index_flat);
+        pfree(topk_dist);
+        pfree(topk_index);
+        ivf_destroy_batch_context_wrapper(batch_handle);
+        return;
+    }
     
     ConvertBatchPipelineResults(scan, topk_dist, topk_index, nbatch, k,
                                 so->result_buffer, 
@@ -744,6 +776,12 @@ ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_in
                             int n_query, int k, BatchBuffer* result_buffer,
                             ItemPointer global_tids, int n_total_vectors, Relation indexRelation)
 {
+    /* 参数安全检查 */
+    if (!topk_dist || !topk_index || !result_buffer || !indexRelation) {
+        elog(ERROR, "ConvertBatchPipelineResults: NULL parameter");
+        return;
+    }
+    
     /* 1. 准备堆表访问 */
     Oid heapRelid = IndexGetRelation(RelationGetRelid(indexRelation), false);
     Relation heapRelation = table_open(heapRelid, AccessShareLock);
@@ -772,6 +810,13 @@ ConvertBatchPipelineResults(IndexScanDesc scan, float** topk_dist, int** topk_in
     memset(result_buffer->query_ids, -1, total_items * sizeof(int));
     memset(result_buffer->global_vector_indices, -1, total_items * sizeof(int));
     memset(result_buffer->distances, 0, total_items * sizeof(float));
+    
+    /* 安全检查：确保 global_tids 不为 NULL */
+    if (global_tids == NULL) {
+        elog(ERROR, "ConvertBatchPipelineResults: global_tids is NULL");
+        table_close(heapRelation, AccessShareLock);
+        return;
+    }
     
     for (int q = 0; q < n_query; q++) {
         for (int i = 0; i < k; i++) {

@@ -27,7 +27,7 @@ using namespace pgvector::warpsort;
  */
 template<int Capacity, bool Ascending, int QueriesPerBlock>
 __global__ __launch_bounds__(256, 1) 
-void indexed_inner_product_with_topk_kernel_v5_entry_based_l2(
+void indexed_inner_product_with_cos_topk_kernel(
     float* __restrict__ d_query_group,
     float* __restrict__ d_cluster_vector,
     int* __restrict__ d_probe_vector_offset,
@@ -111,9 +111,9 @@ void indexed_inner_product_with_topk_kernel_v5_entry_based_l2(
                 if (data_norm < 1e-6f) {
                     queue.add(dummy_val, -1);
                 } else {
-                    float query_norm = s_query_norm[local_query_idx];
-                    float l2_distance = query_norm*query_norm + data_norm*data_norm - 2.0f * dot_product;
-                    queue.add(l2_distance, vec_idx);
+                    float cos_similarity = dot_product / (s_query_norm[local_query_idx] * data_norm);
+                    float cos_distance = 1.0f - cos_similarity;
+                    queue.add(cos_distance, vec_idx);
                 }
             }
         }
@@ -132,9 +132,9 @@ void indexed_inner_product_with_topk_kernel_v5_entry_based_l2(
                 if (data_norm < 1e-6f) {
                     queue.add(dummy_val, -1);
                 } else {
-                    float query_norm = s_query_norm[local_query_idx];
-                    float l2_distance = query_norm*query_norm + data_norm*data_norm - 2.0f * dot_product;
-                    queue.add(l2_distance, vec_idx);
+                    float cos_similarity = dot_product / (s_query_norm[local_query_idx] * data_norm);
+                    float cos_distance = 1.0f - cos_similarity;
+                    queue.add(cos_distance, vec_idx);
                 }
             }
         }
@@ -155,7 +155,7 @@ void indexed_inner_product_with_topk_kernel_v5_entry_based_l2(
  * Launch 函数：v5 entry-based版本
  */
 template<int Capacity, bool Ascending, int QueriesPerBlock>
-void launch_indexed_inner_product_with_topk_kernel_v5_entry_based_l2(
+void launch_indexed_inner_product_with_cos_topk_kernel(
     dim3 block,
     int n_dim,
     float* __restrict__ d_query_group,
@@ -179,7 +179,7 @@ void launch_indexed_inner_product_with_topk_kernel_v5_entry_based_l2(
     dim3 grid(n_entry, 1, 1);
     
     // 统一使用 generic 版本，支持任意维度
-    indexed_inner_product_with_topk_kernel_v5_entry_based_l2<Capacity, Ascending, QueriesPerBlock>
+    indexed_inner_product_with_cos_topk_kernel<Capacity, Ascending, QueriesPerBlock>
         <<<grid, block, 0, stream>>>(
         d_query_group,
         d_cluster_vector,
@@ -203,22 +203,22 @@ void launch_indexed_inner_product_with_topk_kernel_v5_entry_based_l2(
 
 // 显式实例化常用的模板参数组合
 // QueriesPerBlock=1
-template void launch_indexed_inner_product_with_topk_kernel_v5_entry_based_l2<64, true, 1>(
+template void launch_indexed_inner_product_with_cos_topk_kernel<64, true, 1>(
     dim3, int, float*, float*, int*, int*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
 
-template void launch_indexed_inner_product_with_topk_kernel_v5_entry_based_l2<128, true, 1>(
+template void launch_indexed_inner_product_with_cos_topk_kernel<128, true, 1>(
     dim3, int, float*, float*, int*, int*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
 
-template void launch_indexed_inner_product_with_topk_kernel_v5_entry_based_l2<256, true, 1>(
+template void launch_indexed_inner_product_with_cos_topk_kernel<256, true, 1>(
     dim3, int, float*, float*, int*, int*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
 
 // QueriesPerBlock=8
-template void launch_indexed_inner_product_with_topk_kernel_v5_entry_based_l2<64, true, 8>(
+template void launch_indexed_inner_product_with_cos_topk_kernel<64, true, 8>(
     dim3, int, float*, float*, int*, int*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
 
-template void launch_indexed_inner_product_with_topk_kernel_v5_entry_based_l2<128, true, 8>(
+template void launch_indexed_inner_product_with_cos_topk_kernel<128, true, 8>(
     dim3, int, float*, float*, int*, int*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
 
-template void launch_indexed_inner_product_with_topk_kernel_v5_entry_based_l2<256, true, 8>(
+template void launch_indexed_inner_product_with_cos_topk_kernel<256, true, 8>(
     dim3, int, float*, float*, int*, int*, int*, int*, int*, int*, int*, float*, float*, int, int, int, float*, int*, cudaStream_t);
 

@@ -62,7 +62,8 @@ void batch_search_pipeline(
     int n_total_cluster,
     int n_total_vectors,
     int n_probes,
-    int k
+    int k,
+    int distance_mode
 );
 
 // ---------------------------------------------------------

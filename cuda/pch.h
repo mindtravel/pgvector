@@ -33,4 +33,6 @@
 #include <algorithm>
 #include <time.h>
 
+#define COSINE_DISTANCE 0
+#define L2_DISTANCE 1
 #endif //PCH_H

@@ -24,7 +24,7 @@
 #include <cfloat>
 #include "../utils.cuh"
 
-#include "fusion_cos_topk.cuh"
+#include "fusion_dist_topk.cuh"
 #include "../unit_tests/common/test_utils.cuh"
 #include "pch.h"
 #include "warpsortfilter/warpsort_utils.cuh"
@@ -34,7 +34,7 @@
 #define ENABLE_CUDA_TIMING 0
 
 namespace pgvector {
-namespace fusion_cos_topk_warpsort {
+namespace fusion_dist_topk_warpsort {
 
 using namespace warpsort_utils;
 using namespace warpsort;
@@ -424,7 +424,7 @@ void cuda_cos_topk_warpsort(
     {
         CUDATimer timer_compute("Kernel Execution: cos + topk", ENABLE_CUDA_TIMING);
 
-        pgvector::fusion_cos_topk_warpsort::fusion_cos_topk_warpsort(
+        pgvector::fusion_dist_topk_warpsort::fusion_cos_topk_warpsort(
             d_query_norm, d_data_norm, d_inner_product, d_index,
             n_query, n_batch, k,
             d_topk_cos_dist, d_topk_index,

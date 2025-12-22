@@ -1,48 +1,44 @@
-# test_fusion_cos_topk_v2的CMake配置
+# test_fusion_cos_topk_fine_v5的CMake配置
+# v5版本：Entry-based线程模型
 
 # 源文件列表
 set(SOURCES
-    test_fusion_cos_topk_fine.cu
-    # 使用共享库，不再重复编译
-    # ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/l2norm/l2norm.cu - 在 l2norm_lib 中
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v2.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v3.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v3_32.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v4.cu
-    # 弃用版本的 indexed_gemm 需要单独编译（不在 indexed_gemm_lib 中）
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/indexed_gemm/indexed_gemm_v2.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/indexed_gemm/indexed_gemm_v3.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/indexed_gemm/indexed_gemm_v4.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/warpsortfilter/warpsort_topk.cu
+    test_fusion_cos_topk_fine_v5.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/test_utils.cu
 )
 
 # 创建可执行文件
-add_executable(test_fusion_cos_topk_fine ${SOURCES})
+add_executable(test_fusion_cos_topk_fine_v5 ${SOURCES})
 
 # 链接共享库
-target_link_libraries(test_fusion_cos_topk_fine 
+target_link_libraries(test_fusion_cos_topk_fine_v5 
+    fusion_cos_topk_warpsort_lib
     l2norm_lib
-    utils_lib  # indexed_gemm_v2, v3 需要 inner_product_utils
 )
 
 # 设置包含目录
-target_include_directories(test_fusion_cos_topk_fine PRIVATE
+target_include_directories(test_fusion_cos_topk_fine_v5 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda
     ${CMAKE_CURRENT_SOURCE_DIR}/../common
 )
 
 # 设置CUDA编译选项
-set_target_properties(test_fusion_cos_topk_fine PROPERTIES
+# CUDA_SEPARABLE_COMPILATION ON: 启用分离编译，允许增量编译
+# CUDA_RESOLVE_DEVICE_SYMBOLS ON: 在库中解析device符号，减少最终链接时间
+# CUDA_ARCHITECTURES 70: 只编译SM 7.0，加快编译速度
+# CUDA_OPTIMIZE_DEVICE_LINK ON: 优化设备链接（如果支持）
+set_target_properties(test_fusion_cos_topk_fine_v5 PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    CUDA_ARCHITECTURES 70
 )
 
 # 链接CUDA库
-target_link_libraries(test_fusion_cos_topk_fine
+target_link_libraries(test_fusion_cos_topk_fine_v5
     ${CUDA_LIBRARIES}
 )
 
 # 添加测试
 enable_testing()
-add_test(NAME fusion_cos_topk_v2_test COMMAND test_fusion_cos_topk_fine)
+add_test(NAME fusion_cos_topk_fine_v5_test COMMAND test_fusion_cos_topk_fine_v5)
 

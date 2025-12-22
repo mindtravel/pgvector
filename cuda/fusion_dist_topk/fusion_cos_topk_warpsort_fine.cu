@@ -1,4 +1,4 @@
-#include "fusion_cos_topk.cuh"
+#include "fusion_dist_topk.cuh"
 #include "../indexed_gemm/indexed_gemm.cuh"
 #include "../pch.h"
 #include "../unit_tests/common/test_utils.cuh"
@@ -9,12 +9,12 @@
 #include <cfloat>
 #include <vector>
 
-#define ENABLE_CUDA_TIMING 1
+#define ENABLE_CUDA_TIMING 0
 using namespace pgvector::warpsort_utils;
 using namespace pgvector::warpsort_topk;
 
 /**
- * v5版本：Entry-based线程模型的流式融合余弦距离top-k计算
+ * Entry-based线程模型的流式融合余弦距离top-k计算
  * 
  * 核心设计：
  * - 每个 block 处理一个 entry（一个 cluster + 一组 query，8个或4个）
@@ -40,7 +40,7 @@ using namespace pgvector::warpsort_topk;
  * @param n_dim 向量维度
  * @param k topk数量
  */
-void cuda_cos_topk_warpsort_fine_v5(
+void cuda_cos_topk_warpsort_fine(
     float* d_query_group,
     float* d_cluster_vector,
 
@@ -96,7 +96,7 @@ void cuda_cos_topk_warpsort_fine_v5(
     int* d_entry_probe_indices = nullptr;
     
     // 配置kernel launch
-    // v5 entry-based版本：每个block处理一个entry（一个cluster + 一组query）
+    // entry-based版本：每个block处理一个entry（一个cluster + 一组query）
     dim3 block(kQueriesPerBlock * capacity);  // 8个warp，每个warp 32个线程
 
     int n_entry = 0;
@@ -205,7 +205,7 @@ void cuda_cos_topk_warpsort_fine_v5(
         
         // 根据capacity选择kernel实例
         if (capacity <= 32) {
-            launch_indexed_inner_product_with_topk_kernel_v5_entry_based<64, true, kQueriesPerBlock>(
+            launch_indexed_inner_product_with_topk_cos_kernel<64, true, kQueriesPerBlock>(
                 block,
                 n_dim,
                 d_query_group,
@@ -227,7 +227,7 @@ void cuda_cos_topk_warpsort_fine_v5(
                 0
             );
         } else if (capacity <= 64) {
-            launch_indexed_inner_product_with_topk_kernel_v5_entry_based<128, true, kQueriesPerBlock>(
+            launch_indexed_inner_product_with_topk_cos_kernel<128, true, kQueriesPerBlock>(
                 block,
                 n_dim,
                 d_query_group,
@@ -249,7 +249,7 @@ void cuda_cos_topk_warpsort_fine_v5(
                 0
             );
         } else {
-            launch_indexed_inner_product_with_topk_kernel_v5_entry_based<256, true, kQueriesPerBlock>(
+            launch_indexed_inner_product_with_topk_cos_kernel<256, true, kQueriesPerBlock>(
                 block,
                 n_dim,
                 d_query_group,

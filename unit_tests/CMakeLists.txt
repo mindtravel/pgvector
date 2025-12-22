@@ -144,20 +144,17 @@ target_link_libraries(fusion_cos_topk_warpsort_coarse_lib
     cublas
 )
 
-# 创建共享的fusion_cos_topk_warpsort完整库（包含粗筛和精筛）
+# 创建共享的fusion_dist_topk_warpsort完整库（包含粗筛和精筛）
 # 被以下测试使用：
-#   - test_fusion_cos_topk_fine_v3_fixed_probe
-#   - test_fusion_cos_topk_fine_v5
+#   - test_fusion_cos_topk_fine
 # 
 # 包含的文件：
 #   - fusion_cos_topk_warpsort.cu: 粗筛实现（已在coarse_lib中，但为了完整性也包含）
-#   - fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu: 固定probe版本的精筛实现
-#   - fusion_cos_topk_warpsort_fine_v5.cu: v5 entry-based版本的精筛实现
+#   - fusion_cos_topk_warpsort_fine.cu: entry-based版本的精筛实现
 #   - warpsort_topk.cu: warp-level top-k选择
 # 注意：
-#   - indexed_gemm_v3_fixed_probe.cu 和 indexed_gemm_v5.cu 已移到 indexed_gemm_lib 中
 #   - inner_product_utils.cuh 是头文件，不需要添加到库中
-add_library(fusion_cos_topk_warpsort_lib STATIC
+add_library(fusion_dist_topk_warpsort_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v3_fixed_probe.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort_fine_v5.cu
@@ -193,11 +190,11 @@ add_library(fusion_l2_topk_warpsort_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_l2_topk/fusion_l2_topk_warpsort.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
 )
-target_include_directories(fusion_l2_topk_warpsort_lib PUBLIC
+target_include_directories(fusion_dist_topk_warpsort_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
     ${CMAKE_CURRENT_SOURCE_DIR}/common
 )
-set_target_properties(fusion_l2_topk_warpsort_lib PROPERTIES
+set_target_properties(fusion_dist_topk_warpsort_lib PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     CUDA_ARCHITECTURES 70
@@ -226,7 +223,7 @@ target_link_libraries(fusion_l2_topk_warpsort_lib
 #   - inner_product_utils.cuh 是头文件，不需要添加到库中
 add_library(integrate_screen_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_dist_topk/fusion_cos_topk_warpsort.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
 )
 target_include_directories(integrate_screen_lib PUBLIC
@@ -261,7 +258,7 @@ target_link_libraries(integrate_screen_lib
 #   - inner_product_utils.cuh 是头文件，不需要添加到库中
 add_library(integrate_screen_pipeline_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen_pipeline.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_dist_topk/fusion_cos_topk_warpsort.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
 )
 target_include_directories(integrate_screen_pipeline_lib PUBLIC
@@ -297,8 +294,8 @@ target_link_libraries(integrate_screen_pipeline_lib
 #   - inner_product_utils.cuh 是头文件，不需要添加到库中
 add_library(integrate_screen_choose_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen_choose.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_cos_topk/fusion_cos_topk_warpsort.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_l2_topk/fusion_l2_topk_warpsort.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_dist_topk/fusion_cos_topk_warpsort.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_dist_topk/fusion_l2_topk_warpsort.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
 )
 target_include_directories(integrate_screen_choose_lib PUBLIC
@@ -329,11 +326,8 @@ add_subdirectory(test_warpsort)
 add_subdirectory(test_bitonic)
 add_subdirectory(test_stream_pass_data)
 add_subdirectory(test_final_topk)
-add_subdirectory(test_fusion_cos_topk_fine_v3_fixed_probe)
-add_subdirectory(test_fusion_cos_topk_fine_v5)
 add_subdirectory(test_integrated_coarse_fine)
 add_subdirectory(test_integrated_coarse_fine_pipeline)
-add_subdirectory(test_integrated_coarse_fine_choose)
 add_subdirectory(test_select_k)
 
 # 统一测试目标
@@ -346,14 +340,11 @@ add_custom_target(run_all_tests
         test_cos_distance 
         test_fusion_cos_topk
         test_fusion_cos_topk_fine
-        test_fusion_cos_topk_fine_v3_fixed_probe
-        test_fusion_cos_topk_fine_v5
         test_warpsort
         test_bitonic
         test_stream_pass_data
         test_final_topk
         test_integrated_coarse_fine
         test_integrated_coarse_fine_pipeline
-        test_integrated_coarse_fine_choose
     COMMENT "运行所有单元测试"
 )

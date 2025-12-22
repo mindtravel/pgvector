@@ -6,7 +6,7 @@
 #include "../pch.h"
 #include "integrate_screen.cuh"
 
-#include "../fusion_cos_topk/fusion_cos_topk.cuh"
+#include "../fusion_dist_topk/fusion_dist_topk.cuh"
 #include "../indexed_gemm/indexed_gemm.cuh"
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include "../warpsortfilter/warpsort_topk.cu"
@@ -180,14 +180,25 @@ void batch_search_pipeline(float* d_query_batch,
     
         {
             CUDATimer timer_compute("Step 1: Kernel Execution: cos + topk");
-    
-            pgvector::fusion_cos_topk_warpsort::fusion_cos_topk_warpsort<float, int>(
-                d_query_norm, d_cluster_centers_norm, d_inner_product, d_initial_indices,
-                n_query, n_total_clusters, n_probes,  // 粗筛选择 n_probes 个 cluster
-                d_top_nprobe_dist, d_top_nprobe_index,
-                true /* select min */
-            );
 
+            if(distance_mode == 0){
+                pgvector::fusion_dist_topk_warpsort::fusion_cos_topk_warpsort<float, int>(
+                    d_query_norm, d_cluster_centers_norm, d_inner_product, d_initial_indices,
+                    n_query, n_total_clusters, n_probes,  // 粗筛选择 n_probes 个 cluster
+                    d_top_nprobe_dist, d_top_nprobe_index,
+                    true, // select min 
+                    0  // 默认流
+                );
+            }
+            else{
+                pgvector::fusion_dist_topk_warpsort::fusion_l2_topk_warpsort<float, int>(
+                    d_query_norm, d_cluster_centers_norm, d_inner_product, d_initial_indices,
+                    n_query, n_total_clusters, n_probes,  // 粗筛选择 n_probes 个 cluster
+                    d_top_nprobe_dist, d_top_nprobe_index,
+                    true, // select min 
+                    0  // 默认流
+                );
+            }
             cudaDeviceSynchronize(); 
             CHECK_CUDA_ERRORS;
             

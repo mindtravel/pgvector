@@ -1,7 +1,7 @@
 #include "../pch.h"
 #include "integrate_screen.cuh"
 
-#include "../fusion_cos_topk/fusion_cos_topk.cuh"
+#include "../fusion_dist_topk/fusion_dist_topk.cuh"
 #include "../fine_screen_top_n/fine_screen_top_n.cuh"
 #include "../cudatimer.h"
 #include "../../unit_tests/common/test_utils.cuh"

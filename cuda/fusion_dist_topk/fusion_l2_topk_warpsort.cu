@@ -24,7 +24,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/fill.h>
 
-#include "fusion_l2_topk.cuh"
+#include "fusion_dist_topk.cuh"
 #include "../unit_tests/common/test_utils.cuh"
 #include "pch.h"
 #include "warpsortfilter/warpsort_utils.cuh"
@@ -33,7 +33,7 @@
 #define ENABLE_CUDA_TIMING 0
 
 namespace pgvector {
-namespace fusion_l2_topk_warpsort {
+namespace fusion_dist_topk_warpsort {
 
 using namespace warpsort_utils;
 using namespace warpsort;
@@ -418,7 +418,7 @@ void cuda_l2_topk_warpsort(
     {
         CUDATimer timer_compute("Kernel Execution: l2 + topk", ENABLE_CUDA_TIMING);
 
-        pgvector::fusion_l2_topk_warpsort::fusion_l2_topk_warpsort(
+        pgvector::fusion_dist_topk_warpsort::fusion_l2_topk_warpsort(
             d_query_norm, d_data_norm, d_inner_product, d_index,
             n_query, n_batch, k,
             d_topk_l2_dist, d_topk_index,

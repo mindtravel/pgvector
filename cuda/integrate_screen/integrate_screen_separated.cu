@@ -8,7 +8,7 @@
 
 // 包含原始所有需要的头文件
 #include "integrate_screen.cuh"
-#include "../fusion_cos_topk/fusion_cos_topk.cuh"
+#include "../fusion_dist_topk/fusion_dist_topk.cuh"
 #include "../indexed_gemm/indexed_gemm.cuh"
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include "../warpsortfilter/warpsort_topk.cu"
@@ -457,7 +457,7 @@ void ivf_pipeline_stage2_compute(
                 q_ctx->d_inner_product, idx_ctx->n_total_clusters);
     
     // TopK Cosine
-    pgvector::fusion_cos_topk_warpsort::fusion_cos_topk_warpsort<float, int>(
+    pgvector::fusion_dist_topk_warpsort::fusion_cos_topk_warpsort<float, int>(
         q_ctx->d_query_norm, idx_ctx->d_cluster_centers_norm, q_ctx->d_inner_product, q_ctx->d_index_seq,
         n_query, idx_ctx->n_total_clusters, n_probes,
         q_ctx->d_top_nprobe_dist, q_ctx->d_top_nprobe_index,

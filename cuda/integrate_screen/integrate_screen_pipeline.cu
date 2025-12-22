@@ -6,7 +6,7 @@
 #include "../pch.h"
 #include "integrate_screen.cuh"
 
-#include "../fusion_cos_topk/fusion_cos_topk.cuh"
+#include "../fusion_dist_topk/fusion_dist_topk.cuh"
 #include "../indexed_gemm/indexed_gemm.cuh"
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include "../warpsortfilter/warpsort_topk.cu"
@@ -282,7 +282,10 @@ void batch_search_pipeline(float** query_batch,
                            int n_total_clusters,
                            int n_total_vectors,
                            int n_probes,
-                           int k) {
+                           int k,
+                           int distance_mode
+                        ) 
+{
 
     if (n_query <= 0 || n_dim <= 0 || n_total_clusters <= 0 || k <= 0) {
         printf("[ERROR] Invalid parameters: n_query=%d, n_dim=%d, n_total_clusters=%d, k=%d\n",
@@ -467,9 +470,19 @@ void batch_search_pipeline(float** query_batch,
             );    
             
         // 余弦距离 + topk（使用compute_stream）
-            pgvector::fusion_cos_topk_warpsort::fusion_cos_topk_warpsort<float, int>(
-            d_query_norm, g_persistent_data.d_cluster_centers_norm, d_inner_product, d_index,
-            n_query, n_total_clusters, n_probes,
+        if(distance_mode == COSINE_DISTANCE){
+            pgvector::fusion_dist_topk_warpsort::fusion_cos_topk_warpsort<float, int>(
+                d_query_norm, g_persistent_data.d_cluster_centers_norm, d_inner_product, d_index,
+                n_query, n_total_clusters, n_probes,
+                d_top_nprobe_dist, d_top_nprobe_index,
+                true /* select min */,
+                compute_stream  // 使用compute_stream，确保与数据准备同步
+            );
+        }
+        else if(distance_mode == L2_DISTANCE){
+            pgvector::fusion_dist_topk_warpsort::fusion_l2_topk_warpsort<float, int>(
+                d_query_norm, g_persistent_data.d_cluster_centers_norm, d_inner_product, d_index,
+                n_query, n_total_clusters, n_probes,
                 d_top_nprobe_dist, d_top_nprobe_index,
             true /* select min */,
             compute_stream  // 使用compute_stream，确保与数据准备同步
