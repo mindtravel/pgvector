@@ -537,7 +537,7 @@ void ivf_pipeline_stage2_compute(
         
         // 根据capacity选择kernel实例
         if (capacity <= 32) {
-            launch_indexed_inner_product_with_topk_kernel_v5_entry_based<64, true, kQueriesPerBlock>(
+            launch_indexed_inner_product_with_cos_topk_kernel<64, true, kQueriesPerBlock>(
                 block, idx_ctx->n_dim, q_ctx->d_queries,
                 idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
                 q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
@@ -547,7 +547,7 @@ void ivf_pipeline_stage2_compute(
                 q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
             );
         } else if (capacity <= 64) {
-            launch_indexed_inner_product_with_topk_kernel_v5_entry_based<128, true, kQueriesPerBlock>(
+            launch_indexed_inner_product_with_cos_topk_kernel<128, true, kQueriesPerBlock>(
                 block, idx_ctx->n_dim, q_ctx->d_queries,
                 idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
                 q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,
@@ -557,7 +557,7 @@ void ivf_pipeline_stage2_compute(
                 q_ctx->d_topk_dist_candidate, q_ctx->d_topk_index_candidate, stream
             );
         } else {
-            launch_indexed_inner_product_with_topk_kernel_v5_entry_based<256, true, kQueriesPerBlock>(
+            launch_indexed_inner_product_with_cos_topk_kernel<256, true, kQueriesPerBlock>(
                 block, idx_ctx->n_dim, q_ctx->d_queries,
                 idx_ctx->d_cluster_vectors, idx_ctx->d_probe_vector_offset, idx_ctx->d_probe_vector_count,
                 q_ctx->d_entry_cluster_id, q_ctx->d_entry_query_start, q_ctx->d_entry_query_count,

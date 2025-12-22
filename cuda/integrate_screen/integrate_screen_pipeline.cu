@@ -488,18 +488,19 @@ void batch_search_pipeline(float** query_batch,
             compute_stream  // 使用compute_stream，确保与数据准备同步
             );
 
-        cudaStreamSynchronize(compute_stream);
+            cudaStreamSynchronize(compute_stream);
             CHECK_CUDA_ERRORS;
-            
-        // 清理临时内存
+                
+            // 清理临时内存
             cublasDestroy(handle);
-        // 注意：d_cluster_centers 来自常驻数据，不应释放
+            // 注意：d_cluster_centers 来自常驻数据，不应释放
             cudaFree(d_inner_product);
             if (need_free_index && d_index != nullptr) {
-            cudaFree(d_index);
+                cudaFree(d_index);
             }
             cudaFree(d_top_nprobe_dist);
-        CHECK_CUDA_ERRORS;
+            CHECK_CUDA_ERRORS;
+        }
     }
 
     // Step 2: 构建entry数据
@@ -638,12 +639,12 @@ void batch_search_pipeline(float** query_batch,
         
         float* d_topk_dist_candidate = nullptr;
         int* d_topk_index_candidate = nullptr;
-            cudaMalloc(&d_topk_dist_candidate, n_query * n_probes * k * sizeof(float));
-            cudaMalloc(&d_topk_index_candidate, n_query * n_probes * k * sizeof(int));
-        
-            dim3 init_block(512);
-            int init_grid_size = (n_query * n_probes * k + init_block.x - 1) / init_block.x;
-            dim3 init_grid(init_grid_size);
+        cudaMalloc(&d_topk_dist_candidate, n_query * n_probes * k * sizeof(float));
+        cudaMalloc(&d_topk_index_candidate, n_query * n_probes * k * sizeof(int));
+    
+        dim3 init_block(512);
+        int init_grid_size = (n_query * n_probes * k + init_block.x - 1) / init_block.x;
+        dim3 init_grid(init_grid_size);
         init_invalid_values_kernel<<<init_grid, init_block, 0, compute_stream>>>(
                 d_topk_dist_candidate,
                 d_topk_index_candidate,
@@ -652,42 +653,83 @@ void batch_search_pipeline(float** query_batch,
         
         dim3 block(kQueriesPerBlock * 32);
         if (n_entry > 0) {
+            if(distance_mode == COSINE_DISTANCE){
                 if (capacity <= 32) {
-                    launch_indexed_inner_product_with_topk_kernel_v5_entry_based<64, true, kQueriesPerBlock>(
-                    block, n_dim, d_queries,
-                    g_persistent_data.d_cluster_vectors,
-                    g_persistent_data.d_probe_vector_offset,
-                    g_persistent_data.d_probe_vector_count,
-                    d_entry_cluster_id, d_entry_query_start, d_entry_query_count,
-                    d_entry_queries, d_entry_probe_indices,
-                    d_query_norm, g_persistent_data.d_cluster_vector_norm,
-                    n_entry, n_probes, k,
-                    d_topk_dist_candidate, d_topk_index_candidate, compute_stream
+                    launch_indexed_inner_product_with_cos_topk_kernel<64, true, kQueriesPerBlock>(
+                        block, n_dim, d_queries,
+                        g_persistent_data.d_cluster_vectors,
+                        g_persistent_data.d_probe_vector_offset,
+                        g_persistent_data.d_probe_vector_count,
+                        d_entry_cluster_id, d_entry_query_start, d_entry_query_count,
+                        d_entry_queries, d_entry_probe_indices,
+                        d_query_norm, g_persistent_data.d_cluster_vector_norm,
+                        n_entry, n_probes, k,
+                        d_topk_dist_candidate, d_topk_index_candidate, compute_stream
                     );
                 } else if (capacity <= 64) {
-                    launch_indexed_inner_product_with_topk_kernel_v5_entry_based<128, true, kQueriesPerBlock>(
-                    block, n_dim, d_queries,
-                    g_persistent_data.d_cluster_vectors,
-                    g_persistent_data.d_probe_vector_offset,
-                    g_persistent_data.d_probe_vector_count,
-                    d_entry_cluster_id, d_entry_query_start, d_entry_query_count,
-                    d_entry_queries, d_entry_probe_indices,
-                    d_query_norm, g_persistent_data.d_cluster_vector_norm,
-                    n_entry, n_probes, k,
-                    d_topk_dist_candidate, d_topk_index_candidate, compute_stream
+                    launch_indexed_inner_product_with_cos_topk_kernel<128, true, kQueriesPerBlock>(
+                        block, n_dim, d_queries,
+                        g_persistent_data.d_cluster_vectors,
+                        g_persistent_data.d_probe_vector_offset,
+                        g_persistent_data.d_probe_vector_count,
+                        d_entry_cluster_id, d_entry_query_start, d_entry_query_count,
+                        d_entry_queries, d_entry_probe_indices,
+                        d_query_norm, g_persistent_data.d_cluster_vector_norm,
+                        n_entry, n_probes, k,
+                        d_topk_dist_candidate, d_topk_index_candidate, compute_stream
                     );
                 } else {
-                    launch_indexed_inner_product_with_topk_kernel_v5_entry_based<256, true, kQueriesPerBlock>(
-                    block, n_dim, d_queries,
-                    g_persistent_data.d_cluster_vectors,
-                    g_persistent_data.d_probe_vector_offset,
-                    g_persistent_data.d_probe_vector_count,
-                    d_entry_cluster_id, d_entry_query_start, d_entry_query_count,
-                    d_entry_queries, d_entry_probe_indices,
-                    d_query_norm, g_persistent_data.d_cluster_vector_norm,
-                    n_entry, n_probes, k,
-                    d_topk_dist_candidate, d_topk_index_candidate, compute_stream
-                );
+                    launch_indexed_inner_product_with_cos_topk_kernel<256, true, kQueriesPerBlock>(
+                        block, n_dim, d_queries,
+                        g_persistent_data.d_cluster_vectors,
+                        g_persistent_data.d_probe_vector_offset,
+                        g_persistent_data.d_probe_vector_count,
+                        d_entry_cluster_id, d_entry_query_start, d_entry_query_count,
+                        d_entry_queries, d_entry_probe_indices,
+                        d_query_norm, g_persistent_data.d_cluster_vector_norm,
+                        n_entry, n_probes, k,
+                        d_topk_dist_candidate, d_topk_index_candidate, compute_stream
+                    );
+                }                
+            }
+            else if(distance_mode == L2_DISTANCE){
+                if (capacity <= 32) {
+                    launch_indexed_inner_product_with_l2_topk_kernel<64, true, kQueriesPerBlock>(
+                        block, n_dim, d_queries,
+                        g_persistent_data.d_cluster_vectors,
+                        g_persistent_data.d_probe_vector_offset,
+                        g_persistent_data.d_probe_vector_count,
+                        d_entry_cluster_id, d_entry_query_start, d_entry_query_count,
+                        d_entry_queries, d_entry_probe_indices,
+                        d_query_norm, g_persistent_data.d_cluster_vector_norm,
+                        n_entry, n_probes, k,
+                        d_topk_dist_candidate, d_topk_index_candidate, compute_stream
+                    );
+                } else if (capacity <= 64) {
+                    launch_indexed_inner_product_with_l2_topk_kernel<128, true, kQueriesPerBlock>(
+                        block, n_dim, d_queries,
+                        g_persistent_data.d_cluster_vectors,
+                        g_persistent_data.d_probe_vector_offset,
+                        g_persistent_data.d_probe_vector_count,
+                        d_entry_cluster_id, d_entry_query_start, d_entry_query_count,
+                        d_entry_queries, d_entry_probe_indices,
+                        d_query_norm, g_persistent_data.d_cluster_vector_norm,
+                        n_entry, n_probes, k,
+                        d_topk_dist_candidate, d_topk_index_candidate, compute_stream
+                    );
+                } else {
+                    launch_indexed_inner_product_with_l2_topk_kernel<256, true, kQueriesPerBlock>(
+                        block, n_dim, d_queries,
+                        g_persistent_data.d_cluster_vectors,
+                        g_persistent_data.d_probe_vector_offset,
+                        g_persistent_data.d_probe_vector_count,
+                        d_entry_cluster_id, d_entry_query_start, d_entry_query_count,
+                        d_entry_queries, d_entry_probe_indices,
+                        d_query_norm, g_persistent_data.d_cluster_vector_norm,
+                        n_entry, n_probes, k,
+                        d_topk_dist_candidate, d_topk_index_candidate, compute_stream
+                    );
+                }    
             }
         }
         
@@ -737,12 +779,12 @@ void batch_search_pipeline(float** query_batch,
             );
         
         cudaStreamSynchronize(compute_stream);
-            CHECK_CUDA_ERRORS;
-            
-            cudaFree(d_topk_dist_candidate);
-            cudaFree(d_topk_index_candidate);
-        }
+        CHECK_CUDA_ERRORS;
         
+        cudaFree(d_topk_dist_candidate);
+        cudaFree(d_topk_index_candidate);
+    }
+
     // 复制结果回CPU
     cudaMemcpyAsync(topk_dist[0], d_topk_dist, 
                    n_query * k * sizeof(float), cudaMemcpyDeviceToHost, compute_stream);

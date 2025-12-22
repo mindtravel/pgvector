@@ -15,10 +15,6 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
 set(SOURCES
     test_integrated_coarse_fine_pipeline.cu
     ../common/test_utils.cu
-    # 使用共享库，不再重复编译
-    # ../../cuda/l2norm/l2norm.cu - 在 l2norm_lib 中
-    # integrate_screen_pipeline.cu - 在 integrate_screen_pipeline_lib 中
-    # indexed_gemm_v3_fixed_probe.cu, indexed_gemm_v5.cu - 在 indexed_gemm_lib 中
 )
 
 add_executable(test_integrated_coarse_fine_pipeline ${SOURCES})
@@ -29,8 +25,7 @@ target_link_libraries(test_integrated_coarse_fine_pipeline
     curand
     l2norm_lib
     indexed_gemm_lib
-    utils_lib
-    integrate_screen_pipeline_lib  # 包含 integrate_screen_pipeline.cu 及其依赖
+    integrate_screen_pipeline_lib  # 包含 fusion_cos_topk_warpsort 和 warpsort_topk
 )
 
 set_target_properties(test_integrated_coarse_fine_pipeline PROPERTIES
@@ -40,4 +35,3 @@ set_target_properties(test_integrated_coarse_fine_pipeline PROPERTIES
 
 enable_testing()
 add_test(NAME test_integrated_coarse_fine_pipeline COMMAND test_integrated_coarse_fine_pipeline)
-

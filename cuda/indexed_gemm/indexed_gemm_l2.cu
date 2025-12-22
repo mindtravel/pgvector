@@ -27,7 +27,7 @@ using namespace pgvector::warpsort;
  */
 template<int Capacity, bool Ascending, int QueriesPerBlock>
 __global__ __launch_bounds__(256, 1) 
-void indexed_inner_product_with_topk_kernel_v5_entry_based_l2(
+void indexed_inner_product_with_l2_topk_kernel(
     float* __restrict__ d_query_group,
     float* __restrict__ d_cluster_vector,
     int* __restrict__ d_probe_vector_offset,

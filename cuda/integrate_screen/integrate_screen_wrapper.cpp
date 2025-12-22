@@ -16,7 +16,7 @@ int batch_search_pipeline_wrapper(float* d_query_batch,
                                   float* d_topk_dist,
                                   int* d_topk_index,
                                   int n_query, int n_dim, int n_total_cluster,
-                                  int n_total_vectors, int n_probes, int k)
+                                  int n_total_vectors, int n_probes, int k, int distance_mode)
 {
     /* 记录关键参数信息到PostgreSQL日志 */
     fprintf(stderr, "batch_search_pipeline_wrapper: ========== 参数验证 ==========\n");
@@ -64,7 +64,7 @@ int batch_search_pipeline_wrapper(float* d_query_batch,
         batch_search_pipeline(d_query_batch, d_cluster_size, d_cluster_vectors, d_cluster_centers,
                              d_initial_indices,  // 传入初始索引（如果为nullptr，则内部生成）
                              d_topk_dist, d_topk_index,
-                             n_query, n_dim, n_total_cluster, n_total_vectors, n_probes, k);
+                             n_query, n_dim, n_total_cluster, n_total_vectors, n_probes, k, distance_mode);
         fprintf(stderr, "batch_search_pipeline_wrapper: 执行成功\n");
         return 0;
     } catch (const std::exception& e) {

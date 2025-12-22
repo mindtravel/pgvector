@@ -39,7 +39,9 @@ void batch_search_pipeline(float* d_query_batch,
                            int n_total_clusters,
                            int n_total_vectors,
                            int n_probes,
-                           int k) {
+                           int k,
+                           int distance_mode
+                        ) {
 
     fprintf(stderr, "batch_search_pipeline: 开始执行, n_query=%d, n_dim=%d, n_total_clusters=%d, n_total_vectors=%d, n_probes=%d, k=%d\n",
             n_query, n_dim, n_total_clusters, n_total_vectors, n_probes, k);

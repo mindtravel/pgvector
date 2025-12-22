@@ -136,7 +136,7 @@ void fine_screen_topk(
     cudaMalloc(&d_topk_dist_final, n_query * k * sizeof(float));
     cudaMalloc(&d_topk_index_final, n_query * k * sizeof(int));
 
-    cuda_cos_topk_warpsort_fine_v3_fixed_probe(
+    cuda_cos_topk_warpsort_fine(
         d_query_group,
         d_cluster_vector,
         
