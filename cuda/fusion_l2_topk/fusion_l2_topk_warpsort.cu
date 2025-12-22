@@ -81,21 +81,73 @@ __global__ void fusion_l2_topk_warpsort_kernel(
     WarpSortFiltered<Capacity, Ascending, T, IdxT> queue(k); 
     
     float query_norm = d_query_norm[row];
+    
+    /* 获取dummy值，用于无效元素（确保所有线程都参与同步）*/
+    /* 使用 WarpSort 基类的静态方法获取正确的dummy值 */
+    using BaseWarpSort = WarpSort<Capacity, Ascending, T, IdxT>;
+    const T dummy_val = BaseWarpSort::kDummy();
 
     /* 按照 laneId 访问数据 */
     const T* row_inner_product = d_inner_product + row * len;
     const IdxT* row_index = d_index + row * len;
-    for (int i = warp_id * kWarpSize + lane; i < len; i += n_warps * kWarpSize) {
-        float data_norm = d_data_norm[i];
-        float inner_product = row_inner_product[i];
-        IdxT index = row_index[i];  /* 修复：使用正确的索引值 */
-        float l2_distance = query_norm*query_norm + data_norm*data_norm - 2.0f * inner_product;
-        queue.add(l2_distance, index);
+    
+    /* 
+     * 关键修复：使用固定次数的循环，确保所有线程执行相同次数的迭代
+     * 这对于 WarpSortFiltered 的 any() 和 __any_sync() 同步是必需的
+     * 
+     * 问题：原来的条件循环 `for (int i = ...; i < len; i += ...)` 导致不同线程
+     * 执行不同次数的迭代，使得 queue.add() 的调用不同步，导致 __any_sync() 死锁
+     * 
+     * 解决方案：计算最大迭代次数，所有线程执行相同次数的循环，
+     * 每个迭代都同步调用 queue.add()（无论是否有有效数据）
+     */
+    
+    /* 确保所有线程都执行到这里 */
+    __syncwarp();
+    
+    /* 计算最大迭代次数：ceil(len / (n_warps * kWarpSize)) */
+    int max_iter = (len + n_warps * kWarpSize - 1) / (n_warps * kWarpSize);
+    
+    for (int iter = 0; iter < max_iter; iter++) {
+        /* 在每个迭代开始时同步 */
+        __syncwarp();
+        
+        /* 计算当前迭代处理的索引 */
+        int i = warp_id * kWarpSize + lane + iter * n_warps * kWarpSize;
+        bool has_data = (i < len);
+        
+        if (has_data) {
+            float data_norm = d_data_norm[i];
+            float inner_product = row_inner_product[i];
+            IdxT index = row_index[i];
+            
+            /* 边界检查：避免无效数据 */
+            /* 对于索引类型，如果为负数（有符号）或特殊标记值，视为无效 */
+            bool is_valid_index = true;
+            if constexpr (std::is_signed_v<IdxT>) {
+                is_valid_index = (index >= 0);
+            }
+            
+            if (data_norm >= 1e-6f && is_valid_index) {
+                float l2_distance =  - 2*inner_product + query_norm * query_norm + data_norm * data_norm;
+                // float cos_distance = 1.0f - cos_similarity;
+                queue.add(l2_distance, index);
+            } else {
+                /* 无效数据，添加dummy值 */
+                queue.add(dummy_val, IdxT{});
+            }
+        } else {
+            /* 超出范围，添加dummy值以确保所有线程同步 */
+            queue.add(dummy_val, IdxT{});
+        }
     }
+    
+    /* 确保所有线程都完成了循环 */
+    __syncwarp();
     
     /* 把 buffer 中剩余数合并到 queue 中 */
     queue.done();
-
+    
     /* 将 queue 中的数存储到显存中（所有线程都要调用）*/
     if (warp_id == 0) {
         T* row_out_val = output_vals + row * k;

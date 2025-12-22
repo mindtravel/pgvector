@@ -413,7 +413,7 @@ static std::vector<double> run_case(const BenchmarkCase& config,
 int main(int argc, char** argv) {
     MetricsCollector metrics;
     metrics.set_columns("pass_rate", "n_query", "n_total_clusters", "vector_dim", 
-                        "k", "n_probes", "n_total_vectors", "gpu_ms", "cpu_ms", 
+                        "k", "n_probes", "n_total_vectors", "distance_mode", "gpu_ms", "cpu_ms", 
                         "speedup");
     metrics.set_num_repeats(1);
     
@@ -438,13 +438,15 @@ int main(int argc, char** argv) {
     // PARAM_3D(n_total_vectors, (10000, 50000, 100000, 200000, 500000, 1000000),
     //         n_query, (100, 200, 512, 1000),
     //         vector_dim, (128, 256))
-     PARAM_3D(n_total_vectors, (10000, 1000000),
+    PARAM_3D(n_total_vectors, (10000, 1000000),
              n_probes, (1, 2, 5, 10, 20),
-             vector_dim, (128))
+             distance_mode, (0, 1))  // 0: cosine, 1: l2
+            //  distance_mode, (1))  // 0: cosine, 1: l2
     {
         int n_total_clusters = std::max(10, static_cast<int>(std::sqrt(n_total_vectors)));         
-        int n_query = 10000;
+        int n_query = 10;
         int k = 100;
+        int vector_dim = 128;
     // 使用和 pgvector 相同的参数进行测试
     // {
     //     int n_query = 4;
@@ -493,7 +495,9 @@ int main(int argc, char** argv) {
                      " n_total_clusters=", n_total_clusters,
                      " vector_dim=", vector_dim,
                      " k=", k,
-                     " n_probes=", n_probes);
+                     " n_probes=", n_probes,
+                     " distance_mode=", distance_mode
+                    );
             if (need_regenerate_dataset) {
                 COUT_ENDL("[INFO] Regenerated dataset");
             }
@@ -504,7 +508,7 @@ int main(int argc, char** argv) {
         }
         
         auto result = metrics.add_row_averaged([&]() -> std::vector<double> {
-            auto metrics_result = run_case(config, &cached_dataset, cached_query_batch, cached_cluster_center_data,0);
+            auto metrics_result = run_case(config, &cached_dataset, cached_query_batch, cached_cluster_center_data, distance_mode);
             
             std::vector<double> return_vec = {
                 metrics_result[0],  // pass_rate
@@ -514,6 +518,7 @@ int main(int argc, char** argv) {
                 static_cast<double>(k),
                 static_cast<double>(n_probes),
                 static_cast<double>(n_total_vectors),
+                static_cast<double>(distance_mode),
                 metrics_result[1],  // gpu_ms
                 metrics_result[2],  // cpu_ms
                 metrics_result[3]  // speedup
