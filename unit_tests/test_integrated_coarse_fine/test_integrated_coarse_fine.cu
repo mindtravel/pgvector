@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../../cuda/integrate_screen/integrate_screen.cuh"
+#include "../../cuda/pch.h"
 #include "../common/test_utils.cuh"
 
 struct BenchmarkCase {
@@ -353,7 +354,8 @@ static std::vector<double> run_case(const BenchmarkCase& config,
             config.n_total_clusters,
             config.n_total_vectors,
             config.n_probes,  // 粗筛选择的cluster数
-            config.k     // k: 最终输出的topk数量
+            config.k,     // k: 最终输出的topk数量
+            COSINE_DISTANCE
         );
         cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;

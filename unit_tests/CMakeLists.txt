@@ -94,9 +94,6 @@ set_target_properties(utils_lib PROPERTIES
 #   - indexed_gemm_cos.cu: entry-based版本（当前使用）
 #   - indexed_gemm_l2.cu: entry-based版本（当前使用）
 # 
-# 注意：
-#   - test_fusion_cos_topk_fine 如需测试弃用版本，需单独编译对应文件
-#   - inner_product_utils.cuh 是头文件，不需要添加到库中
 add_library(indexed_gemm_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/indexed_gemm/indexed_gemm_cos.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/indexed_gemm/indexed_gemm_l2.cu
@@ -260,7 +257,7 @@ add_subdirectory(test_print_cuda)
 add_subdirectory(test_matrix_multiply)
 add_subdirectory(test_cos_distance)
 add_subdirectory(test_fusion_cos_topk)
-add_subdirectory(test_fusion_cos_topk_fine)
+# add_subdirectory(test_fusion_cos_topk_fine)
 add_subdirectory(test_warpsort)
 add_subdirectory(test_bitonic)
 add_subdirectory(test_stream_pass_data)
@@ -278,7 +275,7 @@ add_custom_target(run_all_tests
         test_matrix_multiply 
         test_cos_distance 
         test_fusion_cos_topk
-        test_fusion_cos_topk_fine
+        # test_fusion_cos_topk_fine
         test_warpsort
         test_bitonic
         test_stream_pass_data

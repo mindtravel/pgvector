@@ -202,36 +202,3 @@ int main(int argc, char** argv) {
     
     return all_pass ? 0 : 1;
 }
-
-
-    bool all_pass = true;
-    
-    MetricsCollector metrics;
-    metrics.set_columns("pass rate", "batch_size", "len", "k", 
-                       "total_size", "gpu_ms", "cpu_ms", "speedup");
-    metrics.set_num_repeats(1);
-    
-    COUT_ENDL("测试 select_k");
-    
-    // 使用 PARAM_3D 宏遍历多种参数组合
-    PARAM_3D(batch_size, (1, 5, 10, 20, 50, 100, 200, 500, 1000),
-             len, (10, 20, 50, 100, 200, 500, 1000),
-             k, (5, 10, 16, 32, 64, 128))
-    {
-        // 只测试 k <= len 的情况
-        if (k > len) continue;
-        
-        auto result = metrics.add_row_averaged([&]() -> std::vector<double> {
-            auto test_result = test_single_config(batch_size, len, k);
-            all_pass &= (test_result[0] == 1.0);
-            return test_result;
-        });
-    }
-    
-    metrics.print_table();
-    
-    COUT_ENDL("\n所有测试:", all_pass ? "✅ PASS" : "❌ FAIL");
-    
-    return all_pass ? 0 : 1;
-}
-

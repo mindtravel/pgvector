@@ -11,7 +11,7 @@
 #include <random>
 #include <thread>
 
-#include "../../cuda/fusion_cos_topk/fusion_cos_topk.cuh"
+#include "../../cuda/fusion_dist_topk/fusion_dist_topk.cuh"
 #include "../../cuda/pch.h"
 #include "../common/test_utils.cuh"
 #include "../common/params_macros.cuh"
@@ -358,7 +358,7 @@ std::vector<double> test_single_config(
     double gpu_duration_ms = 0;
 
     MEASURE_MS_AND_SAVE("GPU fine search", gpu_duration_ms,
-        cuda_cos_topk_warpsort_fine_v5(
+        cuda_cos_topk_warpsort_fine(
             d_query_group,
             d_cluster_vector,
             d_probe_vector_offset,
@@ -493,7 +493,7 @@ int main(int argc, char** argv) {
     // Warmup
     test_single_config(8, 4, 16, 128, 10, 32);
     
-    COUT_ENDL("测试算法: cuda_cos_topk_warpsort_fine_v5 (entry-based)");
+    COUT_ENDL("测试算法: cuda_cos_topk_warpsort_fine (entry-based)");
     metrics.set_num_repeats(1);
 
     int n_dim = 128;

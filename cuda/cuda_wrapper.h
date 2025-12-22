@@ -71,6 +71,11 @@ extern void cuda_pipeline_flush(GpuPipelineContext* ctx);
 extern void cuda_pipeline_flush_vectors_only(GpuPipelineContext* ctx);
 extern void cuda_pipeline_free(GpuPipelineContext* ctx);
 
+/* CUDA 错误检查函数 */
+extern void cuda_device_synchronize(void);
+extern const char* cuda_get_last_error_string(void);
+extern bool cuda_check_last_error(void);
+
 
 #ifdef __cplusplus
 }

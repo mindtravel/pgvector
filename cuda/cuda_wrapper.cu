@@ -243,4 +243,27 @@ extern "C" {
         if (d_topk_dist) cudaFree(d_topk_dist);
         if (d_topk_index) cudaFree(d_topk_index);
     }
+
+    /* CUDA 错误检查函数 */
+    void cuda_device_synchronize(void)
+    {
+        cudaDeviceSynchronize();
+    }
+
+    /* 获取最后一个 CUDA 错误的字符串描述 */
+    const char* cuda_get_last_error_string(void)
+    {
+        cudaError_t err = cudaGetLastError();
+        if (err == cudaSuccess) {
+            return "no error";
+        }
+        return cudaGetErrorString(err);
+    }
+
+    /* 检查最后一个 CUDA 错误，如果有错误返回 true */
+    bool cuda_check_last_error(void)
+    {
+        cudaError_t err = cudaGetLastError();
+        return (err != cudaSuccess);
+    }
 }
