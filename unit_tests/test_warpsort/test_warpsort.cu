@@ -98,10 +98,15 @@ void cpu_select_k(
 
 /**
  * 测试函数 - 返回所有性能指标
+ * @param batch_size 批次大小
+ * @param len 每个向量的长度
+ * @param k top-k值
+ * @param h_input 预生成的输入数据（如果为nullptr，则内部生成）
  * @return vector<double>: {pass rate, batch_size, k, len, gpu_ms, cpu_ms, speedup}
  */
 std::vector<double> test_warpsort(
-    int batch_size, int len, int k
+    int batch_size, int len, int k,
+    const float** h_input = nullptr
 )
 {    
     bool pass = true;
@@ -110,9 +115,13 @@ std::vector<double> test_warpsort(
         COUT_ENDL("配置: ", "batch_size=", batch_size, ", len=", len, ", k=",k);
     }
 
-    // Allocate host memory & generate random data
-    srand(42);
-    const float** h_input = const_cast<const float**>((float**)generate_vector_list(batch_size, len));
+    // Allocate host memory & generate random data (if not provided)
+    bool need_free_input = false;
+    if (h_input == nullptr) {
+        srand(42);
+        h_input = const_cast<const float**>((float**)generate_vector_list(batch_size, len));
+        need_free_input = true;
+    }
     float** h_gpu_vals = (float**)malloc_vector_list(batch_size, k, sizeof(float));
     float** h_cpu_vals = (float**)malloc_vector_list(batch_size, k, sizeof(float));
     int** h_gpu_idx = (int**)malloc_vector_list(batch_size, k, sizeof(int));
@@ -169,7 +178,9 @@ std::vector<double> test_warpsort(
     }
     
     // Cleanup
-    free_vector_list((void**)h_input);
+    if (need_free_input) {
+        free_vector_list((void**)h_input);
+    }
     free_vector_list((void**)h_gpu_vals);
     free_vector_list((void**)h_gpu_idx);
     free_vector_list((void**)h_cpu_vals);
@@ -260,19 +271,52 @@ int main()
     MetricsCollector metrics;
     metrics.set_columns("pass rate", "batch", "len", "k", "avg_gpu_ms", "avg_cpu_ms", "avg_speedup");
     // metrics.set_num_repeats(1);
+    
+    // 缓存的数据集
+    const float** cached_h_input = nullptr;
+    
+    // 缓存的关键参数
+    int cached_batch_size = -1;
+    int cached_len = -1;
         
     PARAM_2D(batch, (2000, 5000, 10000, 20000), 
                 k, (8, 16, 32, 50, 64, 100, 128))        
     // PARAM_2D(batch, (100, 200), 
     //             k, (8, 16))        
     {
+        int len = 1024;  // 固定长度
+        
+        bool need_regenerate_input = (cached_batch_size != batch || 
+                                     cached_len != len);
+        
+        if (need_regenerate_input) {
+            if (cached_h_input != nullptr) {
+                free_vector_list((void**)cached_h_input);
+                cached_h_input = nullptr;
+            }
+            srand(42);
+            cached_h_input = const_cast<const float**>((float**)generate_vector_list(batch, len));
+            cached_batch_size = batch;
+            cached_len = len;
+        }
+        
+        if (!QUIET) {
+            if (need_regenerate_input) {
+                COUT_ENDL("[INFO] Regenerated input dataset");
+            }
+        }
         
         auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
-            auto result = test_warpsort(batch, 1024, k);
+            auto result = test_warpsort(batch, len, k, cached_h_input);
             all_pass &= (result[0] == 1.0);  // 检查 pass 字段
             return result;
         });
         
+    }
+    
+    // 清理缓存的数据
+    if (cached_h_input != nullptr) {
+        free_vector_list((void**)cached_h_input);
     }
     
     metrics.print_table();

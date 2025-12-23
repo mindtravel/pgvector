@@ -128,11 +128,20 @@ void cpu_cos_distance_topk(float** query_vectors, float** data_vectors,
 
 /**
  * 测试函数 - 返回所有性能指标
+ * @param n_query 查询向量数量
+ * @param n_batch 数据向量数量
+ * @param n_dim 向量维度
+ * @param k top-k值
+ * @param algo_version 算法版本
+ * @param h_query_vectors 预生成的查询向量（如果为nullptr，则内部生成）
+ * @param h_data_vectors 预生成的数据向量（如果为nullptr，则内部生成）
  * @return vector<double>: {pass rate, n_query, n_batch, n_dim, k, gpu_ms, cpu_ms, speedup, memery_mb}
  */
 std::vector<double> test_cos_distance_topk_with_algorithm(
     int n_query, int n_batch, int n_dim, int k, 
-    AlgorithmVersion algo_version
+    AlgorithmVersion algo_version,
+    float** h_query_vectors = nullptr,
+    float** h_data_vectors = nullptr
 ) 
 {
     AlgorithmInfo& algo_info = algorithm_registry[algo_version];
@@ -143,9 +152,17 @@ std::vector<double> test_cos_distance_topk_with_algorithm(
         COUT_VAL("配置:", n_query, "个查询向量 ×", n_batch, "个数据向量", ", 向量维度:", n_dim, ", 找top", k, ", 算法: ", algo_info.description);
     }  
         
-    // 生成测试数据
-    float** h_query_vectors = generate_vector_list(n_query, n_dim);
-    float** h_data_vectors = generate_vector_list(n_batch, n_dim);
+    // 生成测试数据（如果未提供）
+    bool need_free_query = false;
+    bool need_free_data = false;
+    if (h_query_vectors == nullptr) {
+        h_query_vectors = generate_vector_list(n_query, n_dim);
+        need_free_query = true;
+    }
+    if (h_data_vectors == nullptr) {
+        h_data_vectors = generate_vector_list(n_batch, n_dim);
+        need_free_data = true;
+    }
     int** topk_index_cpu = (int**)malloc_vector_list(n_query, k, sizeof(int));
     int** topk_index_gpu = (int**)malloc_vector_list(n_query, k, sizeof(int));
 
@@ -196,8 +213,12 @@ std::vector<double> test_cos_distance_topk_with_algorithm(
     }    
 
     // 清理内存
-    free_vector_list((void**)h_query_vectors);    
-    free_vector_list((void**)h_data_vectors);
+    if (need_free_query) {
+        free_vector_list((void**)h_query_vectors);
+    }
+    if (need_free_data) {
+        free_vector_list((void**)h_data_vectors);
+    }
     free_vector_list((void**)topk_index_gpu);
     free_vector_list((void**)topk_index_cpu);
     free_vector_list((void**)topk_dist_cpu);
@@ -252,6 +273,15 @@ int main(int argc, char** argv) {
     // 只测试 warpsort 版本
     test_cos_distance_topk_with_algorithm(1024, 128, 512, 16, WARP_SORT); /*warmup*/
 
+    // 缓存的数据集
+    float** cached_h_query_vectors = nullptr;
+    float** cached_h_data_vectors = nullptr;
+    
+    // 缓存的关键参数
+    int cached_n_query = -1;
+    int cached_n_batch = -1;
+    int cached_n_dim = -1;
+
     COUT_ENDL("测试算法: 全寄存器 Topk");
     // PARAM_3D(n_query, (8, 32, 128, 512, 2048), 
     //         n_batch, (128, 512, 2048), /* n_batch < k */
@@ -259,11 +289,60 @@ int main(int argc, char** argv) {
     PARAM_2D(n_probes, (1, 5, 10, 20, 40), 
             n_batch, (1024)) /* n_batch < k */
     {
+        int n_query = 10000;
+        int n_dim = 128;
+        
+        bool need_regenerate_query = (cached_n_query != n_query || 
+                                     cached_n_dim != n_dim);
+        
+        bool need_regenerate_data = (cached_n_batch != n_batch ||
+                                    cached_n_dim != n_dim);
+        
+        if (need_regenerate_query) {
+            if (cached_h_query_vectors != nullptr) {
+                free_vector_list((void**)cached_h_query_vectors);
+                cached_h_query_vectors = nullptr;
+            }
+            cached_h_query_vectors = generate_vector_list(n_query, n_dim);
+            cached_n_query = n_query;
+            cached_n_dim = n_dim;
+        }
+        
+        if (need_regenerate_data) {
+            if (cached_h_data_vectors != nullptr) {
+                free_vector_list((void**)cached_h_data_vectors);
+                cached_h_data_vectors = nullptr;
+            }
+            cached_h_data_vectors = generate_vector_list(n_batch, n_dim);
+            cached_n_batch = n_batch;
+            cached_n_dim = n_dim;
+        }
+        
+        if (!QUIET) {
+            if (need_regenerate_query) {
+                COUT_ENDL("[INFO] Regenerated query vectors");
+            }
+            if (need_regenerate_data) {
+                COUT_ENDL("[INFO] Regenerated data vectors");
+            }
+        }
+        
         auto avg_result = metrics.add_row_averaged([&]() -> std::vector<double> {
-            auto result = test_cos_distance_topk_with_algorithm(10000, n_batch, 128, n_probes, WARP_SORT);
+            auto result = test_cos_distance_topk_with_algorithm(
+                n_query, n_batch, n_dim, n_probes, WARP_SORT,
+                cached_h_query_vectors, cached_h_data_vectors
+            );
             all_pass &= (result[0] == 1.0);  // 检查 pass 字段
             return result;
         });
+    }
+    
+    // 清理缓存的数据
+    if (cached_h_query_vectors != nullptr) {
+        free_vector_list((void**)cached_h_query_vectors);
+    }
+    if (cached_h_data_vectors != nullptr) {
+        free_vector_list((void**)cached_h_data_vectors);
     }
 
     metrics.print_table();

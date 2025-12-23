@@ -51,9 +51,6 @@ echo "运行 cos_distance 测试..."
 echo "运行 fusion_cos_topk 测试..."
 ./test_fusion_cos_topk/test_fusion_cos_topk $1
 echo "=================================="
-# echo "运行 fusion_cos_topk_fine 测试..."
-# ./test_fusion_cos_topk_fine/test_fusion_cos_topk_fine $1
-# echo "=================================="
 echo "运行 warp sort 测试..."
 ./test_warpsort/test_warpsort
 echo "=================================="
@@ -62,9 +59,6 @@ echo "运行 stream pass data 测试..."
 echo "=================================="
 echo "运行 warp sort 测试..."
 ./test_bitonic/test_bitonic
-echo "=================================="
-echo "运行 final_topk 测试..."
-./test_final_topk/test_final_topk
 echo "=================================="
 # echo "运行 integrated_coarse_fine_pipeline 测试..."
 # ./test_integrated_coarse_fine_pipeline/test_integrated_coarse_fine_pipeline

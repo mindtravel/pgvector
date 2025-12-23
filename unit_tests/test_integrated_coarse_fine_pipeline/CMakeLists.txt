@@ -25,7 +25,7 @@ target_link_libraries(test_integrated_coarse_fine_pipeline
     curand
     l2norm_lib
     indexed_gemm_lib
-    integrate_screen_pipeline_lib  # 包含 fusion_cos_topk_warpsort 和 warpsort_topk
+    integrate_screen_lib  # 包含 batch_search_pipeline (device指针版本)
 )
 
 set_target_properties(test_integrated_coarse_fine_pipeline PROPERTIES
