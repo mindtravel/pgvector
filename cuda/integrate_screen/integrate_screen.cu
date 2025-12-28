@@ -183,7 +183,7 @@ void batch_search_pipeline(float* d_query_batch,
         {
             CUDATimer timer_compute("Step 1: Kernel Execution: cos + topk");
 
-            if(distance_mode == 0){
+            if(distance_mode == COSINE_DISTANCE){
                 pgvector::fusion_dist_topk_warpsort::fusion_cos_topk_warpsort<float, int>(
                     d_query_norm, d_cluster_centers_norm, d_inner_product, d_initial_indices,
                     n_query, n_total_clusters, n_probes,  // 粗筛选择 n_probes 个 cluster
@@ -192,7 +192,7 @@ void batch_search_pipeline(float* d_query_batch,
                     0  // 默认流
                 );
             }
-            else{
+            else if(distance_mode == L2_DISTANCE){
                 pgvector::fusion_dist_topk_warpsort::fusion_l2_topk_warpsort<float, int>(
                     d_query_norm, d_cluster_centers_norm, d_inner_product, d_initial_indices,
                     n_query, n_total_clusters, n_probes,  // 粗筛选择 n_probes 个 cluster

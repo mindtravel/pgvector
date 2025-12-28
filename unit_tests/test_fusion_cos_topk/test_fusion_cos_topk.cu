@@ -68,17 +68,14 @@ void cpu_cos_distance_topk(float** query_vectors, float** data_vectors,
         for (int i = start_q; i < end_q; i++) {
             // 计算当前query与所有data向量的余弦距离
             for (int j = 0; j < n_batch; j++) {
-                // 计算点积
-                float dot_product = 0.0f;
-                for (int d = 0; d < n_dim; d++) {
-                    dot_product += query_vectors[i][d] * data_vectors[j][d];
-                }
+                // 使用统一的 dot_product 函数
+                float dot = dot_product(query_vectors[i], data_vectors[j], n_dim);
                 float cos_sim;
                 // 计算余弦相似度
                 if (query_norms[i] < 1e-6f || data_norms[j] < 1e-6f)
                     cos_sim = 0.0f;  // 如果任一向量接近零向量，相似度为0
                 else
-                    cos_sim = 1.0f - (dot_product / sqrt(query_norms[i] * data_norms[j]));
+                    cos_sim = 1.0f - (dot / sqrt(query_norms[i] * data_norms[j]));
                 
                 // 存储余弦相似度和对应的数据索引（直接使用 j）
                 cos_pairs[j] = std::make_pair(cos_sim, j);

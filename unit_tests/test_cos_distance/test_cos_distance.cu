@@ -22,17 +22,14 @@ void cpu_cosine_distance(float** query_vectors, float** data_vectors, float** co
     for (int i = 0; i < n_query; i++) {
         for (int j = 0; j < n_batch; j++) {
             // 计算点积
-            float dot_product = 0.0f;
-            for (int k = 0; k < n_dim; k++) {
-                dot_product += query_vectors[i][k] * data_vectors[j][k];
-            }
+            float dot = dot_product(query_vectors[i], data_vectors[j], n_dim);
             
             float cos_sim;
             // 计算余弦相似度
             if (query_norms[i] < 1e-6f || data_norms[j] < 1e-6f)
                 cos_sim = 0.0f;  // 如果任一向量接近零向量，相似度为0
             else
-                cos_sim = dot_product / (query_norms[i] * data_norms[j]);
+                cos_sim = dot / (query_norms[i] * data_norms[j]);
                 // cos_sim = (query_norms[i]);
                 // cos_sim = dot_product;
             // 余弦距离 = 1 - 余弦相似度

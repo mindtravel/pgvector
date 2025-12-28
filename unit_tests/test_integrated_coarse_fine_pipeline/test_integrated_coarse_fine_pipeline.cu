@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "../../cuda/integrate_screen/integrate_screen.cuh"
+#include "../../cuda/utils.cuh"
 #include "../common/test_utils.cuh"
 
 struct BenchmarkCase {
@@ -127,31 +128,6 @@ static BalancedMapping build_balanced_mapping(const ClusterDataset& dataset,
 struct QueryBatch {
     float** ptrs = nullptr;
 };
-static float cosine_distance(const float* a, const float* b, int dim) {
-    float dot = 0.0f;
-    float na = 0.0f;
-    float nb = 0.0f;
-    for (int i = 0; i < dim; ++i) {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    float denom = std::sqrt(na) * std::sqrt(nb);
-    if (denom < 1e-6f) return 1.0f;
-    return 1.0f - dot / denom;
-}
-
-static float l2_distance_sq(const float* a, const float* b, int dim) {
-    float s = 0.0f;
-    for (int i = 0; i < dim; ++i) {
-        float d = a[i] - b[i];
-        s += d * d;
-    }
-    return s;
-}
-
-
-
 
 static void cpu_coarse_fine_search(const BenchmarkCase& config,
                                               float** query_batch,
@@ -160,7 +136,7 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
                                               int* initial_indices,
                                               int** out_index,
                                               float** out_dist,
-                                              int distance_mode /*0: cos, 1: l2*/
+                                              int distance_mode /*COSINE_DISTANCE: cos, L2_DISTANCE: l2*/
                                           ) {
     const int n_query = config.n_query;
     const int n_dim = config.vector_dim;
@@ -179,7 +155,7 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
             const int* query_initial_indices = initial_indices + qi * n_total_clusters;
             for (int idx = 0; idx < n_total_clusters; ++idx) {
                 int cid = query_initial_indices[idx];  // 使用传入的索引
-                float dist = (distance_mode == 1) ? l2_distance_sq(query, centers[cid], n_dim) : cosine_distance(query, centers[cid], n_dim);
+                float dist = (distance_mode == L2_DISTANCE) ? l2_distance_squared(query, centers[cid], n_dim) : cosine_distance(query, centers[cid], n_dim);
                 tmp[idx] = {dist, cid};
             }
             // 粗筛选择 n_probes 个 cluster
@@ -205,7 +181,7 @@ static void cpu_coarse_fine_search(const BenchmarkCase& config,
                     const float* vec = base + static_cast<size_t>(vid) * n_dim;
                     // 存储全局索引：cluster 的全局偏移 + cluster 内的局部索引
                     int global_idx = cluster_global_offset + vid;
-                    float dist = (distance_mode == 1) ? l2_distance_sq(query, vec, n_dim) : cosine_distance(query, vec, n_dim);
+                    float dist = (distance_mode == L2_DISTANCE) ? l2_distance_squared(query, vec, n_dim) : cosine_distance(query, vec, n_dim);
                     fine_buffer.push_back({dist, global_idx});
                 }
             }
@@ -368,7 +344,7 @@ static std::vector<double> run_case(const BenchmarkCase& config,
             config.n_total_vectors,
             config.n_probes,  // 粗筛选择的cluster数
             config.k,     // k: 最终输出的topk数量
-            distance_mode //cos or l2 默认0为cos
+            distance_mode //COSINE_DISTANCE or L2_DISTANCE, 默认COSINE_DISTANCE为cos
         );
         cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
@@ -388,7 +364,7 @@ static std::vector<double> run_case(const BenchmarkCase& config,
     cudaFree(d_topk_dist);
     cudaFree(d_topk_index);
     
-    bool pass = distance_mode ? compare_set_2D_relative<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-4f) :
+    bool pass = (distance_mode == L2_DISTANCE) ? compare_set_2D_relative<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-4f) :
                        compare_set_2D<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-5f);
     
     double pass_rate = pass ? 1.0 : 0.0;
@@ -440,7 +416,7 @@ int main(int argc, char** argv) {
     //         vector_dim, (128, 256))
     PARAM_3D(n_total_vectors, (10000, 1000000),
              n_probes, (1, 2, 5, 10, 20),
-             distance_mode, (0, 1))  // 0: cosine, 1: l2
+             distance_mode, (COSINE_DISTANCE, L2_DISTANCE))  // COSINE_DISTANCE: cosine, L2_DISTANCE: l2
             //  distance_mode, (1))  // 0: cosine, 1: l2
     {
         int n_total_clusters = std::max(10, static_cast<int>(std::sqrt(n_total_vectors)));         

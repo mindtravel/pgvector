@@ -7,9 +7,11 @@
 #include <vector>
 #include <cmath>
 #include <cuda_runtime.h>
+#include "../../cuda/pch.h"
 #include "output_macros.cuh"
 #include "params_macros.cuh"
 #include "metrics_collector.cuh"
+#include "cpu_utils.h"
 
 #define DEBUG true /* debug模式：用于寻找正确输出和测试函数输出的差异 */
 #define QUIET false /* 静默模式：不打印日志（用于重复运行）*/
@@ -289,36 +291,13 @@ void** malloc_vector_list(size_t n_batch, size_t n_dim, size_t elem_size);
 void free_vector_list(void** vector_list);
 
 /**
- * 计算向量的平方和（sum of squares）
- * @param vector 向量数据
- * @param n_dim 向量维度
- * @return 平方和
- */
-inline float compute_squared_sum(const float* vector, int n_dim) {
-    float sum = 0.0f;
-    for (int d = 0; d < n_dim; d++) {
-        sum += vector[d] * vector[d];
-    }
-    return sum;
-}
-
-/**
- * 计算向量的 L2 范数（L2 norm）
- * @param vector 向量数据
- * @param n_dim 向量维度
- * @return L2 范数（sqrt(sum of squares)）
- */
-inline float compute_l2_norm(const float* vector, int n_dim) {
-    float sum = compute_squared_sum(vector, n_dim);
-    return sqrtf(sum);
-}
-
-/**
- * 批量计算向量的平方和
+ * 批量计算向量的平方和（使用指针数组版本）
  * @param vectors 向量数组 [n_batch][n_dim]
  * @param squared_sums 输出的平方和数组 [n_batch]
  * @param n_batch 向量数量
  * @param n_dim 向量维度
+ * 
+ * 注意：compute_squared_sum 和 compute_l2_norm 已在 cpu_utils.h 中定义
  */
 inline void compute_squared_sums_batch(float** vectors, float* squared_sums, int n_batch, int n_dim) {
     for (int i = 0; i < n_batch; i++) {
@@ -327,11 +306,13 @@ inline void compute_squared_sums_batch(float** vectors, float* squared_sums, int
 }
 
 /**
- * 批量计算向量的 L2 范数
+ * 批量计算向量的 L2 范数（使用指针数组版本）
  * @param vectors 向量数组 [n_batch][n_dim]
  * @param norms 输出的 L2 范数数组 [n_batch]
  * @param n_batch 向量数量
  * @param n_dim 向量维度
+ * 
+ * 注意：compute_squared_sum 和 compute_l2_norm 已在 cpu_utils.h 中定义
  */
 inline void compute_l2_norms_batch(float** vectors, float* norms, int n_batch, int n_dim) {
     for (int i = 0; i < n_batch; i++) {

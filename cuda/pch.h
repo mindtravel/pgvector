@@ -33,6 +33,9 @@
 #include <algorithm>
 #include <time.h>
 
-#define COSINE_DISTANCE 0
-#define L2_DISTANCE 1
+enum DistanceType {
+    L2_DISTANCE = 0,
+    COSINE_DISTANCE = 1
+};
+
 #endif //PCH_H

@@ -105,19 +105,6 @@ static BalancedMapping build_balanced_mapping(const ClusterDataset& dataset,
 struct QueryBatch {
     float** ptrs = nullptr;
 };
-static float cosine_distance(const float* a, const float* b, int dim) {
-    float dot = 0.0f;
-    float na = 0.0f;
-    float nb = 0.0f;
-    for (int i = 0; i < dim; ++i) {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    float denom = std::sqrt(na) * std::sqrt(nb);
-    if (denom < 1e-6f) return 1.0f;
-    return 1.0f - dot / denom;
-}
 
 
 

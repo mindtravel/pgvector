@@ -52,6 +52,7 @@ set(COMMON_HEADERS "-include ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/pch.h")
 # 注意：使用可分离编译以便其他目标可以链接device符号
 add_library(l2norm_lib STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/l2norm/l2norm.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/l2norm/l2norm_squared.cu
 )
 target_include_directories(l2norm_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
@@ -286,10 +287,10 @@ add_subdirectory(test_cos_distance)
 add_subdirectory(test_fusion_cos_topk)
 add_subdirectory(test_warpsort)
 add_subdirectory(test_bitonic)
-add_subdirectory(test_stream_pass_data)
 add_subdirectory(test_integrated_coarse_fine)
 add_subdirectory(test_integrated_coarse_fine_pipeline)
 add_subdirectory(test_select_k)
+add_subdirectory(test_kmeans)
 
 # 统一测试目标
 add_custom_target(run_all_tests
@@ -302,9 +303,9 @@ add_custom_target(run_all_tests
         test_fusion_cos_topk
         test_warpsort
         test_bitonic
-        test_stream_pass_data
         test_integrated_coarse_fine
         test_integrated_coarse_fine_pipeline
         test_select_k
+        test_kmeans
     COMMENT "运行所有单元测试"
 )
