@@ -1,6 +1,7 @@
 #include "kmeans.cuh"
 #include "../utils.cuh"
 #include "../l2norm/l2norm.cuh"
+#include "../cudatimer.h"
 #include <cublas_v2.h>
 #include <cstdio>
 #include <vector>
@@ -11,227 +12,7 @@
 #include <vector>
 #include <../unit_tests/common/test_utils.cuh>
 
-// ============================================================
-// GPU Kernels Implementation
-// ============================================================
-
-/**
- * Kernel: 对 best_dist2 数组求和（block reduce）
- * 使用共享内存进行 block 内规约，然后原子加到一个全局累加器
- */
-__global__ void kernel_reduce_sum(
-    const float* __restrict__ data,
-    float* __restrict__ output,  // 单个 float 的累加器
-    int n
-) {
-    extern __shared__ float sdata[];
-    int tid = threadIdx.x;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // 每个线程加载一个元素
-    float val = (i < n) ? data[i] : 0.0f;
-    
-    // Block 内规约
-    sdata[tid] = val;
-    __syncthreads();
-    
-    // 规约：使用 warp shuffle + shared memory
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sdata[tid] += sdata[tid + s];
-        }
-        __syncthreads();
-    }
-    
-    // Block 0 的第一个线程原子加
-    if (tid == 0) {
-        atomicAdd(output, sdata[0]);
-    }
-}
-
-__global__ void kernel_update_centroids(
-    float* __restrict__ centroids,   // [k, dim]
-    const float* __restrict__ accum, // [k, dim]
-    const int* __restrict__ counts,  // [k]
-    int k, int dim
-) {
-    int c = blockIdx.x;
-    int j = threadIdx.x;
-    if (c >= k) return;
-
-    int cnt = counts[c];
-    if (cnt <= 0) return;  // keep old centroid
-    float inv = 1.0f / (float)cnt;
-
-    for (int col = j; col < dim; col += blockDim.x) {
-        centroids[(size_t)c * dim + col] = accum[(size_t)c * dim + col] * inv;
-    }
-}
-
-// ============================================================
-// GEMM-based KMeans Kernels
-// ============================================================
-
-/**
- * Kernel: 初始化最佳匹配（best_dist2 = INF, best_idx = 0）
- */
-__global__ void kernel_init_best(
-    float* __restrict__ best_dist2,
-    int* __restrict__ best_idx,
-    int n
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        best_dist2[i] = 3.402823e38f;  // FLT_MAX
-        best_idx[i] = 0;
-    }
-}
-
-/**
- * Kernel: 从 GEMM 结果（col-major dotT）更新最佳匹配（优化版本：使用规约）
- * 
- * dotT: [curK, curB] col-major，即 dotT[t + i*curK] = dot(centroid[cbase+t], data[i])
- * 
- * 优化策略：
- * - 每个线程处理一个数据点
- * - 使用 warp shuffle 在 warp 内进行 min 规约
- * - 使用循环展开和向量化加载优化内存访问
- */
-__global__ void kernel_update_best_from_dotT(
-    const float* __restrict__ dotT,      // [curK, curB] col-major
-    const float* __restrict__ xnorm2,     // [curB]
-    const float* __restrict__ cnorm2_global,  // [k] 全局centroid范数
-    int curB,
-    int curK,
-    int cbase,                            // centroid起始偏移
-    int* __restrict__ best_idx,          // [curB]
-    float* __restrict__ best_dist2        // [curB]
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= curB) return;
-
-    const float xn = xnorm2[i];
-    float bestd = best_dist2[i];
-    int bestc = best_idx[i];
-
-    // 使用循环展开优化：每次处理多个centroid
-    const int unroll_factor = 4;
-    int t = 0;
-    
-    // 主循环：处理大部分centroid
-    for (; t + unroll_factor <= curK; t += unroll_factor) {
-        #pragma unroll
-        for (int u = 0; u < unroll_factor; ++u) {
-            int tidx = t + u;
-            float dot = dotT[tidx + (size_t)i * curK];
-            float cn = cnorm2_global[cbase + tidx];
-            float d2 = xn + cn - 2.f * dot;
-            int cid = cbase + tidx;
-            if (d2 < bestd) {
-                bestd = d2;
-                bestc = cid;
-            }
-        }
-    }
-    
-    // 处理剩余的centroid
-    for (; t < curK; ++t) {
-        float dot = dotT[t + (size_t)i * curK];
-        float cn = cnorm2_global[cbase + t];
-        float d2 = xn + cn - 2.f * dot;
-        int cid = cbase + t;
-        if (d2 < bestd) {
-            bestd = d2;
-            bestc = cid;
-        }
-    }
-
-    best_dist2[i] = bestd;
-    best_idx[i] = bestc;
-}
-
-/**
- * Kernel: 从 GEMM 结果（col-major dotT）更新最佳匹配（Warp规约优化版本）
- * 
- * 使用 warp shuffle 进行规约，适用于 curK 较大的情况
- * 每个 warp 协作处理一个数据点，在 warp 内进行 min 规约
- */
-__global__ void kernel_update_best_from_dotT_warp_reduce(
-    const float* __restrict__ dotT,      // [curK, curB] col-major
-    const float* __restrict__ xnorm2,     // [curB]
-    const float* __restrict__ cnorm2_global,  // [k] 全局centroid范数
-    int curB,
-    int curK,
-    int cbase,                            // centroid起始偏移
-    int* __restrict__ best_idx,          // [curB]
-    float* __restrict__ best_dist2        // [curB]
-) {
-    const int warp_id = threadIdx.x / 32;
-    const int lane_id = threadIdx.x % 32;
-    const int warp_count = (blockDim.x + 31) / 32;
-    const int data_idx = blockIdx.x * warp_count + warp_id;
-    
-    if (data_idx >= curB) return;
-
-    const float xn = xnorm2[data_idx];
-    float bestd = (lane_id == 0) ? best_dist2[data_idx] : 3.402823e38f;  // FLT_MAX
-    int bestc = (lane_id == 0) ? best_idx[data_idx] : -1;
-
-    // 每个线程处理 curK / 32 个centroid（向上取整）
-    const int centroids_per_thread = (curK + 31) / 32;
-    const int start_t = lane_id * centroids_per_thread;
-    const int end_t = (start_t + centroids_per_thread < curK) ? (start_t + centroids_per_thread) : curK;
-
-    // 每个线程处理分配给它的centroid
-    for (int t = start_t; t < end_t; ++t) {
-        float dot = dotT[t + (size_t)data_idx * curK];
-        float cn = cnorm2_global[cbase + t];
-        float d2 = xn + cn - 2.f * dot;
-        int cid = cbase + t;
-        if (d2 < bestd) {
-            bestd = d2;
-            bestc = cid;
-        }
-    }
-
-    // Warp shuffle 规约：找到 warp 内的最小值
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        float other_d = __shfl_down_sync(0xffffffff, bestd, offset);
-        int other_c = __shfl_down_sync(0xffffffff, bestc, offset);
-        if (other_d < bestd) {
-            bestd = other_d;
-            bestc = other_c;
-        }
-    }
-
-    // Lane 0 写入结果
-    if (lane_id == 0) {
-        best_dist2[data_idx] = bestd;
-        best_idx[data_idx] = bestc;
-    }
-}
-
-/**
- * Kernel: 从分配结果累加（用于 GEMM 版本）
- */
-__global__ void kernel_accum_from_assign(
-    const float* __restrict__ data,   // [n, dim]
-    int n, int dim,
-    const int* __restrict__ assign, // [n]
-    float* __restrict__ accum,    // [k, dim]
-    int* __restrict__ counts      // [k]
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    int c = assign[i];
-    atomicAdd(&counts[c], 1);
-    float* acc = accum + (size_t)c * dim;
-    int base = i * dim;
-    for (int j = 0; j < dim; ++j) {
-        atomicAdd(&acc[j], data[base + j]);
-    }
-}
+#define ENABLE_CUDA_TIMING 1 /*是否启用CUDATimer计时*/
 
 static inline void cublas_check(cublasStatus_t st, const char* msg) {
     if (st != CUBLAS_STATUS_SUCCESS) {
@@ -251,6 +32,7 @@ void gpu_kmeans_lloyd(
     float* d_centroids,              // [k, dim] (in/out)，常驻显存
     float* h_objective                // sum dist2
 ) {
+    CUDATimer timer_total("gpu_kmeans_lloyd: Total Time", ENABLE_CUDA_TIMING);
     const int n = cfg.n, dim = cfg.dim, k = cfg.k;
 
     // ====== 可调参数：batch & ktile ======
@@ -315,6 +97,7 @@ void gpu_kmeans_lloyd(
 
     // ====== iteration ======
     for (int it = 0; it < cfg.iters; ++it) {
+        CUDATimer timer_iter("gpu_kmeans_lloyd: Iteration " + std::to_string(it), ENABLE_CUDA_TIMING);
         // clear accum & counts
         // dim3 fill_block(256);
         // int fill_grid_accum = std::min(65535, (int)(((size_t)k * dim + fill_block.x - 1) / fill_block.x));
@@ -323,10 +106,13 @@ void gpu_kmeans_lloyd(
         // fill_int_kernel<<<fill_grid_counts, fill_block>>>(d_counts, 0, k);
         // 使用 stream[0] 来执行迭代开始的操作（accum/counts清零和centroid范数计算）
         // 这些操作需要在所有batch开始前完成
-        cudaMemsetAsync(d_accum, 0, sizeof(float) * (size_t)k * dim, stream[0]);
-        cudaMemsetAsync(d_counts, 0, sizeof(int) * (size_t)k, stream[0]);
-        // 绑定到 stream[0]，确保在所有batch计算前完成
-        compute_l2_squared_gpu(d_centroids, d_cnorm2, k, dim, L2NORM_AUTO, stream[0]);
+        {
+            CUDATimer timer_init("  Iter " + std::to_string(it) + ": Initialize (clear accum/counts, compute centroid norms)", ENABLE_CUDA_TIMING);
+            cudaMemsetAsync(d_accum, 0, sizeof(float) * (size_t)k * dim, stream[0]);
+            cudaMemsetAsync(d_counts, 0, sizeof(int) * (size_t)k, stream[0]);
+            // 绑定到 stream[0]，确保在所有batch计算前完成
+            compute_l2_squared_gpu(d_centroids, d_cnorm2, k, dim, L2NORM_AUTO, stream[0]);
+        }
 
         // ====== 分块处理数据点（使用双缓冲） ======
         cur_buf = 0;
@@ -353,13 +139,15 @@ void gpu_kmeans_lloyd(
         // 记录事件，用于后续依赖
         cudaEventRecord(event[cur_buf], stream[cur_buf]);
 
-        for (int base = 0; base < n; base += B) {
-            int curB = std::min(B, n - base);
-            float* d_data_cur = d_data_buf[cur_buf];
-            
-            // 等待当前batch的数据传输完成（使用事件依赖）
-            // 第一次迭代：等待预加载完成；后续迭代：等待上一个batch的计算完成
-            cudaStreamWaitEvent(stream[cur_buf], event[cur_buf], 0);
+        {
+            CUDATimer timer_batch("  Iter " + std::to_string(it) + ": Process All Batches", ENABLE_CUDA_TIMING);
+            for (int base = 0; base < n; base += B) {
+                int curB = std::min(B, n - base);
+                float* d_data_cur = d_data_buf[cur_buf];
+                
+                // 等待当前batch的数据传输完成（使用事件依赖）
+                // 第一次迭代：等待预加载完成；后续迭代：等待上一个batch的计算完成
+                cudaStreamWaitEvent(stream[cur_buf], event[cur_buf], 0);
 
             // 异步预加载下一个batch（如果还有）
             // 注意：这里先启动预加载，但会在计算完成后才真正传输（通过事件依赖）
@@ -422,9 +210,12 @@ void gpu_kmeans_lloyd(
                            cudaMemcpyDeviceToDevice, stream[cur_buf]);
 
             // accum + counts（在当前流的流上执行）
+            // 优化：使用更大的 block size 以提高占用率，减少 kernel 启动开销
             {
-                int threads = 256;
+                int threads = 512;  // 增加到 512 以提高占用率
                 int blocks = (curB + threads - 1) / threads;
+                // 限制最大 block 数，避免过度启动
+                blocks = std::min(blocks, 65535);
                 kernel_accum_from_assign<<<blocks, threads, 0, stream[cur_buf]>>>(
                     d_data_cur, curB, dim,
                     d_best_idx, d_accum, d_counts
@@ -458,6 +249,7 @@ void gpu_kmeans_lloyd(
             // 切换到下一个缓冲区
             cur_buf = next_buf;
         }
+        }
 
         // 等待所有batch完成（只同步必要的流）
         // 等待两个流都完成，确保所有batch的计算和accum都完成
@@ -465,10 +257,13 @@ void gpu_kmeans_lloyd(
         cudaStreamSynchronize(stream[1]);
         
         // update centroids: one block per centroid（使用 stream[0]）
-        kernel_update_centroids<<<k, 256, 0, stream[0]>>>(d_centroids, d_accum, d_counts, k, dim);
-        
-        // 等待 centroid 更新完成（只同步 stream[0]）
-        cudaStreamSynchronize(stream[0]);
+        {
+            CUDATimer timer_update("  Iter " + std::to_string(it) + ": Update Centroids", ENABLE_CUDA_TIMING);
+            kernel_update_centroids<<<k, 256, 0, stream[0]>>>(d_centroids, d_accum, d_counts, k, dim);
+            
+            // 等待 centroid 更新完成（只同步 stream[0]）
+            cudaStreamSynchronize(stream[0]);
+        }
 
         // 从 GPU 读取 objective 值（只在迭代结束时读取一次）
         if (h_objective && d_objective_sum) {
