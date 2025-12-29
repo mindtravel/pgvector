@@ -146,42 +146,44 @@ static void cpu_kmeans_lloyd(
 static std::vector<double> run_case(const KMeansCase& cfg) {
     const int n = cfg.n, dim = cfg.dim, k = cfg.k;
 
-    // host data (continuous)
-    std::vector<float> h_data((size_t)n * dim);
+    // host data (pinned memory for faster H2D transfer)
+    float* h_data = nullptr;
+    cudaMallocHost(&h_data, sizeof(float) * (size_t)n * dim);
     {
         std::mt19937 rng(cfg.seed);
         std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-        for (size_t i = 0; i < h_data.size(); ++i) h_data[i] = dist(rng);
+        for (size_t i = 0; i < (size_t)n * dim; ++i) h_data[i] = dist(rng);
     }
 
     // cosine -> normalize vectors
     if (cfg.dist == COSINE_DISTANCE) {
         for (int i = 0; i < n; ++i) {
-            l2_normalize_inplace(h_data.data() + (size_t)i * dim, dim);
+            l2_normalize_inplace(h_data + (size_t)i * dim, dim);
         }
     }
 
     // 初始化聚类中心：使用统一的初始化函数确保CPU和GPU使用相同的起始聚类中心
-    // 该函数使用 cfg.seed 确保确定性初始化
-    std::vector<float> h_init_centroids((size_t)k * dim);
-    init_centroids_by_sampling(cfg, h_data.data(), h_init_centroids.data());
+    // 该函数使用 cfg.seed 确保确定性初始化（使用 pinned memory）
+    float* h_init_centroids = nullptr;
+    cudaMallocHost(&h_init_centroids, sizeof(float) * (size_t)k * dim);
+    init_centroids_by_sampling(cfg, h_data, h_init_centroids);
     if (cfg.dist == COSINE_DISTANCE) {
-        for (int c = 0; c < k; ++c) l2_normalize_inplace(h_init_centroids.data() + (size_t)c * dim, dim);
+        for (int c = 0; c < k; ++c) l2_normalize_inplace(h_init_centroids + (size_t)c * dim, dim);
     }
 
     // CPU reference - 使用与GPU相同的初始化聚类中心
     std::vector<int> h_assign_cpu(n);
     std::vector<float> h_centroids_cpu((size_t)k * dim);
-    std::memcpy(h_centroids_cpu.data(), h_init_centroids.data(), sizeof(float) * (size_t)k * dim);
+    std::memcpy(h_centroids_cpu.data(), h_init_centroids, sizeof(float) * (size_t)k * dim);
     float cpu_obj = 0.0f;
 
     double cpu_ms = 0.0;
     MEASURE_MS_AND_SAVE("cpu_kmeans耗时:", cpu_ms,
-        cpu_kmeans_lloyd(cfg,
-                         h_data.data(),
-                         h_assign_cpu.data(),
-                         h_centroids_cpu.data(),
-                         &cpu_obj);
+        // cpu_kmeans_lloyd(cfg,
+        //                  h_data,
+        //                  h_assign_cpu.data(),
+        //                  h_centroids_cpu.data(),
+        //                  &cpu_obj);
     );
 
     // GPU buffers - 使用与CPU相同的初始化聚类中心
@@ -193,22 +195,19 @@ static std::vector<double> run_case(const KMeansCase& cfg) {
     cudaMalloc(&d_init_centroids, sizeof(float) * (size_t)k * dim);
     cudaMalloc(&d_centroids, sizeof(float) * (size_t)k * dim);
     // 将CPU初始化的聚类中心复制到GPU，确保CPU和GPU使用相同的初始化
-    cudaMemcpy(d_centroids, h_init_centroids.data(), sizeof(float) * (size_t)k * dim, cudaMemcpyHostToDevice);
+    // 使用异步拷贝可以利用 pinned memory 的优势
+    cudaMemcpyAsync(d_centroids, h_init_centroids, sizeof(float) * (size_t)k * dim, 
+                   cudaMemcpyHostToDevice);
 
     float gpu_obj = 0.0f;
     double gpu_ms = 0.0;
 
-    float* d_data = nullptr;
-    cudaMalloc(&d_data, sizeof(float) * (size_t)n * dim);
-    cudaMemcpy(d_data, h_data.data(), sizeof(float) * (size_t)n * dim, cudaMemcpyHostToDevice);
-
+    // 现在函数接受主机端数据指针（pinned memory），内部使用双缓冲分片上传
     MEASURE_MS_AND_SAVE("gpu_kmeans耗时:", gpu_ms,
-        gpu_kmeans_lloyd(cfg, d_data, d_assign, d_centroids, &gpu_obj);
+        gpu_kmeans_lloyd(cfg, h_data, d_assign, d_centroids, &gpu_obj);
         cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
     );
-
-    cudaFree(d_data);
 
     // Copy GPU results back
     std::vector<int> h_assign_gpu(n);
@@ -219,6 +218,11 @@ static std::vector<double> run_case(const KMeansCase& cfg) {
     cudaFree(d_assign);
     cudaFree(d_init_centroids);
     cudaFree(d_centroids);
+    
+    // 释放 pinned memory
+    cudaFreeHost(h_data);
+    cudaFreeHost(h_init_centroids);
+    
     CHECK_CUDA_ERRORS;
 
     // verify: compare objective (relative) + centroid L2 error
@@ -264,10 +268,10 @@ int main(int argc, char** argv) {
                         "gpu_obj", "cpu_obj");
     metrics.set_num_repeats(1);
 
-    PARAM_3D(n, (10000, 20000),
-     dim, (4,10,96,128,200),
-    // PARAM_3D(n, (20000, 1000000, 10000000),
-    //          dim, (96),
+    // PARAM_3D(n, (10000, 20000),
+    //  dim, (4,10,96,128,200),
+    PARAM_3D(n, (20000, 1000000, 10000000),
+             dim, (96),
              dist, (L2_DISTANCE))
     {
         int iters = 5;

@@ -9,12 +9,45 @@
 #include <cstring>
 #include <random>
 #include <vector>
+#include <../unit_tests/common/test_utils.cuh>
 
 // ============================================================
 // GPU Kernels Implementation
 // ============================================================
 
-
+/**
+ * Kernel: 对 best_dist2 数组求和（block reduce）
+ * 使用共享内存进行 block 内规约，然后原子加到一个全局累加器
+ */
+__global__ void kernel_reduce_sum(
+    const float* __restrict__ data,
+    float* __restrict__ output,  // 单个 float 的累加器
+    int n
+) {
+    extern __shared__ float sdata[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // 每个线程加载一个元素
+    float val = (i < n) ? data[i] : 0.0f;
+    
+    // Block 内规约
+    sdata[tid] = val;
+    __syncthreads();
+    
+    // 规约：使用 warp shuffle + shared memory
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+    
+    // Block 0 的第一个线程原子加
+    if (tid == 0) {
+        atomicAdd(output, sdata[0]);
+    }
+}
 
 __global__ void kernel_update_centroids(
     float* __restrict__ centroids,   // [k, dim]
@@ -213,16 +246,19 @@ static inline void cublas_check(cublasStatus_t st, const char* msg) {
 
 void gpu_kmeans_lloyd(
     const KMeansCase& cfg,
-    const float* d_data,             // [n, dim] row-major
+    const float* h_data,             // [n, dim] row-major，主机端数据
     int* d_assign,                   // [n]
-    float* d_centroids,              // [k, dim] (in/out)
+    float* d_centroids,              // [k, dim] (in/out)，常驻显存
     float* h_objective                // sum dist2
 ) {
     const int n = cfg.n, dim = cfg.dim, k = cfg.k;
 
     // ====== 可调参数：batch & ktile ======
-    const int Ktile = 8192;  // 每次GEMM处理的centroid数量
-    const int B = 1 << 20;   // 每次处理的点数量（1M）
+    // 减小 B 和 Ktile 以控制 d_dot 显存占用
+    // 目标：d_dot = B * Ktile <= 1GB (约 256M floats)
+    const int Ktile = 4096;  // 每次GEMM处理的centroid数量（从8192减小到4096）
+    const int B = 1 << 15;   // 每次处理的点数量（32K，从256K减小到32K）
+    // d_dot = 32K * 4K = 128M floats ≈ 512MB（可接受）
 
     // ====== buffer ======
     float* d_accum = nullptr;      // [k, dim]
@@ -235,6 +271,11 @@ void gpu_kmeans_lloyd(
     int*   d_best_idx = nullptr;
     float* d_dot = nullptr;        // [B, Ktile] 但实际存的是col-major [curK, curB]
 
+    // 双缓冲：两个GPU缓冲区交替使用
+    float* d_data_buf[2] = {nullptr, nullptr};  // 双缓冲数据缓冲区
+    cudaStream_t stream[2];                      // 两个CUDA流用于异步传输
+    cudaEvent_t event[2];                        // 事件用于依赖管理，替代同步
+
     // d_centroids 是输入参数，不需要在这里分配
     cudaMalloc(&d_accum,     sizeof(float) * (size_t)k * dim);
     cudaMalloc(&d_counts,    sizeof(int)   * (size_t)k);
@@ -244,6 +285,20 @@ void gpu_kmeans_lloyd(
     cudaMalloc(&d_best_dist2,sizeof(float) * (size_t)B);
     cudaMalloc(&d_best_idx,  sizeof(int)   * (size_t)B);
     cudaMalloc(&d_dot,       sizeof(float) * (size_t)B * (size_t)Ktile);
+
+    // 分配双缓冲
+    cudaMalloc(&d_data_buf[0], sizeof(float) * (size_t)B * dim);
+    cudaMalloc(&d_data_buf[1], sizeof(float) * (size_t)B * dim);
+    cudaStreamCreate(&stream[0]);
+    cudaStreamCreate(&stream[1]);
+    cudaEventCreate(&event[0]);
+    cudaEventCreate(&event[1]);
+    
+    // GPU 上的 objective 累加器（单个 float）
+    float* d_objective_sum = nullptr;
+    if (h_objective) {
+        cudaMalloc(&d_objective_sum, sizeof(float));
+    }
 
 
     // ====== cuBLAS handle ======
@@ -255,31 +310,70 @@ void gpu_kmeans_lloyd(
     const float alpha = 1.f;
     const float beta  = 0.f;
 
+    // 当前使用的缓冲区索引（0或1）
+    int cur_buf = 0;
+
     // ====== iteration ======
     for (int it = 0; it < cfg.iters; ++it) {
         // clear accum & counts
-        dim3 fill_block(256);
-        int fill_grid_accum = std::min(65535, (int)(((size_t)k * dim + fill_block.x - 1) / fill_block.x));
-        int fill_grid_counts = std::min(65535, (int)((k + fill_block.x - 1) / fill_block.x));
-        fill_kernel<<<fill_grid_accum, fill_block>>>(d_accum, 0.0f, (int)((size_t)k * dim));
-        fill_int_kernel<<<fill_grid_counts, fill_block>>>(d_counts, 0, k);
+        // dim3 fill_block(256);
+        // int fill_grid_accum = std::min(65535, (int)(((size_t)k * dim + fill_block.x - 1) / fill_block.x));
+        // int fill_grid_counts = std::min(65535, (int)((k + fill_block.x - 1) / fill_block.x));
+        // fill_kernel<<<fill_grid_accum, fill_block>>>(d_accum, 0.0f, (int)((size_t)k * dim));
+        // fill_int_kernel<<<fill_grid_counts, fill_block>>>(d_counts, 0, k);
+        // 使用 stream[0] 来执行迭代开始的操作（accum/counts清零和centroid范数计算）
+        // 这些操作需要在所有batch开始前完成
+        cudaMemsetAsync(d_accum, 0, sizeof(float) * (size_t)k * dim, stream[0]);
+        cudaMemsetAsync(d_counts, 0, sizeof(int) * (size_t)k, stream[0]);
+        // 绑定到 stream[0]，确保在所有batch计算前完成
+        compute_l2_squared_gpu(d_centroids, d_cnorm2, k, dim, L2NORM_AUTO, stream[0]);
 
-        compute_l2_squared_gpu(d_centroids, d_cnorm2, k, dim, L2NORM_AUTO);
+        // ====== 分块处理数据点（使用双缓冲） ======
+        cur_buf = 0;
+        
+        // 清零 objective 累加器（如果启用，使用异步版本）
+        if (h_objective && d_objective_sum) {
+            cudaMemsetAsync(d_objective_sum, 0, sizeof(float), stream[0]);
+        }
+        
+        // 记录 stream[0] 上的初始化操作完成事件（accum清零、centroid范数计算）
+        // 确保后续batch计算时 d_cnorm2 和 d_accum 已准备好
+        cudaEvent_t init_event;
+        cudaEventCreate(&init_event);
+        cudaEventRecord(init_event, stream[0]);
 
-        // ====== 分块处理数据点 ======
-        double obj_sum = 0.0;
+        // 预加载第一个batch
+        int first_base = 0;
+        int first_curB = std::min(B, n - first_base);
+        // 等待初始化操作完成，确保 d_cnorm2 和 d_accum 已准备好
+        cudaStreamWaitEvent(stream[cur_buf], init_event, 0);
+        cudaMemcpyAsync(d_data_buf[cur_buf], h_data + (size_t)first_base * dim,
+                       sizeof(float) * (size_t)first_curB * dim,
+                       cudaMemcpyHostToDevice, stream[cur_buf]);
+        // 记录事件，用于后续依赖
+        cudaEventRecord(event[cur_buf], stream[cur_buf]);
 
         for (int base = 0; base < n; base += B) {
             int curB = std::min(B, n - base);
+            float* d_data_cur = d_data_buf[cur_buf];
+            
+            // 等待当前batch的数据传输完成（使用事件依赖）
+            // 第一次迭代：等待预加载完成；后续迭代：等待上一个batch的计算完成
+            cudaStreamWaitEvent(stream[cur_buf], event[cur_buf], 0);
 
-            // xnorm2 for this batch
-            compute_l2_squared_gpu(d_data + (size_t)base * dim, d_xnorm2, curB, dim, L2NORM_AUTO);
+            // 异步预加载下一个batch（如果还有）
+            // 注意：这里先启动预加载，但会在计算完成后才真正传输（通过事件依赖）
+            int next_base = base + B;
+            int next_buf = 1 - cur_buf;
 
-            // init best_dist2 = +inf, best_idx = 0
+            // xnorm2 for this batch（在当前流的流上执行）
+            compute_l2_squared_gpu(d_data_cur, d_xnorm2, curB, dim, L2NORM_AUTO, stream[cur_buf]);
+
+            // init best_dist2 = +inf, best_idx = 0（在当前流的流上执行）
             {
                 int threads = 256;
                 int blocks = (curB + threads - 1) / threads;
-                kernel_init_best<<<blocks, threads>>>(d_best_dist2, d_best_idx, curB);
+                kernel_init_best<<<blocks, threads, 0, stream[cur_buf]>>>(d_best_dist2, d_best_idx, curB);
             }
 
             // ====== centroid 分块 Ktile ======
@@ -287,8 +381,11 @@ void gpu_kmeans_lloyd(
                 int curK = std::min(Ktile, k - cbase);
 
                 const float* A = d_centroids + (size_t)cbase * dim;
-                const float* Bm = d_data + (size_t)base * dim;
+                const float* Bm = d_data_cur;
                 float* Cc = d_dot;
+
+                // 设置cuBLAS流
+                cublas_check(cublasSetStream(handle, stream[cur_buf]), "cublasSetStream");
 
                 // Treat row-major C[curK,dim] as col-major Ccm[dim,curK]
                 // Treat row-major X[curB,dim] as col-major Xcm[dim,curB]
@@ -308,11 +405,11 @@ void gpu_kmeans_lloyd(
                 );
 
 
-                // 更新best
+                // 更新best（在当前流的流上执行）
                 {
                     int threads = 256;
                     int blocks = (curB + threads - 1) / threads;
-                    kernel_update_best_from_dotT<<<blocks, threads>>>(
+                    kernel_update_best_from_dotT<<<blocks, threads, 0, stream[cur_buf]>>>(
                         d_dot, d_xnorm2, d_cnorm2,
                         curB, curK, cbase,
                         d_best_idx, d_best_dist2
@@ -320,35 +417,85 @@ void gpu_kmeans_lloyd(
                 }
             }
 
-            // 写回assign（全局）
-            cudaMemcpy(d_assign + base, d_best_idx, sizeof(int) * (size_t)curB, cudaMemcpyDeviceToDevice);
+            // 写回assign（全局，使用异步拷贝）
+            cudaMemcpyAsync(d_assign + base, d_best_idx, sizeof(int) * (size_t)curB, 
+                           cudaMemcpyDeviceToDevice, stream[cur_buf]);
 
-            // accum + counts
+            // accum + counts（在当前流的流上执行）
             {
                 int threads = 256;
                 int blocks = (curB + threads - 1) / threads;
-                kernel_accum_from_assign<<<blocks, threads>>>(
-                    d_data + (size_t)base * dim, curB, dim,
+                kernel_accum_from_assign<<<blocks, threads, 0, stream[cur_buf]>>>(
+                    d_data_cur, curB, dim,
                     d_best_idx, d_accum, d_counts
                 );
             }
 
-            // objective
-            if (h_objective) {
-                std::vector<float> h_tmp(curB);
-                cudaMemcpy(h_tmp.data(), d_best_dist2, sizeof(float) * (size_t)curB, cudaMemcpyDeviceToHost);
-                for (int i = 0; i < curB; ++i) obj_sum += (double)h_tmp[i];
+            // objective：在 GPU 上做 reduce，避免回传到 host
+            if (h_objective && d_objective_sum) {
+                int reduce_threads = 256;
+                int reduce_blocks = (curB + reduce_threads - 1) / reduce_threads;
+                int reduce_shmem = reduce_threads * sizeof(float);
+                kernel_reduce_sum<<<reduce_blocks, reduce_threads, reduce_shmem, stream[cur_buf]>>>(
+                    d_best_dist2, d_objective_sum, curB);
             }
+
+            // 记录当前batch计算完成事件（用于下一个batch的依赖）
+            cudaEventRecord(event[cur_buf], stream[cur_buf]);
+            
+            // 现在可以安全地预加载下一个batch（等待当前batch计算完成）
+            if (next_base < n) {
+                int next_curB = std::min(B, n - next_base);
+                // 等待当前batch的计算完成，避免覆盖正在使用的缓冲区
+                cudaStreamWaitEvent(stream[next_buf], event[cur_buf], 0);
+                cudaMemcpyAsync(d_data_buf[next_buf], h_data + (size_t)next_base * dim,
+                               sizeof(float) * (size_t)next_curB * dim,
+                               cudaMemcpyHostToDevice, stream[next_buf]);
+                // 记录传输完成事件（用于下一个迭代的依赖）
+                cudaEventRecord(event[next_buf], stream[next_buf]);
+            }
+            
+            // 切换到下一个缓冲区
+            cur_buf = next_buf;
         }
 
-        // update centroids: one block per centroid
-        kernel_update_centroids<<<k, 256>>>(d_centroids, d_accum, d_counts, k, dim);
+        // 等待所有batch完成（只同步必要的流）
+        // 等待两个流都完成，确保所有batch的计算和accum都完成
+        cudaStreamSynchronize(stream[0]);
+        cudaStreamSynchronize(stream[1]);
+        
+        // update centroids: one block per centroid（使用 stream[0]）
+        kernel_update_centroids<<<k, 256, 0, stream[0]>>>(d_centroids, d_accum, d_counts, k, dim);
+        
+        // 等待 centroid 更新完成（只同步 stream[0]）
+        cudaStreamSynchronize(stream[0]);
 
-        if (h_objective) *h_objective = (float)obj_sum;
+        // 从 GPU 读取 objective 值（只在迭代结束时读取一次）
+        if (h_objective && d_objective_sum) {
+            float obj_val = 0.0f;
+            cudaMemcpy(&obj_val, d_objective_sum, sizeof(float), cudaMemcpyDeviceToHost);
+            *h_objective = obj_val;
+            COUT_ENDL("iter=", it, "obj=", obj_val);
+        }
+        
+        // 清理临时事件
+        cudaEventDestroy(init_event);
     }
 
 
     cublasDestroy(handle);
+
+    // 释放双缓冲
+    cudaFree(d_data_buf[0]);
+    cudaFree(d_data_buf[1]);
+    cudaStreamDestroy(stream[0]);
+    cudaStreamDestroy(stream[1]);
+    cudaEventDestroy(event[0]);
+    cudaEventDestroy(event[1]);
+    
+    if (d_objective_sum) {
+        cudaFree(d_objective_sum);
+    }
 
     // d_centroids 是输入参数，不需要在这里释放
     cudaFree(d_accum);

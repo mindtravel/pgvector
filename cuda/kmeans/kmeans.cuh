@@ -52,16 +52,16 @@ __global__ void kernel_update_centroids(
  * 复用 l2norm 模块计算范数，使用 cublas GEMM 计算内积
  * 
  * @param cfg KMeans 配置
- * @param d_data 设备端向量数据 [n, dim] row-major (float)
+ * @param h_data 主机端向量数据 [n, dim] row-major (float)，支持大于显存的数据集
  * @param d_assign 输出：设备端分配结果 [n]
- * @param d_centroids 输入输出：设备端聚类中心 [k, dim] float（输入为初始值，输出为最终值）
+ * @param d_centroids 输入输出：设备端聚类中心 [k, dim] float（输入为初始值，输出为最终值），常驻显存
  * @param h_objective 输出：目标函数值（所有点到最近聚类中心的距离平方和）
  */
 void gpu_kmeans_lloyd(
     const KMeansCase& cfg,
-    const float* d_data,            // [n, dim] row-major
+    const float* h_data,            // [n, dim] row-major，主机端数据
     int* d_assign,                 // [n]
-    float* d_centroids,             // [k, dim] float (in/out)
+    float* d_centroids,             // [k, dim] float (in/out)，常驻显存
     float* h_objective               // scalar (sum dist2)
 );
 
