@@ -1,7 +1,7 @@
 #include <stdexcept>
 #include <cstdio>
 #include <cstring>
-#include "integrate_screen.cuh"
+#include "ivf_search.cuh"
 
 extern "C" {
 /**

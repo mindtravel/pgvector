@@ -1,5 +1,5 @@
-#ifndef PGVECTOR_CUDA_INTEGRATE_SCREEN_CUH
-#define PGVECTOR_CUDA_INTEGRATE_SCREEN_CUH
+#ifndef PGVECTOR_CUDA_IVF_SEARCH_CUH
+#define PGVECTOR_CUDA_IVF_SEARCH_CUH
 
 /**
  * 初始化常驻数据集（可在单元测试的计时之外调用）
@@ -228,4 +228,4 @@ extern void ivf_finalize_streaming_upload(
     float* center_data_flat,
     int total_vectors_check
 );
-#endif  // PGVECTOR_CUDA_INTEGRATE_SCREEN_CUH
+#endif  // PGVECTOR_CUDA_IVF_SEARCH_CUH

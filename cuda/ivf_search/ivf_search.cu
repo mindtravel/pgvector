@@ -4,7 +4,7 @@
 #endif
 #include <limits.h>
 #include "../pch.h"
-#include "integrate_screen.cuh"
+#include "ivf_search.cuh"
 
 #include "../fusion_dist_topk/fusion_dist_topk.cuh"
 #include "../indexed_gemm/indexed_gemm.cuh"

@@ -1,4 +1,4 @@
-/* integrate_screen_separated.cu */
+/* ivf_search_separated.cu */
 
 #ifndef _LIMITS_H_
 #define _LIMITS_H_
@@ -7,7 +7,7 @@
 #include "../pch.h"
 
 // 包含原始所有需要的头文件
-#include "integrate_screen.cuh"
+#include "ivf_search.cuh"
 #include "../fusion_dist_topk/fusion_dist_topk.cuh"
 #include "../indexed_gemm/indexed_gemm.cuh"
 #include "../warpsortfilter/warpsort_utils.cuh"

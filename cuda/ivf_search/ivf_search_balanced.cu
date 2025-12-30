@@ -1,5 +1,5 @@
 #include "../pch.h"
-#include "integrate_screen.cuh"
+#include "ivf_search.cuh"
 
 #include "../fusion_dist_topk/fusion_dist_topk.cuh"
 #include "../fine_screen_top_n/fine_screen_top_n.cuh"
@@ -576,7 +576,7 @@ void batch_search_pipeline(float** query_batch,
     }
 }
 
-void run_integrate_pipeline() {
+void run_ivf_search_pipeline() {
     // TODO: 后续补充粗筛 + 精筛整体调度
     cudaDeviceSynchronize();
     CHECK_CUDA_ERRORS
