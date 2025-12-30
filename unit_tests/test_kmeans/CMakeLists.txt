@@ -7,6 +7,7 @@ set(SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/kmeans/kmeans_minibatch.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/kmeans/kmeans_utils.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/kmeans/kmeans_reorder.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda/kmeans/kmeans_reorder_utils.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/test_utils.cu
 )
 

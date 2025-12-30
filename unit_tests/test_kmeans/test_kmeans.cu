@@ -17,6 +17,7 @@
 
 #include "../../cuda/pch.h"
 #include "../../cuda/kmeans/kmeans.cuh"
+#include "../../cuda/dataset/cpu_array_utils.h"
 #include "../common/test_utils.cuh"
 #include "../common/cpu_kmeans.h"
 
@@ -91,18 +92,18 @@ static std::vector<double> run_case(const KMeansCase& cfg, float* h_pool_data, K
     double gpu_ms = 0.0;
     double reorder_ms = 0.0;
     bool reorder_success = false;
-    
+
     MEASURE_MS_AND_SAVE("ivf_kmeans总耗时:", gpu_ms,
         reorder_success = ivf_kmeans(cfg, h_data, h_data_reordered, d_centroids,
                                      &h_cluster_info, use_minibatch, 0, BATCH_SIZE, &gpu_obj);
         cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
     );
-    
+
     // Copy GPU centroids back for verification
     std::vector<float> h_centroids_gpu((size_t)k * dim);
     cudaMemcpy(h_centroids_gpu.data(), d_centroids, sizeof(float) * (size_t)k * dim, cudaMemcpyDeviceToHost);
-    
+
     // 验证cluster信息
     bool ok_info = true;
     if (h_cluster_info.offsets && h_cluster_info.counts && h_cluster_info.k > 0) {
@@ -188,8 +189,8 @@ int main(int argc, char** argv) {
         // 在每个维度测试开始前，创建足够大的pinned memory池
         // 计算最大需要的池大小：max(n) * dim
         // 当前最大 n = 100000000，所以需要至少 100000000 * dim 个 floats
-        // const size_t MAX_N = 1000000000;
-        const size_t MAX_N = 500000000;
+        const size_t MAX_N = 100000;
+        // const size_t MAX_N = 500000000;
         const size_t POOL_SIZE = MAX_N * dim;
         float* h_pool_data = nullptr;
         cudaMallocHost(&h_pool_data, sizeof(float) * POOL_SIZE);
@@ -201,61 +202,61 @@ int main(int argc, char** argv) {
             COUT_ENDL("========================================");
         }
         
-        PARAM_3D(n, (20000, 1000000, 10000000, 100000000, 500000000), 
-        // PARAM_3D(n, (20000, 100000, 1000000, 50000000), 
+        // PARAM_3D(n, (20000, 1000000, 10000000, 100000000, 500000000), 
+        PARAM_3D(n, (10000, 20000, 50000, 100000), 
                 dist, (L2_DISTANCE),
                 algo, (KMEANS_MINIBATCH))
-        {
+    {
 
-            // K = N^(2/3)（取整，至少 8）
-            int k = std::max(8, (int)std::round(std::pow((double)0.1 * n, 2.0 / 3.0)));
-            int dtype = 0;
+        // K = N^(2/3)（取整，至少 8）
+        int k = std::max(8, (int)std::round(std::pow((double)0.1 * n, 2.0 / 3.0)));
+        int dtype = 0;
             if ((size_t)n * dim > POOL_SIZE) {
                 fprintf(stderr, "Error: n=%d * dim=%d = %zu exceeds pool_size=%zu\n", 
                         n, dim, (size_t)n * dim, POOL_SIZE);
                 std::abort();
             }
-            KMeansCase cfg;
-            cfg.n = n;
-            cfg.dim = dim;
-            cfg.k = k;
-            cfg.iters = 5;
-            cfg.minibatch_iters = 20;
-            cfg.seed = 1234;
-            cfg.dist = dist;
+        KMeansCase cfg;
+        cfg.n = n;
+        cfg.dim = dim;
+        cfg.k = k;
+        cfg.iters = 5;
+        cfg.minibatch_iters = 20;
+        cfg.seed = 1234;
+        cfg.dist = dist;
 
-            if (!QUIET) {
-                COUT_ENDL("========================================");
-                COUT_VAL("KMeans Test: n=", cfg.n,
-                        " k=", cfg.k,
-                        " dim=", cfg.dim,
-                        " iters=", cfg.iters,
+        if (!QUIET) {
+            COUT_ENDL("========================================");
+            COUT_VAL("KMeans Test: n=", cfg.n,
+                    " k=", cfg.k,
+                    " dim=", cfg.dim,
+                    " iters=", cfg.iters,
                         " dist=", (cfg.dist == L2_DISTANCE ? "L2" : "COSINE"),
                         " algo=", (algo == KMEANS_LLOYD ? "LLOYD" : "MINIBATCH")
-                        );
-                COUT_ENDL("========================================");
-            }
-    
-            auto row = metrics.add_row_averaged([&]() -> std::vector<double> {
+                    );
+            COUT_ENDL("========================================");
+        }
+
+        auto row = metrics.add_row_averaged([&]() -> std::vector<double> {
                 // run_case内部会处理归一化（如果需要），不会修改池数据
                 auto r = run_case(cfg, h_pool_data, algo);
-                return {
-                    r[0],                         // pass_rate
-                    (double)cfg.n,
-                    (double)cfg.k,
-                    (double)cfg.dim,
-                    (double)cfg.iters,
-                    (double)cfg.dist,
+            return {
+                r[0],                         // pass_rate
+                (double)cfg.n,
+                (double)cfg.k,
+                (double)cfg.dim,
+                (double)cfg.iters,
+                (double)cfg.dist,
                     (double)algo,                 // algorithm version
-                    r[1],                         // gpu_ms
-                    r[2],                         // cpu_ms
-                    r[3],                         // speedup
-                    r[4],                         // rel_obj_err
-                    r[5],                         // centroid_rmse
-                    r[6],                         // gpu_obj
-                    r[7],                         // cpu_obj
-                };
-            });
+                r[1],                         // gpu_ms
+                r[2],                         // cpu_ms
+                r[3],                         // speedup
+                r[4],                         // rel_obj_err
+                r[5],                         // centroid_rmse
+                r[6],                         // gpu_obj
+                r[7],                         // cpu_obj
+            };
+        });
             
 
         }

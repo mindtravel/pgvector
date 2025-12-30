@@ -303,6 +303,7 @@ void cpu_reorder_vectors_by_permutation(
  * 1. K-means聚类（Lloyd或Minibatch算法）
  * 2. 构建permutation数组（按cluster重排）
  * 3. 重排向量数据（物理内存重排）
+ * 4. 重排索引数组（如果提供）
  * 
  * @param cfg KMeans配置
  * @param h_data_in 输入：原始向量数据 [n, dim] row-major (pageable memory)
@@ -313,6 +314,8 @@ void cpu_reorder_vectors_by_permutation(
  * @param device_id GPU设备ID
  * @param batch_size permutation构建的batch大小（例如 1<<20）
  * @param h_objective 输出：目标函数值，可以为nullptr
+ * @param h_indices_in 输入：原始索引数组 [n]，通常为 [0, 1, 2, ..., n-1]，可以为nullptr
+ * @param h_indices_out 输出：重排后的索引数组 [n]，必须预先分配，可以为nullptr
  * @return 成功返回true，失败返回false
  */
 bool ivf_kmeans(
@@ -324,7 +327,9 @@ bool ivf_kmeans(
     bool use_minibatch = false,    // true for minibatch, false for Lloyd
     int device_id = 0,
     int batch_size = (1 << 20),   // batch size for permutation building
-    float* h_objective = nullptr  // optional output
+    float* h_objective = nullptr, // optional output
+    const int* h_indices_in = nullptr,  // [n] CPU 原始索引数组（可选）
+    int* h_indices_out = nullptr        // [n] CPU 重排后的索引数组（可选）
 );
 
 /**

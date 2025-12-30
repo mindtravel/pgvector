@@ -336,6 +336,79 @@ void gpu_kmeans_minibatch(
     //     COUT_ENDL("minibatch final obj=", obj_val);
     // }
 
+    // ====== 迭代结束后，计算所有点的最终分配 ======
+    // Minibatch算法只处理了部分点，需要在最后对所有点进行分配计算
+    if (d_assign) {
+        CUDATimer timer_final_assign("gpu_kmeans_minibatch: Final Assignment (All Points)", ENABLE_CUDA_TIMING);
+        
+        // 计算centroid范数（用于距离计算）
+        compute_l2_squared_gpu(d_centroids, d_cnorm2, k, dim, L2NORM_AUTO, stream[0]);
+        cudaStreamSynchronize(stream[0]);
+        
+        // 分块处理所有数据点，计算最终分配
+        const int B = MINIBATCH_SIZE;  // 使用相同的batch大小
+        for (int base = 0; base < n; base += B) {
+            int curB = std::min(B, n - base);
+            
+            // 传输当前batch数据
+            cudaMemcpyAsync(d_minibatch_data[0], h_data + (size_t)base * dim,
+                           sizeof(float) * (size_t)curB * dim,
+                           cudaMemcpyHostToDevice, stream[0]);
+            
+            // 计算xnorm2
+            compute_l2_squared_gpu(d_minibatch_data[0], d_xnorm2, curB, dim, L2NORM_AUTO, stream[0]);
+            
+            // 初始化best
+            {
+                int threads = 256;
+                int blocks = (curB + threads - 1) / threads;
+                kernel_init_best<<<blocks, threads, 0, stream[0]>>>(d_best_dist2, d_best_idx, curB);
+            }
+            
+            // 计算到所有centroid的距离（分块处理centroids）
+            for (int cbase = 0; cbase < k; cbase += Ktile) {
+                int curK = std::min(Ktile, k - cbase);
+                
+                const float* A = d_centroids + (size_t)cbase * dim;
+                const float* Bm = d_minibatch_data[0];
+                float* Cc = d_dot;
+                
+                cublas_check(cublasSetStream(handle, stream[0]), "cublasSetStream");
+                
+                cublas_check(
+                    cublasSgemm(
+                        handle,
+                        CUBLAS_OP_T, CUBLAS_OP_N,
+                        curK, curB, dim,
+                        &alpha,
+                        A, dim,
+                        Bm, dim,
+                        &beta,
+                        Cc, curK
+                    ),
+                    "cublasSgemm"
+                );
+                
+                // 更新best
+                {
+                    int threads = 256;
+                    int blocks = (curB + threads - 1) / threads;
+                    kernel_update_best_from_dotT<<<blocks, threads, 0, stream[0]>>>(
+                        d_dot, d_xnorm2, d_cnorm2,
+                        curB, curK, cbase,
+                        d_best_idx, d_best_dist2
+                    );
+                }
+            }
+            
+            // 写回assign（所有点的最终分配）
+            cudaMemcpyAsync(d_assign + base, d_best_idx, sizeof(int) * (size_t)curB, 
+                           cudaMemcpyDeviceToDevice, stream[0]);
+        }
+        
+        // 等待所有分配计算完成
+        cudaStreamSynchronize(stream[0]);
+    }
 
     cublasDestroy(handle);
 

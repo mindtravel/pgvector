@@ -34,6 +34,29 @@ __global__ void generate_sequence_indices_kernel(
 }
 
 /**
+ * Kernel: 生成顺序索引（用于IVF搜索的cluster索引）
+ * 为每个query生成相同的顺序索引 [0, 1, 2, ..., n_total_clusters-1]
+ * 
+ * 线程模型：
+ * - 一维 grid，每个线程处理一个索引位置
+ * - total = n_query * n_total_clusters
+ * - 每个query使用相同的索引序列
+ */
+__global__ void generate_sequential_indices_kernel(
+    int* d_indices,  // [n_query * n_total_clusters] 输出：顺序索引
+    int n_query,     // query数量
+    int n_total_clusters  // cluster数量
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = n_query * n_total_clusters;
+    if (idx < total) {
+        int query_idx = idx / n_total_clusters;
+        int cluster_idx = idx % n_total_clusters;
+        d_indices[idx] = cluster_idx;  // 每个query使用相同的顺序索引
+    }
+}
+
+/**
  * Kernel: 并行统计每个cluster被多少个query使用
  * 
  * 线程模型：

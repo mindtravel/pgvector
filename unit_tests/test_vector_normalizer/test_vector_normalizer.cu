@@ -1,5 +1,6 @@
 #include "../cuda/experiments/normalize.h"
 #include "../common/test_utils.cuh"
+#include "../common/cpu_distance.h"
 #include <iostream>
 #include <cassert>
 #include <cmath>
@@ -12,30 +13,23 @@
 
 /*
 * 测试辅助函数：作为对比的cpu normalize算法
+* 使用 cpu_distance.h 中的 l2_normalize_inplace 接口
 */
 void normlization_cpu(float** vector_list, int n_batch, int n_dim){
     for(int i=0; i<n_batch; ++i){
-        float sum = 0.0;
-        for(int j=0; j<n_dim; ++j){
-            sum += vector_list[i][j] * vector_list[i][j];
-        }  
-        sum = sqrt(sum);
-        for(int j=0; j<n_dim; ++j){
-            vector_list[i][j] /= sum;
-        }  
+        l2_normalize_inplace(vector_list[i], n_dim);
     }
 }
 
 /*
-用cpu保证每次计算的结果正确
+* 用cpu保证每次计算的结果正确
+* 使用 cpu_distance.h 中的 compute_squared_sum 接口验证归一化后的向量
+* 使用 test_utils.cuh 中的 compare_float 专用比较函数
 */
 bool test_normlization_cpu(float** vector_list, int n_batch, int n_dim){
     for(int i=0; i<n_batch; ++i){
-        float sum = 0.0;
-        for(int j=0; j<n_dim; ++j){
-            sum += vector_list[i][j] * vector_list[i][j];
-        }  
-        if(!compare_numbers(sum, 1.0f)){
+        float squared_sum = compute_squared_sum(vector_list[i], n_dim);
+        if(!compare_float(squared_sum, 1.0f)){
             return false;
         }
     }

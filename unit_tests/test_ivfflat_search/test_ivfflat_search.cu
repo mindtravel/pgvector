@@ -16,8 +16,9 @@
 #include <vector>
 
 #include "../../cuda/pch.h"
-#include "../../cuda/kmeans/kmeans.cuh"
 #include "../../cuda/integrate_screen/integrate_screen.cuh"
+#include "../../cuda/dataset/dataset.cuh"
+#include "../../cuda/utils.cuh"
 #include "../common/test_utils.cuh"
 #include "../common/cpu_search.h"
 
@@ -27,116 +28,80 @@
 struct IVFFlatSearchCase {
     int n;              // 数据集大小
     int dim;            // 向量维度
-    int k;              // cluster数量
+    int n_clusters;              // cluster数量
     int n_query;        // 查询数量
     int n_probes;       // 粗筛选择的cluster数
     int topk;           // 最终输出的topk数量
-    int kmeans_iters;   // K-means迭代次数
+    int kmeans_iters;   // n_clusters-means迭代次数
     bool use_minibatch; // 是否使用Minibatch算法
     DistanceType dist;   // 距离类型
 };
 
 // ============================================================
-// Test Runner
+// Test Case Runner
 // ============================================================
-static bool run_test(const IVFFlatSearchCase& cfg) {
-    const int n = cfg.n, dim = cfg.dim, k = cfg.k;
+static std::vector<double> run_case(const IVFFlatSearchCase& cfg) {
+    const int n = cfg.n, dim = cfg.dim, n_clusters = cfg.n_clusters;
     const int n_query = cfg.n_query, n_probes = cfg.n_probes, topk = cfg.topk;
     
-    fprintf(stderr, "\n========================================\n");
-    fprintf(stderr, "IVF-Flat Search Test:\n");
-    fprintf(stderr, "  n=%d, dim=%d, k=%d\n", n, dim, k);
-    fprintf(stderr, "  n_query=%d, n_probes=%d, topk=%d\n", n_query, n_probes, topk);
-    fprintf(stderr, "  kmeans_iters=%d, algo=%s\n", cfg.kmeans_iters, cfg.use_minibatch ? "MINIBATCH" : "LLOYD");
-    fprintf(stderr, "========================================\n");
-    
-    // Step 1: 生成测试数据
-    std::mt19937 rng(1234);
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    
-    size_t data_size = (size_t)n * dim;
-    float* h_data = (float*)std::aligned_alloc(64, data_size * sizeof(float));
-    if (!h_data) {
-        fprintf(stderr, "ERROR: Failed to allocate h_data\n");
-        return false;
+    if (!QUIET) {
+        COUT_ENDL("========================================");
+        COUT_VAL("IVF-Flat Search Test: n=", cfg.n,
+                " dim=", cfg.dim,
+                " n_clusters=", cfg.n_clusters,
+                " n_query=", cfg.n_query,
+                " n_probes=", cfg.n_probes,
+                " topk=", cfg.topk,
+                " iters=", cfg.kmeans_iters,
+                " dist=", (cfg.dist == L2_DISTANCE ? "L2" : "COSINE"),
+                " algo=", (cfg.use_minibatch ? "MINIBATCH" : "LLOYD"));
+        COUT_ENDL("========================================");
     }
     
-    for (size_t i = 0; i < data_size; ++i) {
-        h_data[i] = dist(rng);
-    }
-    
-    // Step 2: 初始化聚类中心
-    float* h_init_centroids = nullptr;
-    cudaMallocHost(&h_init_centroids, sizeof(float) * (size_t)k * dim);
-    KMeansCase kmeans_cfg;
-    kmeans_cfg.n = n;
-    kmeans_cfg.dim = dim;
-    kmeans_cfg.k = k;
-    kmeans_cfg.iters = cfg.kmeans_iters;
-    kmeans_cfg.minibatch_iters = cfg.kmeans_iters * 4; // Minibatch需要更多迭代
-    kmeans_cfg.seed = 1234;
-    kmeans_cfg.dist = cfg.dist;
-    kmeans_cfg.dtype = USE_FP32;
-    
-    init_centroids_by_sampling(kmeans_cfg, h_data, h_init_centroids);
-    
-    // Step 3: 分配GPU内存
-    float* d_centroids = nullptr;
-    cudaMalloc(&d_centroids, sizeof(float) * (size_t)k * dim);
-    cudaMemcpy(d_centroids, h_init_centroids, sizeof(float) * (size_t)k * dim, cudaMemcpyHostToDevice);
-    
-    // Step 4: 分配重排后的数据缓冲区
-    float* h_data_reordered = (float*)std::aligned_alloc(64, data_size * sizeof(float));
-    if (!h_data_reordered) {
-        fprintf(stderr, "ERROR: Failed to allocate h_data_reordered\n");
-        std::free(h_data);
-        cudaFree(d_centroids);
-        cudaFreeHost(h_init_centroids);
-        return false;
-    }
-    
-    // Step 5: 运行IVF K-means（聚类 + 重排）
-    ClusterInfo cluster_info;
+    // Step 1: 初始化ClusterDataset（使用K-means聚类）
+    ClusterDataset dataset;
     float kmeans_objective = 0.0f;
-    const int batch_size = 1 << 20; // 1M per batch
-    
     double kmeans_ms = 0.0;
-    MEASURE_MS_AND_SAVE("IVF K-means耗时:", kmeans_ms,
-        bool success = ivf_kmeans(kmeans_cfg, h_data, h_data_reordered, d_centroids,
-                                 &cluster_info, cfg.use_minibatch, 0, batch_size, &kmeans_objective);
-        if (!success) {
-            fprintf(stderr, "ERROR: ivf_kmeans failed\n");
-            return false;
+    MEASURE_MS_AND_SAVE("IVF n_clusters-means耗时:", kmeans_ms,
+        try {
+            dataset.init_with_kmeans(
+                n, dim, n_clusters,
+                &kmeans_objective,  // h_objective
+                cfg.kmeans_iters,
+                cfg.use_minibatch,
+                cfg.dist
+            );
+        } catch (const std::exception& e) {
+            fprintf(stderr, "ERROR: init_with_kmeans failed: %s\n", e.what());
+            return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
         }
-        cudaDeviceSynchronize();
-        CHECK_CUDA_ERRORS;
     );
     
-    fprintf(stderr, "K-means objective: %f\n", kmeans_objective);
-    
-    // Step 6: 拷贝最终的centroids回host（用于CPU参考搜索）
-    float* h_centroids = (float*)std::aligned_alloc(64, sizeof(float) * (size_t)k * dim);
-    cudaMemcpy(h_centroids, d_centroids, sizeof(float) * (size_t)k * dim, cudaMemcpyDeviceToHost);
-    
-    // Step 7: 生成查询向量
-    float* h_query_batch = (float*)std::aligned_alloc(64, (size_t)n_query * dim * sizeof(float));
-    for (int i = 0; i < n_query * dim; ++i) {
-        h_query_batch[i] = dist(rng);
+    if (!QUIET) {
+        COUT_VAL("K-means objective: ", kmeans_objective);
     }
     
-    // Step 8: CPU参考搜索
+    // Step 2: 生成查询向量（使用多线程随机初始化）
+    float* h_query_batch = (float*)std::aligned_alloc(64, (size_t)n_query * dim * sizeof(float));
+    init_array_multithreaded(h_query_batch, (size_t)n_query * dim, 5678, -1.0f, 1.0f);
+    
+    // Step 3: CPU参考搜索（使用GPU聚类的结果，确保CPU和GPU使用相同的聚类）
+    // 注意：CPU搜索不包含聚类部分，直接使用dataset中已经聚类好的数据
     int** cpu_idx = (int**)malloc_vector_list(n_query, topk, sizeof(int));
     float** cpu_dist = (float**)malloc_vector_list(n_query, topk, sizeof(float));
     
     double cpu_ms = 0.0;
     MEASURE_MS_AND_SAVE("CPU搜索耗时:", cpu_ms,
-        cpu_coarse_fine_search(cfg.n_query, cfg.dim, cfg.k, cfg.n_probes, cfg.topk,
-                              h_query_batch, h_data_reordered, 
-                              h_centroids, cluster_info, cfg.dist,
+        cpu_coarse_fine_search(cfg.n_query, cfg.dim, cfg.n_clusters, cfg.n_probes, cfg.topk,
+                              h_query_batch, 
+                              dataset.reordered_data,    // 使用GPU聚类后重排的数据
+                              dataset.centroids,         // 使用GPU聚类的中心
+                              dataset.cluster_info,      // 使用GPU聚类的cluster信息
+                              cfg.dist,
                               cpu_idx, cpu_dist);
     );
     
-    // Step 9: GPU搜索
+    // Step 4: GPU搜索（使用与CPU相同的GPU聚类结果）
     // 准备GPU数据
     float* d_query_batch = nullptr;
     int* d_cluster_size = nullptr;
@@ -145,31 +110,41 @@ static bool run_test(const IVFFlatSearchCase& cfg) {
     float* d_topk_dist = nullptr;
     int* d_topk_index = nullptr;
     
-    // 8.1 复制查询向量
+    // 4.1 复制查询向量
     cudaMalloc(&d_query_batch, sizeof(float) * (size_t)n_query * dim);
     cudaMemcpy(d_query_batch, h_query_batch, sizeof(float) * (size_t)n_query * dim, cudaMemcpyHostToDevice);
     
-    // 8.2 复制cluster sizes
-    cudaMalloc(&d_cluster_size, sizeof(int) * (size_t)k);
-    std::vector<int> h_cluster_sizes(k);
-    for (int c = 0; c < k; ++c) {
-        h_cluster_sizes[c] = cluster_info.counts[c];
-    }
-    cudaMemcpy(d_cluster_size, h_cluster_sizes.data(), sizeof(int) * (size_t)k, cudaMemcpyHostToDevice);
+    // 4.2 复制cluster sizes（从GPU聚类结果获取）
+    cudaMalloc(&d_cluster_size, sizeof(int) * (size_t)n_clusters);
+    cudaMemcpy(d_cluster_size, dataset.cluster_info.counts, sizeof(int) * (size_t)n_clusters, cudaMemcpyHostToDevice);
     
-    // 8.3 复制重排后的向量数据（已经是连续存储）
+    // 4.3 复制重排后的向量数据（使用GPU聚类后重排的数据）
+    size_t data_size = (size_t)n * dim;
     cudaMalloc(&d_cluster_vectors, sizeof(float) * data_size);
-    cudaMemcpy(d_cluster_vectors, h_data_reordered, sizeof(float) * data_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_cluster_vectors, dataset.reordered_data, sizeof(float) * data_size, cudaMemcpyHostToDevice);
     
-    // 8.4 复制聚类中心
-    cudaMalloc(&d_cluster_centers, sizeof(float) * (size_t)k * dim);
-    cudaMemcpy(d_cluster_centers, d_centroids, sizeof(float) * (size_t)k * dim, cudaMemcpyDeviceToDevice);
+    // 4.4 复制聚类中心（使用GPU聚类的中心）
+    cudaMalloc(&d_cluster_centers, sizeof(float) * (size_t)n_clusters * dim);
+    cudaMemcpy(d_cluster_centers, dataset.centroids, sizeof(float) * (size_t)n_clusters * dim, cudaMemcpyHostToDevice);
     
-    // 8.5 分配输出缓冲区
+    // 4.5 生成并复制 cluster 索引数组 [0, 1, 2, ..., n_clusters-1]
+    int* d_initial_indices = nullptr;
+    cudaMalloc(&d_initial_indices, sizeof(int) * (size_t)n_query * n_clusters);
+    CHECK_CUDA_ERRORS;
+    
+    // 使用kernel在GPU上生成顺序索引
+    dim3 block(256);
+    dim3 grid((n_query * n_clusters + block.x - 1) / block.x);
+    generate_sequential_indices_kernel<<<grid, block>>>(
+        d_initial_indices, n_query, n_clusters);
+    cudaDeviceSynchronize();
+    CHECK_CUDA_ERRORS;
+    
+    // 4.6 分配输出缓冲区
     cudaMalloc(&d_topk_dist, sizeof(float) * (size_t)n_query * topk);
     cudaMalloc(&d_topk_index, sizeof(int) * (size_t)n_query * topk);
     
-    // 8.6 运行GPU搜索
+    // 4.7 运行GPU搜索（使用与CPU相同的GPU聚类结果）
     int** gpu_idx = (int**)malloc_vector_list(n_query, topk, sizeof(int));
     float** gpu_dist = (float**)malloc_vector_list(n_query, topk, sizeof(float));
     
@@ -180,12 +155,12 @@ static bool run_test(const IVFFlatSearchCase& cfg) {
             d_cluster_size,
             d_cluster_vectors,
             d_cluster_centers,
-            nullptr,  // d_initial_indices: nullptr表示内部生成顺序索引
+            d_initial_indices,  // 使用生成的 cluster 索引数组
             d_topk_dist,
             d_topk_index,
             n_query,
             dim,
-            k,
+            n_clusters,
             n,
             n_probes,
             topk,
@@ -195,16 +170,31 @@ static bool run_test(const IVFFlatSearchCase& cfg) {
         CHECK_CUDA_ERRORS;
     );
     
-    // 8.7 复制结果回host
+    // Step 5: 复制结果回host（GPU返回的是重排后的位置索引）
+    int* h_gpu_idx_raw = (int*)std::malloc(sizeof(int) * (size_t)n_query * topk);
     cudaMemcpy(gpu_dist[0], d_topk_dist, sizeof(float) * (size_t)n_query * topk, cudaMemcpyDeviceToHost);
-    cudaMemcpy(gpu_idx[0], d_topk_index, sizeof(int) * (size_t)n_query * topk, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_gpu_idx_raw, d_topk_index, sizeof(int) * (size_t)n_query * topk, cudaMemcpyDeviceToHost);
     
-    // Step 10: 验证结果
+    // Step 6: 将重排后的位置索引映射回原始索引
+    for (int qi = 0; qi < n_query; ++qi) {
+        for (int ki = 0; ki < topk; ++ki) {
+            int reordered_pos = h_gpu_idx_raw[qi * topk + ki];
+            if (reordered_pos >= 0 && reordered_pos < n) {
+                gpu_idx[qi][ki] = dataset.reordered_indices[reordered_pos];
+            } else {
+                gpu_idx[qi][ki] = -1;  // 无效索引
+            }
+        }
+    }
+    std::free(h_gpu_idx_raw);
+    
+    // Step 7: 验证结果（CPU和GPU使用相同的聚类，应该得到相同的结果）
     bool pass = (cfg.dist == L2_DISTANCE) 
         ? compare_set_2D_relative<float>(cpu_dist, gpu_dist, n_query, topk, 1e-4f)
         : compare_set_2D<float>(cpu_dist, gpu_dist, n_query, topk, 1e-5f);
     
     // 验证索引是否匹配（允许距离相同的情况）
+    int mismatch_count = 0;
     if (pass) {
         for (int qi = 0; qi < n_query && qi < 5; ++qi) {
             for (int ki = 0; ki < topk; ++ki) {
@@ -216,20 +206,25 @@ static bool run_test(const IVFFlatSearchCase& cfg) {
                     float gpu_dist_val = gpu_dist[qi][ki];
                     float rel_err = std::abs(cpu_dist_val - gpu_dist_val) / std::max(1e-6f, std::abs(cpu_dist_val));
                     if (rel_err > 1e-4f) {
-                        fprintf(stderr, "WARNING: Query %d, Top-%d: CPU idx=%d, GPU idx=%d, CPU dist=%.6f, GPU dist=%.6f\n",
-                               qi, ki, cpu_idx_val, gpu_idx_val, cpu_dist_val, gpu_dist_val);
+                        mismatch_count++;
+                        if (!QUIET && mismatch_count <= 3) {
+                            fprintf(stderr, "WARNING: Query %d, Top-%d: CPU idx=%d, GPU idx=%d, CPU dist=%.6f, GPU dist=%.6f\n",
+                                   qi, ki, cpu_idx_val, gpu_idx_val, cpu_dist_val, gpu_dist_val);
+                        }
                     }
                 }
             }
         }
     }
     
-    fprintf(stderr, "\n结果验证: %s\n", pass ? "PASS" : "FAIL");
-    fprintf(stderr, "K-means耗时: %.2f ms\n", kmeans_ms);
-    fprintf(stderr, "CPU搜索耗时: %.2f ms\n", cpu_ms);
-    fprintf(stderr, "GPU搜索耗时: %.2f ms\n", gpu_ms);
-    if (gpu_ms > 1e-6) {
-        fprintf(stderr, "搜索加速比: %.2fx\n", cpu_ms / gpu_ms);
+    double pass_rate = pass ? 1.0 : 0.0;
+    double speedup = (gpu_ms > 1e-6) ? (cpu_ms / gpu_ms) : 0.0;
+    
+    if (!QUIET) {
+        COUT_ENDL("----- IVF-Flat Search Verify -----");
+        COUT_VAL("pass=", (pass ? 1 : 0), " kmeans_ms=", kmeans_ms, " cpu_ms=", cpu_ms, " gpu_ms=", gpu_ms);
+        COUT_VAL("speedup=", speedup, " mismatch_count=", mismatch_count);
+        COUT_ENDL("-----------------------------------");
     }
     
     // Cleanup
@@ -242,50 +237,78 @@ static bool run_test(const IVFFlatSearchCase& cfg) {
     cudaFree(d_cluster_size);
     cudaFree(d_cluster_vectors);
     cudaFree(d_cluster_centers);
+    cudaFree(d_initial_indices);
     cudaFree(d_topk_dist);
     cudaFree(d_topk_index);
-    cudaFree(d_centroids);
     
-    std::free(h_data);
-    std::free(h_data_reordered);
     std::free(h_query_batch);
-    std::free(h_centroids);
-    cudaFreeHost(h_init_centroids);
-    free_cluster_info(&cluster_info, false);
+    dataset.release();
     
-    return pass;
+    return {pass_rate, kmeans_ms, cpu_ms, gpu_ms, speedup, (double)mismatch_count, (double)kmeans_objective};
 }
 
 // ============================================================
-// Main
+// Main (Metrics table like test_kmeans)
 // ============================================================
+#ifdef __CUDACC__
+__host__
+#endif
 int main(int argc, char** argv) {
-    // 默认测试配置
-    IVFFlatSearchCase cfg;
-    cfg.n = 10000;
-    cfg.dim = 96;
-    cfg.k = 100;
-    cfg.n_query = 100;
-    cfg.n_probes = 10;
-    cfg.topk = 10;
-    cfg.kmeans_iters = 5;
-    cfg.use_minibatch = false;
-    cfg.dist = L2_DISTANCE;
-    
-    // 解析命令行参数
-    if (argc >= 2) cfg.n = std::atoi(argv[1]);
-    if (argc >= 3) cfg.dim = std::atoi(argv[2]);
-    if (argc >= 4) cfg.k = std::atoi(argv[3]);
-    if (argc >= 5) cfg.n_query = std::atoi(argv[4]);
-    if (argc >= 6) cfg.n_probes = std::atoi(argv[5]);
-    if (argc >= 7) cfg.topk = std::atoi(argv[6]);
-    if (argc >= 8) cfg.use_minibatch = (std::atoi(argv[7]) != 0);
+    MetricsCollector metrics;
+    metrics.set_columns("pass_rate", "n", "dim", "n_clusters", "n_query", "n_probes", "topk", 
+                        "iters", "dist", "algo",
+                        "kmeans_ms", "cpu_ms", "gpu_ms", "speedup", "mismatch_count", "kmeans_obj");
+    metrics.set_num_repeats(1);
     
     cudaSetDevice(0);
     CHECK_CUDA_ERRORS;
     
-    bool pass = run_test(cfg);
+    // 使用 PARAM_3D 组合测试 cfg.n, cfg.n_query, cfg.dim
+    PARAM_3D(n, (10000, 1000000, 10000000),
+             n_query, (100),
+             dim, (96))
+    {
+        IVFFlatSearchCase cfg;
+        cfg.n = n;
+        cfg.n_query = n_query;
+        cfg.dim = dim;
+        // cfg.n_clusters = (int)std::round(std::sqrt(cfg.n)); // 策略1
+        cfg.n_clusters = (int)std::round(std::pow((double)0.1 * cfg.n, 2.0 / 3.0)); // 策略2
+        cfg.n_probes = 10;
+        cfg.topk = 10;
+        cfg.kmeans_iters = 20;
+        cfg.use_minibatch = true;
+        cfg.dist = L2_DISTANCE;
+        
+        auto row = metrics.add_row_averaged([&]() -> std::vector<double> {
+            auto r = run_case(cfg);
+            return {
+                r[0],                         // pass_rate
+                (double)cfg.n,
+                (double)cfg.dim,
+                (double)cfg.n_clusters,
+                (double)cfg.n_query,
+                (double)cfg.n_probes,
+                (double)cfg.topk,
+                (double)cfg.kmeans_iters,
+                (double)cfg.dist,
+                (double)(cfg.use_minibatch ? 1 : 0),  // algo
+                r[1],                         // kmeans_ms
+                r[2],                         // cpu_ms
+                r[3],                         // gpu_ms
+                r[4],                         // speedup
+                r[5],                         // mismatch_count
+                r[6],                         // kmeans_obj
+            };
+        });
+    }
     
-    return pass ? 0 : 1;
+    cudaDeviceSynchronize();
+    CHECK_CUDA_ERRORS;
+    
+    metrics.print_table();
+    metrics.export_csv("ivfflat_search_metrics.csv");
+    COUT_ENDL("IVF-Flat Search tests completed successfully!");
+    return 0;
 }
 

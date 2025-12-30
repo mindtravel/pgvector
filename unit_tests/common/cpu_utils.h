@@ -13,7 +13,6 @@
  */
 
 #include "cpu_distance.h"
-#include "cpu_array_utils.h"
 #include "cpu_kmeans.h"
 #include "cpu_search.h"
 

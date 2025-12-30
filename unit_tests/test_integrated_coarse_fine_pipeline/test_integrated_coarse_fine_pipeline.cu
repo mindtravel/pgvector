@@ -14,6 +14,7 @@
 
 #include "../../cuda/integrate_screen/integrate_screen.cuh"
 #include "../../cuda/utils.cuh"
+#include "../../cuda/dataset/dataset.cuh"
 #include "../common/test_utils.cuh"
 #include "../common/cpu_search.h"
 
@@ -26,13 +27,6 @@ struct BenchmarkCase {
     int k;   // 精筛topk
 };
 
-struct ClusterDataset {
-    float*** cluster_ptrs;
-    int* cluster_sizes;
-    int* initial_indices;  /* 初始索引（cluster索引）[n_query * n_total_clusters] */
-    int n_total_clusters;
-};
-
 struct BalancedMapping {
     std::vector<int> cluster2block_offset;
     std::vector<int> cluster2block_ids;
@@ -41,75 +35,17 @@ struct BalancedMapping {
     int block_count = 0;
 };
 
-static ClusterDataset prepare_cluster_dataset(const BenchmarkCase& config) {
-    std::mt19937 rng(1234);
-
-    // 根据总向量数和cluster数量，分配每个cluster的向量数
-    std::uniform_real_distribution<float> value_dist(-1.0f, 1.0f);
-
-    ClusterDataset dataset;
-    dataset.n_total_clusters = config.n_total_clusters;  // 初始化n_total_clusters
-    dataset.cluster_ptrs = (float***)malloc(config.n_total_clusters * sizeof(float**));
-    dataset.cluster_sizes = (int*)malloc(config.n_total_clusters * sizeof(int));
-
-    // 平均分配向量到各个cluster，剩余部分随机分配
-    int base_vec_per_cluster = config.n_total_vectors / config.n_total_clusters;
-    int remainder = config.n_total_vectors % config.n_total_clusters;
-    
-    // 先分配基础数量
-    for (int cid = 0; cid < config.n_total_clusters; ++cid) {
-        dataset.cluster_sizes[cid] = base_vec_per_cluster;
-    }
-    
-    // 随机分配剩余向量
-    std::uniform_int_distribution<int> remainder_dist(0, config.n_total_clusters - 1);
-    for (int i = 0; i < remainder; ++i) {
-        dataset.cluster_sizes[remainder_dist(rng)]++;
-    }
-
-    // 为每个cluster分配内存并生成数据
-    for (int cid = 0; cid < config.n_total_clusters; ++cid) {
-        int vec_count = dataset.cluster_sizes[cid];
-        dataset.cluster_ptrs[cid] = generate_vector_list(vec_count, config.vector_dim);
-    }
-    
-    // 生成初始索引（cluster索引）：[0, 1, 2, ..., n_total_clusters-1]，每个query使用相同的索引
-    dataset.initial_indices = (int*)malloc(config.n_query * config.n_total_clusters * sizeof(int));
-    for (int qi = 0; qi < config.n_query; qi++) {
-        for (int cid = 0; cid < config.n_total_clusters; cid++) {
-            dataset.initial_indices[qi * config.n_total_clusters + cid] = cid;
-        }
-    }
-    
-    return dataset;
-}
-
-static void release_cluster_dataset(ClusterDataset& dataset) {
-    for (int cid = 0; cid < dataset.n_total_clusters; ++cid) {
-        free_vector_list((void**)dataset.cluster_ptrs[cid]);
-        dataset.cluster_ptrs[cid] = nullptr;
-    }
-    free(dataset.cluster_ptrs);
-    dataset.cluster_ptrs = nullptr;
-    free(dataset.cluster_sizes);
-    dataset.cluster_sizes = nullptr;
-    if (dataset.initial_indices) {
-        free(dataset.initial_indices);
-        dataset.initial_indices = nullptr;
-    }
-}
-
 static BalancedMapping build_balanced_mapping(const ClusterDataset& dataset,
                                               int chunk_size) {
     BalancedMapping mapping;
-    int n_total_clusters = dataset.n_total_clusters;
+    int n_total_clusters = dataset.cluster_info.k;
     mapping.cluster2block_offset.resize(n_total_clusters + 1, 0);
 
     int global_block_id = 0;
     for (int cid = 0; cid < n_total_clusters; ++cid) {
         mapping.cluster2block_offset[cid] =
             static_cast<int>(mapping.cluster2block_ids.size());
-        int remaining = dataset.cluster_sizes[cid];
+        int remaining = dataset.cluster_info.counts[cid];
         int local_offset = 0;
         while (remaining > 0) {
             int take = std::min(chunk_size, remaining);
@@ -126,148 +62,47 @@ static BalancedMapping build_balanced_mapping(const ClusterDataset& dataset,
     return mapping;
 }
 
-struct QueryBatch {
-    float** ptrs = nullptr;
-};
-
-static void cpu_coarse_fine_search(const BenchmarkCase& config,
-                                              float** query_batch,
-                                              const ClusterDataset& dataset,
-                                              float** centers,
-                                              int* initial_indices,
-                                              int** out_index,
-                                              float** out_dist,
-                                              int distance_mode /*COSINE_DISTANCE: cos, L2_DISTANCE: l2*/
-                                          ) {
-    const int n_query = config.n_query;
-    const int n_dim = config.vector_dim;
-    const int n_total_clusters = config.n_total_clusters;
-
-    struct Pair { float dist; int idx; };  
-
-    const unsigned num_threads = std::max(1u, std::thread::hardware_concurrency());
-    auto worker = [&](int start, int end) {
-        std::vector<Pair> tmp(n_total_clusters);
-        std::vector<Pair> fine_buffer;
-        for (int qi = start; qi < end; ++qi) {
-            const float* query = query_batch[qi];
-
-            // coarse: compare with cluster centers (使用传入的初始索引)
-            const int* query_initial_indices = initial_indices + qi * n_total_clusters;
-            for (int idx = 0; idx < n_total_clusters; ++idx) {
-                int cid = query_initial_indices[idx];  // 使用传入的索引
-                float dist = (distance_mode == L2_DISTANCE) ? l2_distance_squared(query, centers[cid], n_dim) : cosine_distance(query, centers[cid], n_dim);
-                tmp[idx] = {dist, cid};
-            }
-            // 粗筛选择 n_probes 个 cluster
-            std::partial_sort(tmp.begin(), tmp.begin() + config.n_probes, tmp.end(),
-                              [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
-
-            // fine: iterate vectors inside selected clusters
-            fine_buffer.clear();
-            
-            // 遍历粗筛选出的 n_probes 个 cluster
-            for (int probe_idx = 0; probe_idx < config.n_probes; ++probe_idx) {
-                int cid = tmp[probe_idx].idx;  // 从partial_sort后的tmp数组获取cluster ID
-                int vec_count = dataset.cluster_sizes[cid];
-                const float* base = dataset.cluster_ptrs[cid][0];
-                
-                // 计算该 cluster 的全局向量偏移
-                int cluster_global_offset = 0;
-                for (int prev_cid = 0; prev_cid < cid; ++prev_cid) {
-                    cluster_global_offset += dataset.cluster_sizes[prev_cid];
-                }
-                
-                for (int vid = 0; vid < vec_count; ++vid) {
-                    const float* vec = base + static_cast<size_t>(vid) * n_dim;
-                    // 存储全局索引：cluster 的全局偏移 + cluster 内的局部索引
-                    int global_idx = cluster_global_offset + vid;
-                    float dist = (distance_mode == L2_DISTANCE) ? l2_distance_squared(query, vec, n_dim) : cosine_distance(query, vec, n_dim);
-                    fine_buffer.push_back({dist, global_idx});
-                }
-            }
-            // 从所有候选向量中选择 top-k
-            if (fine_buffer.size() > static_cast<size_t>(config.k)) {
-                // 使用 nth_element 选择前 k 个最小的元素
-                std::nth_element(fine_buffer.begin(), fine_buffer.begin() + config.k, fine_buffer.end(),
-                                 [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
-                fine_buffer.resize(config.k);
-                // nth_element 只保证第 k 个元素在正确位置，需要排序
-                std::sort(fine_buffer.begin(), fine_buffer.end(),
-                          [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
-            } else {
-                // 候选数不足 k，直接排序
-                std::sort(fine_buffer.begin(), fine_buffer.end(),
-                          [](const Pair& a, const Pair& b) { return a.dist < b.dist; });
-            }
-
-            // 输出 top-k 结果
-            if (fine_buffer.empty() && qi == 0) {
-                printf("[DEBUG CPU] Query 0: fine_buffer is empty! n_probes=%d\n", config.n_probes);
-                for (int probe_idx = 0; probe_idx < config.n_probes; ++probe_idx) {
-                    int cid = tmp[probe_idx].idx;
-                    int vec_count = dataset.cluster_sizes[cid];
-                    printf("[DEBUG CPU] Probe %d: cluster_id=%d, vec_count=%d\n", probe_idx, cid, vec_count);
-                }
-            }
-            for (int t = 0; t < config.k; ++t) {
-                if (t < static_cast<int>(fine_buffer.size())) {
-                    out_index[qi][t] = fine_buffer[t].idx;
-                    out_dist[qi][t] = fine_buffer[t].dist;
-                } else {
-                    out_index[qi][t] = -1;
-                    out_dist[qi][t] = std::numeric_limits<float>::max();  // 使用最大值表示无效值
-                }
-            }
-        }
-    };
-
-    std::vector<std::thread> threads;
-    int chunk = (n_query + num_threads - 1) / num_threads;
-    int start = 0;
-    for (unsigned t = 0; t < num_threads && start < n_query; ++t) {
-        int end = std::min(n_query, start + chunk);
-        threads.emplace_back(worker, start, end);
-        start = end;
-    }
-    for (auto& th : threads) {
-        th.join();
-    }
-}
-
 /**
  * 运行单个测试用例，返回性能指标
  * @param config 测试配置
- * @param dataset 预生成的数据集（如果为nullptr，则内部生成）
- * @param query_batch 预生成的query批次（如果为nullptr，则内部生成）
- * @param cluster_center_data 预生成的cluster中心（如果为nullptr，则内部生成）
- * @return {pass_rate, pass_rate_balanced, gpu_ms, gpu_ms_balanced, cpu_ms, speedup, speedup_balanced, n_total_vectors}
+ * @param dataset 预生成的数据集（包含聚类数据和centroids）
+ * @param query_batch 预生成的query批次
+ * @return {pass_rate, gpu_ms, cpu_ms, speedup}
  */
 static std::vector<double> run_case(const BenchmarkCase& config,
                                      ClusterDataset* dataset,
                                      float** query_batch,
-                                     float** cluster_center_data, 
                                      int distance_mode) {
-    float*** cluster_data = dataset->cluster_ptrs;
-    int* cluster_sizes = dataset->cluster_sizes;
-    int* initial_indices = dataset->initial_indices;  /* 使用数据集中的初始索引 */
-    
     int** cpu_idx = (int**)malloc_vector_list(config.n_query, config.k, sizeof(int));
     float** cpu_dist = (float**)malloc_vector_list(config.n_query, config.k, sizeof(float));
 
     int** gpu_idx = (int**)malloc_vector_list(config.n_query, config.k, sizeof(int));
     float** gpu_dist = (float**)malloc_vector_list(config.n_query, config.k, sizeof(float));
 
+    // ClusterDataset 已经包含统一格式的数据，直接使用
+    float* reordered_data = dataset->reordered_data;
+    ClusterInfo& cluster_info = dataset->cluster_info;
+    
+    // 展平 query_batch 和 cluster_center_data
+    float* query_batch_flat = (float*)malloc(config.n_query * config.vector_dim * sizeof(float));
+    for (int i = 0; i < config.n_query; i++) {
+        memcpy(query_batch_flat + i * config.vector_dim, query_batch[i], config.vector_dim * sizeof(float));
+    }
+    
+    // 直接使用 dataset->centroids（已经是连续存储的）
+    float* centroids_flat = dataset->centroids;
+    
     double cpu_ms = 0.0;
     MEASURE_MS_AND_SAVE("cpu耗时:", cpu_ms,
-        cpu_coarse_fine_search(config, query_batch, *dataset,
-                               cluster_center_data,
-                               initial_indices,  /* 传入初始索引（一维数组） */
-                               cpu_idx,
-                               cpu_dist,
-                               distance_mode
-        );
+        cpu_coarse_fine_search(config.n_query, config.vector_dim, config.n_total_clusters,
+                              config.n_probes, config.k,
+                              query_batch_flat, reordered_data, centroids_flat,
+                              cluster_info, (DistanceType)distance_mode,
+                              cpu_idx, cpu_dist);
     );
+    
+    // 清理临时内存（reordered_data、cluster_info 和 centroids 由 ClusterDataset 管理，不需要释放）
+    free(query_batch_flat);
 
     // 分配 device 内存并复制数据
     float* d_query_batch = nullptr;
@@ -287,46 +122,37 @@ static std::vector<double> run_case(const BenchmarkCase& config,
     cudaMemcpy(d_query_batch, query_batch_flat, config.n_query * config.vector_dim * sizeof(float), cudaMemcpyHostToDevice);
     free(query_batch_flat);
     
-    // 2. 复制 cluster_sizes
+    // 2. 复制 cluster_sizes（从 ClusterInfo 获取）
     cudaMalloc(&d_cluster_size, config.n_total_clusters * sizeof(int));
-    cudaMemcpy(d_cluster_size, cluster_sizes, config.n_total_clusters * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_cluster_size, cluster_info.counts, config.n_total_clusters * sizeof(int), cudaMemcpyHostToDevice);
     
-    // 3. 复制所有 cluster 向量（连续存储）
+    // 3. 复制所有 cluster 向量（直接使用连续存储的数据）
     cudaMalloc(&d_cluster_vectors, config.n_total_vectors * config.vector_dim * sizeof(float));
-    float* cluster_vectors_flat = (float*)malloc(config.n_total_vectors * config.vector_dim * sizeof(float));
-    int offset = 0;
-    for (int cid = 0; cid < config.n_total_clusters; cid++) {
-        int vec_count = cluster_sizes[cid];
-        for (int vid = 0; vid < vec_count; vid++) {
-            memcpy(cluster_vectors_flat + offset * config.vector_dim, 
-                   cluster_data[cid][0] + vid * config.vector_dim, 
-                   config.vector_dim * sizeof(float));
-            offset++;
-        }
-    }
-    cudaMemcpy(d_cluster_vectors, cluster_vectors_flat, config.n_total_vectors * config.vector_dim * sizeof(float), cudaMemcpyHostToDevice);
-    free(cluster_vectors_flat);
+    cudaMemcpy(d_cluster_vectors, dataset->reordered_data, 
+               config.n_total_vectors * config.vector_dim * sizeof(float), 
+               cudaMemcpyHostToDevice);
     
-    // 4. 复制 cluster_center_data（连续存储）
+    // 4. 复制 cluster centers（直接使用 dataset->centroids，已经是连续存储的）
     cudaMalloc(&d_cluster_centers, config.n_total_clusters * config.vector_dim * sizeof(float));
-    float* cluster_centers_flat = (float*)malloc(config.n_total_clusters * config.vector_dim * sizeof(float));
-    for (int i = 0; i < config.n_total_clusters; i++) {
-        memcpy(cluster_centers_flat + i * config.vector_dim, cluster_center_data[i], config.vector_dim * sizeof(float));
-    }
-    cudaMemcpy(d_cluster_centers, cluster_centers_flat, config.n_total_clusters * config.vector_dim * sizeof(float), cudaMemcpyHostToDevice);
-    free(cluster_centers_flat);
+    cudaMemcpy(d_cluster_centers, dataset->centroids, 
+               config.n_total_clusters * config.vector_dim * sizeof(float), 
+               cudaMemcpyHostToDevice);
     
     // 5. 分配输出 device 内存
     cudaMalloc(&d_topk_dist, config.n_query * config.k * sizeof(float));
     cudaMalloc(&d_topk_index, config.n_query * config.k * sizeof(int));
     
-    // 6. 复制初始索引（cluster索引）到GPU（使用数据集中的初始索引）
+    // 6. 在GPU上生成初始索引（cluster索引）：[0, 1, 2, ..., n_total_clusters-1]
     int* d_initial_indices = nullptr;
     cudaMalloc(&d_initial_indices, config.n_query * config.n_total_clusters * sizeof(int));
-    cudaMemcpy(d_initial_indices, initial_indices, 
-               config.n_query * config.n_total_clusters * sizeof(int), 
-               cudaMemcpyHostToDevice);
+    CHECK_CUDA_ERRORS;
     
+    // 使用kernel在GPU上生成顺序索引
+    dim3 block(256);
+    dim3 grid((config.n_query * config.n_total_clusters + block.x - 1) / block.x);
+    generate_sequential_indices_kernel<<<grid, block>>>(
+        d_initial_indices, config.n_query, config.n_total_clusters);
+    cudaDeviceSynchronize();
     CHECK_CUDA_ERRORS;
 
     double gpu_ms = 0.0;
@@ -402,7 +228,6 @@ int main(int argc, char** argv) {
     // 缓存的数据集和query
     ClusterDataset cached_dataset = {};
     float** cached_query_batch = nullptr;
-    float** cached_cluster_center_data = nullptr;
     
     // 缓存的关键参数
     int cached_n_total_vectors = -1;
@@ -442,15 +267,18 @@ int main(int argc, char** argv) {
                                        cached_vector_dim != vector_dim);
         
         if (need_regenerate_dataset) {
-            if (cached_dataset.cluster_ptrs != nullptr) {
-                release_cluster_dataset(cached_dataset);
+            if (cached_dataset.is_valid()) {
+                cached_dataset.release();
             }
-            if (cached_cluster_center_data != nullptr) {
-                free_vector_list((void**)cached_cluster_center_data);
-                cached_cluster_center_data = nullptr;
-            }
-            cached_dataset = prepare_cluster_dataset(config);
-            cached_cluster_center_data = generate_vector_list(n_total_clusters, vector_dim);
+            cached_dataset.init_with_kmeans(
+                n_total_vectors,
+                vector_dim,
+                n_total_clusters,
+                nullptr,  // h_objective
+                20,  // kmeans_iters
+                false,  // use_minibatch
+                COSINE_DISTANCE  // distance_mode
+            );
             cached_n_total_vectors = n_total_vectors;
             cached_vector_dim = vector_dim;
         }
@@ -485,7 +313,7 @@ int main(int argc, char** argv) {
         }
         
         auto result = metrics.add_row_averaged([&]() -> std::vector<double> {
-            auto metrics_result = run_case(config, &cached_dataset, cached_query_batch, cached_cluster_center_data, distance_mode);
+            auto metrics_result = run_case(config, &cached_dataset, cached_query_batch, distance_mode);
             
             std::vector<double> return_vec = {
                 metrics_result[0],  // pass_rate
@@ -505,14 +333,11 @@ int main(int argc, char** argv) {
     }
     
     // 清理缓存的数据
-    if (cached_dataset.cluster_ptrs != nullptr) {
-        release_cluster_dataset(cached_dataset);
+    if (cached_dataset.is_valid()) {
+        cached_dataset.release();
     }
     if (cached_query_batch != nullptr) {
         free_vector_list((void**)cached_query_batch);
-    }
-    if (cached_cluster_center_data != nullptr) {
-        free_vector_list((void**)cached_cluster_center_data);
     }
     
     cudaDeviceSynchronize();

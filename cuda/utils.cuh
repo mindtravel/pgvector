@@ -23,6 +23,24 @@ __global__ void generate_sequence_indices_kernel(
 );
 
 /**
+ * Kernel: 生成顺序索引（用于IVF搜索的cluster索引）
+ * 为每个query生成相同的顺序索引 [0, 1, 2, ..., n_total_clusters-1]
+ * 
+ * 用于 batch_search_pipeline 中，当 d_initial_indices 为 nullptr 时，
+ * 在GPU上生成顺序索引，避免CPU-GPU数据传输
+ * 
+ * 线程模型：
+ * - 一维 grid，每个线程处理一个索引位置
+ * - total = n_query * n_total_clusters
+ * - 每个query使用相同的索引序列
+ */
+__global__ void generate_sequential_indices_kernel(
+    int* d_indices,  // [n_query * n_total_clusters] 输出：顺序索引
+    int n_query,     // query数量
+    int n_total_clusters  // cluster数量
+);
+
+/**
  * Kernel: 并行统计每个cluster被多少个query使用
  * 
  * 线程模型：
