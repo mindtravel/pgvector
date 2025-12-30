@@ -108,10 +108,10 @@ void gpu_kmeans_lloyd(
         // 这些操作需要在所有batch开始前完成
         {
             CUDATimer timer_init("  Iter " + std::to_string(it) + ": Initialize (clear accum/counts, compute centroid norms)", ENABLE_CUDA_TIMING);
-            cudaMemsetAsync(d_accum, 0, sizeof(float) * (size_t)k * dim, stream[0]);
-            cudaMemsetAsync(d_counts, 0, sizeof(int) * (size_t)k, stream[0]);
-            // 绑定到 stream[0]，确保在所有batch计算前完成
-            compute_l2_squared_gpu(d_centroids, d_cnorm2, k, dim, L2NORM_AUTO, stream[0]);
+        cudaMemsetAsync(d_accum, 0, sizeof(float) * (size_t)k * dim, stream[0]);
+        cudaMemsetAsync(d_counts, 0, sizeof(int) * (size_t)k, stream[0]);
+        // 绑定到 stream[0]，确保在所有batch计算前完成
+        compute_l2_squared_gpu(d_centroids, d_cnorm2, k, dim, L2NORM_AUTO, stream[0]);
         }
 
         // ====== 分块处理数据点（使用双缓冲） ======
@@ -141,13 +141,13 @@ void gpu_kmeans_lloyd(
 
         {
             CUDATimer timer_batch("  Iter " + std::to_string(it) + ": Process All Batches", ENABLE_CUDA_TIMING);
-            for (int base = 0; base < n; base += B) {
-                int curB = std::min(B, n - base);
-                float* d_data_cur = d_data_buf[cur_buf];
-                
-                // 等待当前batch的数据传输完成（使用事件依赖）
-                // 第一次迭代：等待预加载完成；后续迭代：等待上一个batch的计算完成
-                cudaStreamWaitEvent(stream[cur_buf], event[cur_buf], 0);
+        for (int base = 0; base < n; base += B) {
+            int curB = std::min(B, n - base);
+            float* d_data_cur = d_data_buf[cur_buf];
+            
+            // 等待当前batch的数据传输完成（使用事件依赖）
+            // 第一次迭代：等待预加载完成；后续迭代：等待上一个batch的计算完成
+            cudaStreamWaitEvent(stream[cur_buf], event[cur_buf], 0);
 
             // 异步预加载下一个batch（如果还有）
             // 注意：这里先启动预加载，但会在计算完成后才真正传输（通过事件依赖）
@@ -259,10 +259,10 @@ void gpu_kmeans_lloyd(
         // update centroids: one block per centroid（使用 stream[0]）
         {
             CUDATimer timer_update("  Iter " + std::to_string(it) + ": Update Centroids", ENABLE_CUDA_TIMING);
-            kernel_update_centroids<<<k, 256, 0, stream[0]>>>(d_centroids, d_accum, d_counts, k, dim);
-            
-            // 等待 centroid 更新完成（只同步 stream[0]）
-            cudaStreamSynchronize(stream[0]);
+        kernel_update_centroids<<<k, 256, 0, stream[0]>>>(d_centroids, d_accum, d_counts, k, dim);
+        
+        // 等待 centroid 更新完成（只同步 stream[0]）
+        cudaStreamSynchronize(stream[0]);
         }
 
         // 从 GPU 读取 objective 值（只在迭代结束时读取一次）

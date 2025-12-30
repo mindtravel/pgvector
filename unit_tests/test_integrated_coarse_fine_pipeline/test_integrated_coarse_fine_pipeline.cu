@@ -15,6 +15,7 @@
 #include "../../cuda/integrate_screen/integrate_screen.cuh"
 #include "../../cuda/utils.cuh"
 #include "../common/test_utils.cuh"
+#include "../common/cpu_search.h"
 
 struct BenchmarkCase {
     int n_query;

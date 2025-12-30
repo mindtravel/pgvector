@@ -22,7 +22,8 @@ cmake -S . -B build \
 echo "编译项目..."
 cd build
 # make -j$(nproc)
-make test_kmeans -j$(nproc)
+# make test_kmeans -j$(nproc)
+make test_ivfflat_search -j$(nproc)
 
 # make test_integrated_coarse_fine -j$(nproc)
 # make test_integrated_coarse_fine_pipeline -j$(nproc)
@@ -61,8 +62,11 @@ make test_kmeans -j$(nproc)
 # echo "运行 integrated_coarse_fine_pipeline 测试..."
 # ./test_integrated_coarse_fine_pipeline/test_integrated_coarse_fine_pipeline
 # echo "=================================="
-echo "运行 kmeans 测试..."
-./test_kmeans/test_kmeans
+# echo "运行 kmeans 测试..."
+# ./test_kmeans/test_kmeans
+# echo "=================================="
+echo "运行 ivf_search 测试..."
+./test_ivfflat_search/test_ivfflat_search
 echo "=================================="
 # echo "运行 select_k 测试..."
 # ./test_select_k/test_select_k 

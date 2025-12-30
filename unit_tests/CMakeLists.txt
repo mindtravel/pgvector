@@ -291,6 +291,7 @@ add_subdirectory(test_integrated_coarse_fine)
 add_subdirectory(test_integrated_coarse_fine_pipeline)
 add_subdirectory(test_select_k)
 add_subdirectory(test_kmeans)
+add_subdirectory(test_ivfflat_search)
 
 # 统一测试目标
 add_custom_target(run_all_tests
@@ -307,5 +308,6 @@ add_custom_target(run_all_tests
         test_integrated_coarse_fine_pipeline
         test_select_k
         test_kmeans
+        test_ivfflat_search
     COMMENT "运行所有单元测试"
 )

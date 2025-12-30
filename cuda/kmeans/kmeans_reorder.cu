@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
 #include <algorithm>
 #include <numeric>
@@ -271,6 +272,129 @@ void gpu_build_permutation_by_cluster(
     cudaFree(d_perm);
     cudaFree(d_invalid);
     cudaFree(d_oob);
+}
+
+// ============================================================
+// CPU-side reordering: build reordered vectors from permutation
+// ============================================================
+
+/**
+ * 根据permutation数组重排向量（多线程CPU实现）
+ * 
+ * 使用多线程并行处理，提高性能
+ * 使用pageable memory，避免pinned memory限制
+ * 
+ * @param h_data_in 输入：原始向量数据 [n, dim] row-major
+ * @param h_perm 输入：permutation数组 [n]，perm[p] 表示重排后位置p对应的原始索引
+ * @param h_data_out 输出：重排后的向量数据 [n, dim] row-major
+ * @param n 向量数量
+ * @param dim 向量维度
+ */
+void cpu_reorder_vectors_by_permutation(
+    const float* h_data_in,    // [n, dim] CPU
+    const int* h_perm,         // [n] CPU permutation array
+    float* h_data_out,         // [n, dim] CPU output
+    int n, int dim
+) {
+    if (!h_data_in || !h_perm || !h_data_out || n <= 0 || dim <= 0) {
+        fprintf(stderr, "[reorder] ERROR: Invalid parameters for cpu_reorder_vectors_by_permutation\n");
+        return;
+    }
+    
+    // 多线程重排：out[p] = in[perm[p]]
+    const int num_threads = std::max(1u, std::thread::hardware_concurrency());
+    const int chunk = (n + num_threads - 1) / num_threads;
+    std::vector<std::thread> th;
+    th.reserve(num_threads);
+    
+    for (int t = 0; t < num_threads; ++t) {
+        th.emplace_back([=]() {
+            int p0 = t * chunk;
+            int p1 = std::min(n, p0 + chunk);
+            for (int p = p0; p < p1; ++p) {
+                int i = h_perm[p];
+                // 检查索引有效性（perm中可能存在无效值）
+                if (i < 0 || i >= n) continue;
+                const float* src = h_data_in + (size_t)i * dim;
+                float* dst = h_data_out + (size_t)p * dim;
+                std::memcpy(dst, src, sizeof(float) * (size_t)dim);
+            }
+        });
+    }
+    
+    for (auto& x : th) x.join();
+}
+
+// ============================================================
+// IVF K-means: Complete pipeline from clustering to reordering
+// ============================================================
+
+bool ivf_kmeans(
+    const KMeansCase& cfg,
+    const float* h_data_in,        // [n, dim] CPU input
+    float* h_data_out,             // [n, dim] CPU output (must be pre-allocated)
+    float* d_centroids,            // [k, dim] GPU (in/out)
+    ClusterInfo* h_cluster_info,   // optional output
+    bool use_minibatch,            // true for minibatch, false for Lloyd
+    int device_id,
+    int batch_size,
+    float* h_objective             // optional output
+) {
+    const int n = cfg.n, dim = cfg.dim, k = cfg.k;
+    
+    // 参数验证
+    if (!h_data_in || !h_data_out || !d_centroids || n <= 0 || dim <= 0 || k <= 0) {
+        fprintf(stderr, "[ivf_kmeans] ERROR: Invalid parameters\n");
+        return false;
+    }
+    
+    cuda_check(cudaSetDevice(device_id), "set device");
+    
+    // Step 1: Allocate device buffer for assignments
+    int* d_assign = nullptr;
+    cuda_check(cudaMalloc(&d_assign, sizeof(int) * (size_t)n), "malloc d_assign");
+    
+    // Step 2: Run K-means clustering
+    float obj = 0.0f;
+    if (use_minibatch) {
+        gpu_kmeans_minibatch(cfg, h_data_in, d_assign, d_centroids, &obj);
+    } else {
+        gpu_kmeans_lloyd(cfg, h_data_in, d_assign, d_centroids, &obj);
+    }
+    cuda_check(cudaDeviceSynchronize(), "sync after kmeans");
+    cuda_check_last("kmeans kernels");
+    
+    if (h_objective) {
+        *h_objective = obj;
+    }
+    
+    // Step 3: Copy assign back to host (needed for permutation building)
+    std::vector<int> h_assign(n);
+    cuda_check(cudaMemcpy(h_assign.data(), d_assign, sizeof(int) * (size_t)n,
+                         cudaMemcpyDeviceToHost), "d2h assign");
+    
+    // Step 4: Build permutation on GPU
+    std::vector<int> h_perm(n);
+    ClusterInfo cluster_info;
+    ClusterInfo* info_ptr = h_cluster_info ? h_cluster_info : &cluster_info;
+    
+    gpu_build_permutation_by_cluster(cfg, h_assign.data(), h_perm.data(), info_ptr,
+                                    device_id, batch_size, 0);
+    cuda_check(cudaDeviceSynchronize(), "sync after build_permutation");
+    cuda_check_last("build_permutation");
+    
+    // Step 5: Reorder vectors on CPU
+    cpu_reorder_vectors_by_permutation(h_data_in, h_perm.data(), h_data_out, n, dim);
+    
+    // Cleanup
+    cudaFree(d_assign);
+    
+    // Only free cluster_info if we created a temporary one
+    if (!h_cluster_info) {
+        free_cluster_info(&cluster_info, false);
+    }
+    
+    return true;
 }
 
 // Keep your existing free_cluster_info()

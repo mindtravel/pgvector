@@ -278,6 +278,56 @@ void gpu_build_permutation_by_cluster(
 );
 
 /**
+ * CPU版本：根据permutation数组重排向量（多线程实现）
+ * 
+ * 使用多线程并行处理，提高性能
+ * 使用pageable memory，避免pinned memory限制
+ * 
+ * @param h_data_in 输入：原始向量数据 [n, dim] row-major
+ * @param h_perm 输入：permutation数组 [n]，perm[p] 表示重排后位置p对应的原始索引
+ * @param h_data_out 输出：重排后的向量数据 [n, dim] row-major
+ * @param n 向量数量
+ * @param dim 向量维度
+ */
+void cpu_reorder_vectors_by_permutation(
+    const float* h_data_in,    // [n, dim] CPU
+    const int* h_perm,         // [n] CPU permutation array
+    float* h_data_out,         // [n, dim] CPU output
+    int n, int dim
+);
+
+/**
+ * IVF K-means：完整的K-means聚类到内存物理重排流程
+ * 
+ * 该函数整合了以下步骤：
+ * 1. K-means聚类（Lloyd或Minibatch算法）
+ * 2. 构建permutation数组（按cluster重排）
+ * 3. 重排向量数据（物理内存重排）
+ * 
+ * @param cfg KMeans配置
+ * @param h_data_in 输入：原始向量数据 [n, dim] row-major (pageable memory)
+ * @param h_data_out 输出：重排后的向量数据 [n, dim] row-major (pageable memory)，必须预先分配
+ * @param d_centroids 输入输出：设备端聚类中心 [k, dim] (输入为初始值，输出为最终值)
+ * @param h_cluster_info 输出：cluster信息（offsets和counts），可以为nullptr
+ * @param use_minibatch 是否使用Minibatch算法（true=Minibatch, false=Lloyd）
+ * @param device_id GPU设备ID
+ * @param batch_size permutation构建的batch大小（例如 1<<20）
+ * @param h_objective 输出：目标函数值，可以为nullptr
+ * @return 成功返回true，失败返回false
+ */
+bool ivf_kmeans(
+    const KMeansCase& cfg,
+    const float* h_data_in,        // [n, dim] CPU input
+    float* h_data_out,             // [n, dim] CPU output (must be pre-allocated)
+    float* d_centroids,            // [k, dim] GPU (in/out)
+    ClusterInfo* h_cluster_info,   // optional output
+    bool use_minibatch = false,    // true for minibatch, false for Lloyd
+    int device_id = 0,
+    int batch_size = (1 << 20),   // batch size for permutation building
+    float* h_objective = nullptr  // optional output
+);
+
+/**
  * 释放ClusterInfo结构的内存
  */
 void free_cluster_info(ClusterInfo* info, bool is_device);
