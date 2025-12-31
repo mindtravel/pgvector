@@ -38,7 +38,7 @@ target_link_libraries(test_ivfflat_search
     cublas
     curand
     indexed_gemm_lib
-    integrate_screen_lib
+    ivf_search_lib
 )
 
 # CUDA properties

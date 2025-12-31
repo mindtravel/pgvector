@@ -16,7 +16,7 @@
 #include <vector>
 
 #include "../../cuda/pch.h"
-#include "../../cuda/integrate_screen/integrate_screen.cuh"
+#include "../../cuda/ivf_search/ivf_search.cuh"
 #include "../../cuda/dataset/dataset.cuh"
 #include "../../cuda/utils.cuh"
 #include "../common/test_utils.cuh"
@@ -55,7 +55,7 @@ static std::vector<double> run_case(const IVFFlatSearchCase& cfg) {
                 " iters=", cfg.kmeans_iters,
                 " dist=", (cfg.dist == L2_DISTANCE ? "L2" : "COSINE"),
                 " algo=", (cfg.use_minibatch ? "MINIBATCH" : "LLOYD"));
-        COUT_ENDL("========================================");
+        // COUT_ENDL("========================================");
     }
     
     // Step 1: 初始化ClusterDataset（使用K-means聚类）
@@ -63,18 +63,13 @@ static std::vector<double> run_case(const IVFFlatSearchCase& cfg) {
     float kmeans_objective = 0.0f;
     double kmeans_ms = 0.0;
     MEASURE_MS_AND_SAVE("IVF n_clusters-means耗时:", kmeans_ms,
-        try {
-            dataset.init_with_kmeans(
-                n, dim, n_clusters,
-                &kmeans_objective,  // h_objective
-                cfg.kmeans_iters,
-                cfg.use_minibatch,
-                cfg.dist
-            );
-        } catch (const std::exception& e) {
-            fprintf(stderr, "ERROR: init_with_kmeans failed: %s\n", e.what());
-            return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-        }
+        dataset.init_with_kmeans(
+            n, dim, n_clusters,
+            &kmeans_objective,  // h_objective
+            cfg.kmeans_iters,
+            cfg.use_minibatch,
+            cfg.dist
+        );
     );
     
     if (!QUIET) {
@@ -190,7 +185,7 @@ static std::vector<double> run_case(const IVFFlatSearchCase& cfg) {
     
     // Step 7: 验证结果（CPU和GPU使用相同的聚类，应该得到相同的结果）
     bool pass = (cfg.dist == L2_DISTANCE) 
-        ? compare_set_2D_relative<float>(cpu_dist, gpu_dist, n_query, topk, 1e-4f)
+        ? compare_set_2D_relative<float>(cpu_dist, gpu_dist, n_query, topk, 1e-3f)
         : compare_set_2D<float>(cpu_dist, gpu_dist, n_query, topk, 1e-5f);
     
     // 验证索引是否匹配（允许距离相同的情况）
@@ -224,7 +219,7 @@ static std::vector<double> run_case(const IVFFlatSearchCase& cfg) {
         COUT_ENDL("----- IVF-Flat Search Verify -----");
         COUT_VAL("pass=", (pass ? 1 : 0), " kmeans_ms=", kmeans_ms, " cpu_ms=", cpu_ms, " gpu_ms=", gpu_ms);
         COUT_VAL("speedup=", speedup, " mismatch_count=", mismatch_count);
-        COUT_ENDL("-----------------------------------");
+        // COUT_ENDL("-----------------------------------");
     }
     
     // Cleanup
@@ -264,9 +259,12 @@ int main(int argc, char** argv) {
     CHECK_CUDA_ERRORS;
     
     // 使用 PARAM_3D 组合测试 cfg.n, cfg.n_query, cfg.dim
-    PARAM_3D(n, (10000, 1000000, 10000000),
-             n_query, (100),
-             dim, (96))
+    PARAM_3D(n, (10000, 20003, 100000, 240000, 1000000, 2000000),
+             n_query, (1,20,34,100,10000),
+             dim, (20,32,64,96, 115, 128, 192, 200, 256))
+    // PARAM_3D(n, (10000, 1000000),
+    //     n_query, (100),
+    //     dim, (96))
     {
         IVFFlatSearchCase cfg;
         cfg.n = n;

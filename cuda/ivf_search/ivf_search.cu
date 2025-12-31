@@ -43,8 +43,8 @@ void batch_search_pipeline(float* d_query_batch,
                            int distance_mode
                         ) {
 
-    fprintf(stderr, "batch_search_pipeline: 开始执行, n_query=%d, n_dim=%d, n_total_clusters=%d, n_total_vectors=%d, n_probes=%d, k=%d\n",
-            n_query, n_dim, n_total_clusters, n_total_vectors, n_probes, k);
+    // fprintf(stderr, "batch_search_pipeline: 开始执行, n_query=%d, n_dim=%d, n_total_clusters=%d, n_total_vectors=%d, n_probes=%d, k=%d\n",
+    //         n_query, n_dim, n_total_clusters, n_total_vectors, n_probes, k);
 
     if (n_query <= 0 || n_dim <= 0 || n_total_clusters <= 0 || k <= 0) {
         fprintf(stderr, "[ERROR] batch_search_pipeline: 无效参数 - n_query=%d, n_dim=%d, n_total_clusters=%d, k=%d\n",
@@ -86,7 +86,7 @@ void batch_search_pipeline(float* d_query_batch,
     dim3 probeDim(n_probes);
 
     {
-        CUDATimer timer("Step 0: Data Preparation");
+        CUDATimer timer("Step 0: Data Preparation", ENABLE_CUDA_TIMING);
         fprintf(stderr, "batch_search_pipeline: Step 0 - 开始数据准备\n");
         
         // 先在GPU上计算probe_vector_offset（使用前缀和）
@@ -121,7 +121,7 @@ void batch_search_pipeline(float* d_query_batch,
     // 注意：data_index 在 cuda_cos_topk_warpsort 内部使用 CUDA kernel 自动生成顺序索引 [0, 1, 2, ..., n_total_clusters-1]
     
     {
-        CUDATimer timer("Step 1: Coarse Search (cuda_cos_topk_warpsort)");
+        CUDATimer timer("Step 1: Coarse Search (cuda_cos_topk_warpsort)", ENABLE_CUDA_TIMING);
         float alpha = 1.0f; 
         float beta = 0.0f;
         
@@ -130,7 +130,7 @@ void batch_search_pipeline(float* d_query_batch,
     
         // 分配设备内存
         {
-            CUDATimer timer_manage("Step 1: GPU Memory Allocation");
+            CUDATimer timer("Step 1: GPU Memory Allocation", ENABLE_CUDA_TIMING);
     
             cudaMalloc(&d_inner_product, n_query * n_total_clusters * sizeof(float));/*存储各个query需要查找的data向量的距离*/
             cudaMalloc(&d_top_nprobe_dist, n_query * n_probes * sizeof(float));/*存储topk距离*/
@@ -142,7 +142,7 @@ void batch_search_pipeline(float* d_query_batch,
         {
             // COUT_ENDL("begin data transfer");
     
-            CUDATimer timer_trans1("Step 1: H2D Data Transfer");
+            CUDATimer timer_trans1("Step 1: H2D Data Transfer", ENABLE_CUDA_TIMING);
     
     
             /* 初始化距离数组（使用fill kernel替代thrust::fill） */
@@ -161,7 +161,7 @@ void batch_search_pipeline(float* d_query_batch,
     
         /* 核函数执行 */
         {    
-            CUDATimer timer_compute("Step 1: Kernel Execution: matrix multiply");
+            CUDATimer timer("Step 1: Kernel Execution: matrix multiply", ENABLE_CUDA_TIMING);
 
             /**
             * 使用cuBLAS进行矩阵乘法
@@ -181,7 +181,7 @@ void batch_search_pipeline(float* d_query_batch,
         }
     
         {
-            CUDATimer timer_compute("Step 1: Kernel Execution: cos + topk");
+            CUDATimer timer("Step 1: Kernel Execution: cos + topk", ENABLE_CUDA_TIMING);
 
             if(distance_mode == COSINE_DISTANCE){
                 pgvector::fusion_dist_topk_warpsort::fusion_cos_topk_warpsort<float, int>(
@@ -234,7 +234,7 @@ void batch_search_pipeline(float* d_query_batch,
     
     
         {
-            CUDATimer timer_manage2("Step 1: GPU Memory Free", false);
+            CUDATimer timer("Step 1: GPU Memory Free", false, ENABLE_CUDA_TIMING);
             cublasDestroy(handle);
             // d_cluster_centers_ptr 由调用者管理，不在这里释放
             cudaFree(d_inner_product);
@@ -265,7 +265,7 @@ void batch_search_pipeline(float* d_query_batch,
     constexpr int kQueriesPerBlock = 8;
 
     {
-        CUDATimer timer("Step 2: Build entry data (GPU)");
+        CUDATimer timer("Step 2: Build entry data (GPU)", ENABLE_CUDA_TIMING);
         
         // 第一步：在GPU上统计每个cluster有多少个query使用它
         int* d_cluster_query_count = nullptr;
@@ -402,7 +402,7 @@ void batch_search_pipeline(float* d_query_batch,
     // Step 3. 精筛：使用 v5 entry-based 版本
         // ------------------------------------------------------------------
     {
-        CUDATimer timer("Step 3: Fine Search (v5 entry-based)");
+        CUDATimer timer("Step 3: Fine Search (v5 entry-based)", ENABLE_CUDA_TIMING);
 
         int capacity = 32;
         float* d_topk_dist_candidate = nullptr;
@@ -413,7 +413,7 @@ void batch_search_pipeline(float* d_query_batch,
         dim3 block(kQueriesPerBlock * 32);  // 8个warp，每个warp 32个线程
     
         {
-            CUDATimer timer_init("Init Invalid Values Kernel", ENABLE_CUDA_TIMING);
+            CUDATimer timer("Init Invalid Values Kernel", ENABLE_CUDA_TIMING);
     
             // 选择合适的Capacity（必须是2的幂，且 > k）
             while (capacity < k) capacity <<= 1;
@@ -438,7 +438,7 @@ void batch_search_pipeline(float* d_query_batch,
         }
         
         {
-            CUDATimer timer_kernel("Indexed Inner Product with TopK Kernel (v5 entry-based)", ENABLE_CUDA_TIMING);
+            CUDATimer timer("Indexed Inner Product with TopK Kernel (v5 entry-based)", ENABLE_CUDA_TIMING);
             
             if (n_entry != 0) {
                 if(distance_mode == COSINE_DISTANCE){
@@ -588,7 +588,7 @@ void batch_search_pipeline(float* d_query_batch,
         // 规约：将 [n_query][n_probes][k] 归并为 [n_query][k]
         // 在GPU上完成，避免CPU-GPU数据复制
         {
-            CUDATimer timer_reduce("Reduce probe results to query top-k", ENABLE_CUDA_TIMING);
+            CUDATimer timer("Reduce probe results to query top-k", ENABLE_CUDA_TIMING);
             
             select_k<float, int>(
                 d_topk_dist_candidate, n_query, n_probes * k, k,

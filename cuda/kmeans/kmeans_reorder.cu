@@ -60,6 +60,7 @@ void gpu_build_permutation_by_cluster(
 
     cudaMalloc(&d_invalid, sizeof(unsigned int));
     cudaMalloc(&d_oob, sizeof(unsigned int));
+    cudaMemsetAsync(d_invalid, 0, sizeof(unsigned int), stream);
     cudaMemsetAsync(d_oob, 0, sizeof(unsigned int), stream);
     CHECK_CUDA_ERRORS;
 

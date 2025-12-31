@@ -22,15 +22,13 @@ cmake -S . -B build \
 echo "编译项目..."
 cd build
 # make -j$(nproc)
-# make test_kmeans -j$(nproc)
+make test_kmeans -j$(nproc)
 make test_ivfflat_search -j$(nproc)
 
-# make test_integrated_coarse_fine -j$(nproc)
-# make test_integrated_coarse_fine_pipeline -j$(nproc)
+# make test_ivf_search_coarse_fine -j$(nproc)
+# make test_ivf_search_coarse_fine_pipeline -j$(nproc)
 # make test_fusion_cos_topk -j$(nproc)
 # make test_fusion_cos_topk_fine
-# make test_fusion_cos_topk_fine_v3_fixed_probe -j$(nproc)
-# make test_fusion_cos_topk_fine_v5 -j$(nproc)
 # make test_count_query_probes_kernel -j$(nproc)
 # make test_fill_invalid_values_kernel -j$(nproc)
 # make test_select_k -j$(nproc)
@@ -59,13 +57,13 @@ make test_ivfflat_search -j$(nproc)
 # echo "运行 warp sort 测试..."
 # ./test_bitonic/test_bitonic
 # echo "=================================="
-# echo "运行 integrated_coarse_fine_pipeline 测试..."
-# ./test_integrated_coarse_fine_pipeline/test_integrated_coarse_fine_pipeline
+# echo "运行 ivfflat_search_pipeline 测试..."
+# ./test_ivfflat_search_pipeline/test_ivfflat_search_pipeline
 # echo "=================================="
 # echo "运行 kmeans 测试..."
 # ./test_kmeans/test_kmeans
 # echo "=================================="
-# echo "运行 ivf_search 测试..."
+# echo "运行 ivfflat_search 测试..."
 ./test_ivfflat_search/test_ivfflat_search
 # echo "=================================="
 # echo "运行 select_k 测试..."

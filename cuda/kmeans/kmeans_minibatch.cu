@@ -12,7 +12,7 @@
 #include <vector>
 #include <../unit_tests/common/test_utils.cuh>
 
-#define ENABLE_CUDA_TIMING 1 /*是否启用CUDATimer计时*/
+#define ENABLE_CUDA_TIMING 0 /*是否启用CUDATimer计时*/
 
 static inline void cublas_check(cublasStatus_t st, const char* msg) {
     if (st != CUBLAS_STATUS_SUCCESS) {

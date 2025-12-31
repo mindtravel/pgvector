@@ -66,11 +66,6 @@ set_target_properties(l2norm_lib PROPERTIES
 )
 
 # 创建共享的utils库，避免重复编译
-# 被以下库使用：
-#   - fusion_cos_topk_warpsort_coarse_lib (generate_sequence_indices_kernel)
-#   - fusion_cos_topk_warpsort_lib (generate_sequence_indices_kernel)
-#   - integrate_screen_lib (多个utils函数)
-# 
 # 包含的文件：
 #   - utils.cu: 通用工具kernel和host函数
 add_library(utils_lib STATIC
@@ -87,10 +82,6 @@ set_target_properties(utils_lib PROPERTIES
 )
 
 # 创建共享的indexed_gemm库，避免重复编译
-# 被以下库使用：
-#   - fusion_cos_topk_warpsort_lib (indexed_gemm_cos, indexed_gemm_l2)
-#   - integrate_screen_lib (indexed_gemm_cos, indexed_gemm_l2)
-# 
 # 包含的文件（仅保留当前使用的版本）：
 #   - indexed_gemm_cos.cu: v5 entry-based版本（当前使用）
 #   - indexed_gemm_l2.cu: v5 entry-based版本（当前使用）
@@ -117,75 +108,10 @@ target_link_libraries(indexed_gemm_lib
     utils_lib
 )
 
-# 创建共享的fusion_cos_topk_warpsort粗筛库（只包含粗筛实现）
-# 被以下测试使用：
-#   - test_fusion_cos_topk (只需要粗筛)
-# 
-# 包含的文件：
-#   - fusion_cos_topk_warpsort.cu: 粗筛实现（位于fusion_dist_topk目录）
-add_library(fusion_cos_topk_warpsort_coarse_lib STATIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_dist_topk/fusion_cos_topk_warpsort.cu
-)
-target_include_directories(fusion_cos_topk_warpsort_coarse_lib PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
-    ${CMAKE_CURRENT_SOURCE_DIR}/common
-)
-set_target_properties(fusion_cos_topk_warpsort_coarse_lib PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    CUDA_ARCHITECTURES 70
-)
-target_link_libraries(fusion_cos_topk_warpsort_coarse_lib 
-    PUBLIC
-    l2norm_lib 
-    utils_lib
-    cublas
-)
-
-# 创建共享的fusion_cos_topk_warpsort完整库（包含粗筛实现）
-# 被以下测试使用：
-#   - test_fusion_cos_topk_fine (实际使用fusion_dist_topk_warpsort_lib)
-# 
-# 包含的文件：
-#   - fusion_cos_topk_warpsort.cu: 粗筛实现（位于fusion_dist_topk目录）
-#   - warpsort_topk.cu: warp-level top-k选择
-# 注意：
-#   - 精筛实现已合并到fusion_dist_topk_warpsort_lib中
-#   - indexed_gemm_v3_fixed_probe.cu 和 indexed_gemm_v5.cu 已移到 indexed_gemm_lib 中
-#   - inner_product_utils.cuh 是头文件，不需要添加到库中
-add_library(fusion_cos_topk_warpsort_lib STATIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/fusion_dist_topk/fusion_cos_topk_warpsort.cu
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/warpsortfilter/warpsort_topk.cu
-)
-target_include_directories(fusion_cos_topk_warpsort_lib PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
-    ${CMAKE_CURRENT_SOURCE_DIR}/common
-)
-# CUDA编译选项说明：
-#   CUDA_SEPARABLE_COMPILATION ON: 启用分离编译，允许增量编译和库化
-#   CUDA_RESOLVE_DEVICE_SYMBOLS ON: 在库中解析device符号，减少最终链接时间
-#   CUDA_ARCHITECTURES 70: 只编译SM 7.0，加快编译速度
-set_target_properties(fusion_cos_topk_warpsort_lib PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    CUDA_ARCHITECTURES 70
-)
-# 链接依赖库：
-#   - l2norm_lib: L2范数计算（fusion_cos_topk_warpsort需要l2_norm_kernel）
-#   - indexed_gemm_lib: indexed_gemm实现（v3_fixed_probe, v5）
-#   - cublas: CUDA基础线性代数库（某些操作需要）
-target_link_libraries(fusion_cos_topk_warpsort_lib 
-    PUBLIC
-    l2norm_lib 
-    utils_lib
-    indexed_gemm_lib
-    cublas
-)
-
 # 创建fusion_dist_topk_warpsort库（包含cosine和L2距离的warpsort实现）
 # 被以下使用：
 #   - test_fusion_cos_topk_fine (通过fusion_dist_topk_warpsort_lib)
-#   - integrate_screen_lib (需要fusion_cos_topk_warpsort)
+#   - ivf_search_lib (需要fusion_cos_topk_warpsort)
 # 
 # 包含的文件：
 #   - fusion_cos_topk_warpsort.cu: cosine距离的warpsort实现
@@ -212,32 +138,27 @@ target_link_libraries(fusion_dist_topk_warpsort_lib
     cublas
 )
 
-# 创建共享的integrate_screen库（供pgvector主项目和测试使用）
+# 创建共享的ivf_search库（供pgvector主项目和测试使用）
 # 被以下使用：
 #   - pgvector主项目（ivfscanbatch.c 调用 batch_search_pipeline）
-#   - test_integrated_coarse_fine (测试integrate_screen.cu)
+#   - test_ivfflat_search (测试ivf_search.cu，基础测试，数据集常驻显存)
 # 
 # 包含的文件：
-#   - integrate_screen.cu: 主实现文件（包含batch_search_pipeline函数）
+#   - ivf_search.cu: 主实现文件（包含batch_search_pipeline函数）
 # 
-# 注意：
-#   - fusion_cos_topk_warpsort.cu 和 warpsort_topk.cu 已移到 fusion_dist_topk_warpsort_lib 中
-#   - indexed_gemm_v3_fixed_probe.cu 和 indexed_gemm_v5.cu 已移到 indexed_gemm_lib 中
-#   - utils.cu 已移到独立的 utils_lib 中，通过链接依赖引入
-#   - inner_product_utils.cuh 是头文件，不需要添加到库中
-add_library(integrate_screen_lib STATIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen.cu
+add_library(ivf_search_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/ivf_search/ivf_search.cu
 )
-target_include_directories(integrate_screen_lib PUBLIC
+target_include_directories(ivf_search_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
     ${CMAKE_CURRENT_SOURCE_DIR}/common
 )
-set_target_properties(integrate_screen_lib PROPERTIES
+set_target_properties(ivf_search_lib PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     CUDA_ARCHITECTURES 70
 )
-target_link_libraries(integrate_screen_lib 
+target_link_libraries(ivf_search_lib 
     PUBLIC
     l2norm_lib 
     utils_lib
@@ -246,36 +167,32 @@ target_link_libraries(integrate_screen_lib
     cublas
 )
 
-# 创建共享的integrate_screen_pipeline库（供测试使用）
+# 创建共享的ivf_search_pipeline库（供测试使用）
 # 被以下使用：
-#   - test_integrated_coarse_fine_pipeline (测试流水线版本)
+#   - test_ivfflat_search_pipeline (测试流水线版本，数据调度，暂时不编译)
+#   - test_ivfflat_search_balance (测试平衡版本，聚类平衡数据调度，暂时不编译)
 # 
 # 包含的文件：
-#   - integrate_screen_pipeline.cu: 流水线版本实现（包含batch_search_pipeline函数）
-# 
-# 注意：
-#   - fusion_cos_topk_warpsort.cu 和 warpsort_topk.cu 已移到 fusion_dist_topk_warpsort_lib 中
-#   - indexed_gemm_v3_fixed_probe.cu 和 indexed_gemm_v5.cu 已移到 indexed_gemm_lib 中
-#   - utils.cu 已移到独立的 utils_lib 中，通过链接依赖引入
-#   - inner_product_utils.cuh 是头文件，不需要添加到库中
-add_library(integrate_screen_pipeline_lib STATIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/integrate_screen/integrate_screen_pipeline.cu
+#   - ivf_search_pipeline.cu: 流水线版本实现（包含batch_search_pipeline函数）
+
+add_library(ivf_search_pipeline_lib STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../cuda/ivf_search/ivf_search_pipeline.cu
 )
-target_include_directories(integrate_screen_pipeline_lib PUBLIC
+target_include_directories(ivf_search_pipeline_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../cuda
     ${CMAKE_CURRENT_SOURCE_DIR}/common
 )
-set_target_properties(integrate_screen_pipeline_lib PROPERTIES
+set_target_properties(ivf_search_pipeline_lib PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     CUDA_ARCHITECTURES 70
 )
-target_link_libraries(integrate_screen_pipeline_lib 
+target_link_libraries(ivf_search_pipeline_lib 
     PUBLIC
     l2norm_lib 
     utils_lib
     indexed_gemm_lib
-    fusion_dist_topk_warpsort_lib  # 包含 fusion_cos_topk_warpsort 和 warpsort_topk
+    fusion_dist_topk_warpsort_lib
     cublas
 )
 
@@ -287,11 +204,12 @@ add_subdirectory(test_cos_distance)
 add_subdirectory(test_fusion_cos_topk)
 add_subdirectory(test_warpsort)
 add_subdirectory(test_bitonic)
-add_subdirectory(test_integrated_coarse_fine)
-add_subdirectory(test_integrated_coarse_fine_pipeline)
 add_subdirectory(test_select_k)
 add_subdirectory(test_kmeans)
 add_subdirectory(test_ivfflat_search)
+# 暂时不编译以下测试
+# add_subdirectory(test_ivfflat_search_pipeline)
+# add_subdirectory(test_ivfflat_search_balance)
 
 # 统一测试目标
 add_custom_target(run_all_tests
@@ -304,10 +222,11 @@ add_custom_target(run_all_tests
         test_fusion_cos_topk
         test_warpsort
         test_bitonic
-        test_integrated_coarse_fine
-        test_integrated_coarse_fine_pipeline
         test_select_k
         test_kmeans
         test_ivfflat_search
+        # 暂时不编译以下测试
+        # test_ivfflat_search_pipeline
+        # test_ivfflat_search_balance
     COMMENT "运行所有单元测试"
 )

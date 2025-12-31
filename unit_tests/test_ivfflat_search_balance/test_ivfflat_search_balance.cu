@@ -9,7 +9,7 @@
 #include <thread>
 #include <vector>
 
-#include "../../cuda/integrate_screen/integrate_screen.cuh"
+#include "../../cuda/ivf_search/ivf_search.cuh"
 #include "../common/test_utils.cuh"
 
 struct BenchmarkCase {
@@ -453,7 +453,7 @@ int main() {
     metrics.print_table();
     
     // 导出 CSV
-    metrics.export_csv("integrated_coarse_fine_metrics.csv");
+    metrics.export_csv("ivf_search_coarse_fine_balance_metrics.csv");
     
     COUT_ENDL("All tests completed successfully!");
     return 0;

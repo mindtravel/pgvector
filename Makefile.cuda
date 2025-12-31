@@ -24,9 +24,9 @@ OBJS_CUDA_LIST = \
 	cuda/l2norm/l2norm.o \
 	cuda/utils.o \
 	unit_tests/common/test_utils.o \
-	cuda/integrate_screen/integrate_screen_separated.o \
-	cuda/integrate_screen/integrate_screen.o \
-	cuda/integrate_screen/integrate_screen_wrapper.o
+	cuda/ivf_search/ivf_search_separated.o \
+	cuda/ivf_search/ivf_search.o \
+	cuda/ivf_search/ivf_search_wrapper.o
 
 # ------------------------------------------
 # 2. CUDA 环境配置
