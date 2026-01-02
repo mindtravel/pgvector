@@ -54,7 +54,7 @@ void cpu_matrix_multiply(const float* a, const float* b, float* c,
     }
 }
 
-void cpu_matrix_multiply_2D(float** a, float** b, float** c, 
+void cpu_matrix_multiply_2D(const float** a, const float** b, float** c, 
     int M, int N, int K, float alpha, float beta) {
     // 初始化结果矩阵
     if (beta == 0.0f) {
@@ -96,10 +96,10 @@ bool test_basic_matrix_multiply(int M, int N, int K) {
     size_t memory_mb = (M * K + K * N + M * N) * sizeof(float) / (1024 * 1024);
     COUT_ENDL("内存使用量: ", memory_mb, " MB");
     // 生成测试数据
-    float** h_A = generate_vector_list(M, K);
-    float** h_B = generate_vector_list(N, K);
-    float** h_C_gpu = (float**)malloc_vector_list(M, N, sizeof(float));
-    float** h_C_cpu = (float**)malloc_vector_list(M, N, sizeof(float));
+    const float** h_A = generate_vector_list<const float>(M, K);
+    const float** h_B = generate_vector_list<const float>(N, K);
+    float** h_C_gpu = malloc_vector_list<float>(M, N);
+    float** h_C_cpu = malloc_vector_list<float>(M, N);
     
     if (DEBUG){
         // std::cout << "A" << std::endl;
@@ -140,10 +140,10 @@ bool test_basic_matrix_multiply(int M, int N, int K) {
     pass &= compare_2D(h_C_gpu, h_C_cpu, M, N, EPSILON);
     
     // 清理内存
-    free_vector_list((void**)h_A);
-    free_vector_list((void**)h_B);
-    free_vector_list((void**)h_C_gpu);
-    free_vector_list((void**)h_C_cpu);
+    free_vector_list(h_A);
+    free_vector_list(h_B);
+    free_vector_list(h_C_gpu);
+    free_vector_list(h_C_cpu);
 
     return pass;
 }
@@ -238,10 +238,10 @@ void test_large_scale_stress(int M, int N, int K) {
     COUT_ENDL("内存使用量: ", memory_mb, " MB");
     
     // 生成测试数据
-    float** h_A = generate_vector_list(M, K);
-    float** h_B = generate_vector_list(N, K);
-    float** h_C_gpu = (float**)malloc_vector_list(M, N, sizeof(float));
-    float** h_C_cpu = (float**)malloc_vector_list(M, N, sizeof(float));
+    const float** h_A = generate_vector_list<const float>(M, K);
+    const float** h_B = generate_vector_list<const float>(N, K);
+    float** h_C_gpu = malloc_vector_list<float>(M, N);
+    float** h_C_cpu = malloc_vector_list<float>(M, N);
 
 
     /* GPU 计算 */
@@ -262,10 +262,10 @@ void test_large_scale_stress(int M, int N, int K) {
 
 
     // 清理内存
-    free_vector_list((void**)h_A);
-    free_vector_list((void**)h_B);
-    free_vector_list((void**)h_C_gpu);
-    free_vector_list((void**)h_C_cpu);
+    free_vector_list(h_A);
+    free_vector_list(h_B);
+    free_vector_list(h_C_gpu);
+    free_vector_list(h_C_cpu);
     
     COUT_ENDL("大规模压力测试完成 ✓");
 }

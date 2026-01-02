@@ -34,8 +34,8 @@ __global__ void fusion_l2_topk_warpsort_kernel(
  * 融合算子：纯寄存器+双调排序 实现 topk
  **/
 void cuda_cos_topk_warpsort(
-    float** h_query_vector_group,       /*query向量*/ 
-    float** h_data_vector_group,        /*data向量也就是聚类中心*/
+    const float** h_query_vector_group,       /*query向量*/ 
+    const float** h_data_vector_group,        /*data向量也就是聚类中心*/
     int** topk_index,                   /*结果：需要精筛的聚类中心的索引 [n_querys * n_probes]*/
     float** topk_cos_dist,              /*结果：需要精筛的聚类中心的距离 [n_querys * n_probes]（不一定用得上）*/
     int n_query,                        /*query数量*/

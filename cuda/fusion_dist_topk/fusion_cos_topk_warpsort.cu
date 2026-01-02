@@ -246,8 +246,8 @@ template cudaError_t fusion_cos_topk_warpsort<float, uint32_t>(
 
 
 void cuda_cos_topk_warpsort(
-    float** h_query_vectors, 
-    float** h_data_vectors, 
+    const float** h_query_vectors, 
+    const float** h_data_vectors, 
     int** h_topk_index, 
     float** h_topk_cos_dist,
     int n_query, 

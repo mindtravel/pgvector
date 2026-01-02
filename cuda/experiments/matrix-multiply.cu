@@ -73,7 +73,7 @@ void cuda_sgemmNN(float* h_A, float* h_B, float* h_C,
 /**
  * 我们的矩阵乘法接口 [n_querys, n_dim] * [n_batch * n_dim].T
  */
-void cuda_sgemmNN_ours(float** h_A, float** h_B, float** h_C,
+void cuda_sgemmNN_ours(const float** h_A, const float** h_B, float** h_C,
     int M, int N, int K, float alpha, float beta) {
 
     size_t sizeA = M * K * sizeof(float);

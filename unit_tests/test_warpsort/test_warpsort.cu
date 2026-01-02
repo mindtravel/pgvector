@@ -7,6 +7,7 @@
 
 #include "pch.h"
 #include "../common/test_utils.cuh"
+#include "../cpu_utils/cpu_utils.h"
 
 // Forward declarations from warpsortfilter/wrapsort_topk.cu
 namespace pgvector {
@@ -24,76 +25,6 @@ cudaError_t select_k(
     cudaStream_t stream);
 
 }
-}
-
-#define EPSILON 1e-5f
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/**
- * CPU reference implementation for top-k selection
- */
-template<typename T, typename IdxT>
-void cpu_select_k(
-    const T** input,
-    int batch_size,
-    int len,
-    int k,
-    T** output_vals,
-    IdxT** output_idx,
-    bool select_min)
-{
-    if (k > len) {
-        k = len;
-    }
-
-    for(int b = 0; b < batch_size; ++b){
-        std::vector<std::pair<T, IdxT>> pairs;
-        pairs.reserve(len);
-        
-        for (int i = 0; i < len; i++) {
-            pairs.push_back({input[b][i], static_cast<IdxT>(i)});
-        }
-        
-        // 使用 nth_element 进行部分排序
-        if (select_min) {
-            // 找出最小的 k 个元素，放在 pairs 的前 k 个位置
-            std::nth_element(
-                pairs.begin(),
-                pairs.begin() + k - 1, // 指向第 k 小元素的迭代器
-                pairs.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; }
-            );
-            // 如果需要，对前 k 个元素进行排序（例如需要按升序输出）
-            std::sort(
-                pairs.begin(),
-                pairs.begin() + k,
-                [](const auto& a, const auto& b) { return a.first < b.first; }
-            );
-        } else {
-            // 找出最大的 k 个元素，放在 pairs 的前 k 个位置
-            std::nth_element(
-                pairs.begin(),
-                pairs.begin() + k - 1, // 指向第 k 大元素的迭代器
-                pairs.end(),
-                [](const auto& a, const auto& b) { return a.first > b.first; }
-            );
-            // 如果需要，对前 k 个元素进行排序（例如需要按降序输出）
-            std::sort(
-                pairs.begin(),
-                pairs.begin() + k,
-                [](const auto& a, const auto& b) { return a.first > b.first; }
-            );
-        }
-        
-        // Copy results
-        for (int i = 0; i < k; i++) {
-            output_vals[b][i] = pairs[i].first;
-            output_idx[b][i] = pairs[i].second;
-        }        
-    }
 }
 
 /**
@@ -119,13 +50,13 @@ std::vector<double> test_warpsort(
     bool need_free_input = false;
     if (h_input == nullptr) {
         srand(42);
-        h_input = const_cast<const float**>((float**)generate_vector_list(batch_size, len));
+        h_input = generate_vector_list<const float>(batch_size, len);
         need_free_input = true;
     }
-    float** h_gpu_vals = (float**)malloc_vector_list(batch_size, k, sizeof(float));
-    float** h_cpu_vals = (float**)malloc_vector_list(batch_size, k, sizeof(float));
-    int** h_gpu_idx = (int**)malloc_vector_list(batch_size, k, sizeof(int));
-    int** h_cpu_idx = (int**)malloc_vector_list(batch_size, k, sizeof(int));
+    float** h_gpu_vals = malloc_vector_list<float>(batch_size, k);
+    float** h_cpu_vals = malloc_vector_list<float>(batch_size, k);
+    int** h_gpu_idx = malloc_vector_list<int>(batch_size, k);
+    int** h_cpu_idx = malloc_vector_list<int>(batch_size, k);
 
     // Allocate device memory
     float *d_input, *d_output_vals;
@@ -159,7 +90,7 @@ std::vector<double> test_warpsort(
 
     // Run CPU select with timing
     MEASURE_MS_AND_SAVE("cpu耗时：", cpu_duration_ms,
-        cpu_select_k<float, int>(
+        cpu_select_k(
             h_input, batch_size, len, k, h_cpu_vals, h_cpu_idx, true
         );
     );
@@ -179,12 +110,12 @@ std::vector<double> test_warpsort(
     
     // Cleanup
     if (need_free_input) {
-        free_vector_list((void**)h_input);
+        free_vector_list(h_input);
     }
-    free_vector_list((void**)h_gpu_vals);
-    free_vector_list((void**)h_gpu_idx);
-    free_vector_list((void**)h_cpu_vals);
-    free_vector_list((void**)h_cpu_idx);
+    free_vector_list(h_gpu_vals);
+    free_vector_list(h_gpu_idx);
+    free_vector_list(h_cpu_vals);
+    free_vector_list(h_cpu_idx);
     cudaFree(d_input);
     cudaFree(d_output_vals);
     cudaFree(d_output_idx);
@@ -212,7 +143,7 @@ void test_performance()
     COUT_TABLE("k", "avg_time(ms)", "throughput(q/s)");
     
     for (int k : k_values) {
-        float** h_input = generate_vector_list(1, batch_size * len);
+        const float** h_input = generate_vector_list<const float>(1, batch_size * len);
         
         float *d_input, *d_output_vals;
         int *d_output_idx;
@@ -251,7 +182,7 @@ void test_performance()
         
         COUT_TABLE(k, avg_ms, (int)throughput);
         
-        free_vector_list((void**)h_input);
+        free_vector_list(h_input);
         cudaFree(d_input);
         cudaFree(d_output_vals);
         cudaFree(d_output_idx);
@@ -291,11 +222,11 @@ int main()
         
         if (need_regenerate_input) {
             if (cached_h_input != nullptr) {
-                free_vector_list((void**)cached_h_input);
+                free_vector_list(cached_h_input);
                 cached_h_input = nullptr;
             }
             srand(42);
-            cached_h_input = const_cast<const float**>((float**)generate_vector_list(batch, len));
+            cached_h_input = generate_vector_list<const float>(batch, len);
             cached_batch_size = batch;
             cached_len = len;
         }
@@ -316,7 +247,7 @@ int main()
     
     // 清理缓存的数据
     if (cached_h_input != nullptr) {
-        free_vector_list((void**)cached_h_input);
+        free_vector_list(cached_h_input);
     }
     
     metrics.print_table();

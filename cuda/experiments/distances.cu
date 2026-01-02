@@ -54,7 +54,7 @@ __global__ void cos_distance_kernel(
 /**
  * 计算一个batch的query和待检索的list之间的余弦距离 [n_querys, n_dim] * [n_batch * n_dim].T
  */
-void cuda_cosine_dist(float** h_query_vectors, float** h_data_vectors, float** h_cos_dist,
+void cuda_cosine_dist(const float** h_query_vectors, const float** h_data_vectors, float** h_cos_dist,
     int n_query, int n_batch, int n_dim, float alpha, float beta) {
 
     const int NUM_STREAMS = 0; // cuda流的数量

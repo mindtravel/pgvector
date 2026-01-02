@@ -15,6 +15,7 @@
 #include "cpu_distance.h"
 #include "cpu_kmeans.h"
 #include "cpu_search.h"
+#include "cpu_sort.h"
 
 #endif // CPU_UTILS_H
 

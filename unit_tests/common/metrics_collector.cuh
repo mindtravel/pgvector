@@ -5,7 +5,8 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-
+#include <filesystem>
+#include "test_config.h"
 // ============================================================================
 // Metrics 收集器 (Metrics Collector)
 // ============================================================================
@@ -33,7 +34,7 @@ private:
     int num_repeats_ = 10;        /* 默认重复 10 次 */
     int base_seed_ = 42;          /* 基础随机种子 */
     
-    std::string csv_path_ = "/root/pgvector/unit_tests/csv_results/";
+    std::string csv_path_ = std::string(PROJECT_PATH) + std::string(CSV_PATH);
     
     /* 计算每列的最大宽度 */
     void calculate_column_widths() {
@@ -307,6 +308,31 @@ public:
      * 导出为 CSV 格式
      */
     void export_csv(const std::string& filename) const {
+        // 首先检查 PROJECT_PATH 是否存在
+        std::filesystem::path project_path(PROJECT_PATH);
+        if (!std::filesystem::exists(project_path)) {
+            std::cerr << "Error: PROJECT_PATH does not exist: " << PROJECT_PATH << "\n";
+            std::cerr << "Cannot export CSV file. Please ensure the project directory exists.\n";
+            return;
+        }
+        
+        if (!std::filesystem::is_directory(project_path)) {
+            std::cerr << "Error: PROJECT_PATH is not a directory: " << PROJECT_PATH << "\n";
+            return;
+        }
+        
+        // PROJECT_PATH 存在，现在确保 CSV 输出目录存在
+        std::filesystem::path csv_dir(csv_path_);
+        if (!std::filesystem::exists(csv_dir)) {
+            try {
+                std::filesystem::create_directories(csv_dir);
+            } catch (const std::filesystem::filesystem_error& e) {
+                std::cerr << "Error: Cannot create directory " << csv_path_ 
+                          << ": " << e.what() << "\n";
+                return;
+            }
+        }
+        
         std::string file_path = csv_path_ + filename;
         std::ofstream file(file_path);
         if (!file.is_open()) {

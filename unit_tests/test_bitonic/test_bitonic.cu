@@ -11,9 +11,9 @@
 
 #include "pch.h"
 #include "../common/test_utils.cuh"
+#include "../cpu_utils/cpu_utils.h"
 #include <algorithm>
 #include <vector>
-
 #include "../../cuda/warpsortfilter/bitonic.cuh"
 // #include "../../cuda/warpsort_utils.cuh"
 #define EPSILON 1e-5f
@@ -121,42 +121,6 @@ __global__ void test_bitonic_merge_kernel(
             output_vals[idx] = keys[i];
             output_idx[idx] = indices[i];
         }
-    }
-}
-
-// ============================================================================
-// CPU Reference Implementations
-// ============================================================================
-
-/**
- * CPU 参考实现：标准排序
- */
-template<typename T, typename IdxT>
-void cpu_sort(
-    const T* input,
-    T* output_vals,
-    IdxT* output_idx,
-    int n,
-    bool ascending)
-{
-    std::vector<std::pair<T, IdxT>> pairs;
-    pairs.reserve(n);
-    
-    for (int i = 0; i < n; i++) {
-        pairs.push_back({input[i], static_cast<IdxT>(i)});
-    }
-    
-    if (ascending) {
-        std::sort(pairs.begin(), pairs.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-    } else {
-        std::sort(pairs.begin(), pairs.end(),
-            [](const auto& a, const auto& b) { return a.first > b.first; });
-    }
-    
-    for (int i = 0; i < n; i++) {
-        output_vals[i] = pairs[i].first;
-        output_idx[i] = pairs[i].second;
     }
 }
 

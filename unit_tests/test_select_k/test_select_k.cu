@@ -1,8 +1,7 @@
 #include "../../cuda/pch.h"
 #include "../common/test_utils.cuh"
-#include "../common/params_macros.cuh"
-#include "../common/output_macros.cuh"
 #include "../../cuda/warpsortfilter/warpsort_topk.cu"
+#include "../cpu_utils/cpu_utils.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cassert>
@@ -17,55 +16,14 @@
 using namespace pgvector::warpsort_topk;
 
 #define EPSILON 1e-2f
-
-/**
- * CPU 参考实现：选择 top-k
- */
-void cpu_select_k(
-    float** input,
-    int batch_size,
-    int len,
-    int k,
-    float** output_vals,
-    int** output_idx,
-    bool select_min
-) {
-    for (int b = 0; b < batch_size; ++b) {
-        std::vector<std::pair<float, int>> candidates;
-        for (int i = 0; i < len; ++i) {
-            float val = input[b][i];
-            if (val < FLT_MAX && val == val) {  // 排除 INF 和 NaN
-                candidates.push_back({val, i});
-            }
-        }
-        
-        if (select_min) {
-            std::sort(candidates.begin(), candidates.end());
-        } else {
-            std::sort(candidates.begin(), candidates.end(), std::greater<std::pair<float, int>>());
-        }
-        
-        int n_select = std::min(k, (int)candidates.size());
-        for (int i = 0; i < n_select; ++i) {
-            output_vals[b][i] = candidates[i].first;
-            output_idx[b][i] = candidates[i].second;
-        }
-        // 填充剩余位置为 INF 和 -1
-        for (int i = n_select; i < k; ++i) {
-            output_vals[b][i] = FLT_MAX;
-            output_idx[b][i] = -1;
-        }
-    }
-}
-
 /**
  * 测试单个参数组合
  */
 std::vector<double> test_single_config(int batch_size, int len, int k) {
     // 1. 生成测试数据（使用 generate_vector_list）
-    float** h_input = generate_vector_list(batch_size, len);
-    float** h_output_vals_cpu = (float**)malloc_vector_list(batch_size, k, sizeof(float));
-    int** h_output_idx_cpu = (int**)malloc_vector_list(batch_size, k, sizeof(int));
+    const float** h_input = generate_vector_list<const float>(batch_size, len);
+    float** h_output_vals_cpu = malloc_vector_list<float>(batch_size, k);
+    int** h_output_idx_cpu = malloc_vector_list<int>(batch_size, k);
     
     // 2. CPU 参考实现（计时）
     double cpu_duration_ms = 0;
@@ -100,7 +58,7 @@ std::vector<double> test_single_config(int batch_size, int len, int k) {
     );
     
     // 6. 复制结果回主机
-    float** h_output_vals_gpu = (float**)malloc_vector_list(batch_size, k, sizeof(float));
+    float** h_output_vals_gpu = malloc_vector_list<float>(batch_size, k);
     
     cudaMemcpy(h_output_vals_gpu[0], d_output_vals, 
                batch_size * k * sizeof(float), cudaMemcpyDeviceToHost);

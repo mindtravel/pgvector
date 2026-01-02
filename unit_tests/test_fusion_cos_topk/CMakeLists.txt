@@ -11,7 +11,7 @@ add_executable(test_fusion_cos_topk ${SOURCES})
 
 # 链接共享库（使用完整库，包含粗筛和精筛实现）
 target_link_libraries(test_fusion_cos_topk 
-    fusion_cos_topk_warpsort_lib
+    fusion_dist_topk_warpsort_lib
     l2norm_lib
 )
 

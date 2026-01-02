@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <type_traits>
+#include "../../cuda/dataset/cpu_array_utils.h"
 
 struct ClusterQueryData {
     int* cluster_map; //cluster_idx -> cluster_id
@@ -39,94 +41,28 @@ void _check_cuda_last_error(const char *file, int line)
     }
 }
 
-/**
- * 分配向量组的空间
- */
-void** malloc_vector_list(size_t n_batch, size_t n_dim, size_t elem_size) {
-    // 分配连续的数据内存块
-    void* data = malloc(n_batch * n_dim * elem_size);
-    if (data == NULL) return NULL;
+// /**
+//  * 分配向量组的空间
+//  */
+// void** malloc_vector_list(size_t n_batch, size_t n_dim, size_t elem_size) {
+//     // 分配连续的数据内存块
+//     void* data = malloc(n_batch * n_dim * elem_size);
+//     if (data == NULL) return NULL;
     
-    // 分配行指针数组
-    void** vector_list = (void**)malloc(n_batch * sizeof(void*));
-    if (vector_list == NULL) {
-        free(data);
-        return NULL;
-    }
+//     // 分配行指针数组
+//     void** vector_list = (void**)malloc(n_batch * sizeof(void*));
+//     if (vector_list == NULL) {
+//         free(data);
+//         return NULL;
+//     }
     
-    // 计算每个元素的字节偏移量并设置指针
-    for (size_t i = 0; i < n_batch; i++) {
-        vector_list[i] = (char*)data + i * n_dim * elem_size;
-    }
+//     // 计算每个元素的字节偏移量并设置指针
+//     for (size_t i = 0; i < n_batch; i++) {
+//         vector_list[i] = (char*)data + i * n_dim * elem_size;
+//     }
     
-    return vector_list;
-}
-
-/**
- * 释放向量组的空间
- */
-void free_vector_list(void** vector_list) {
-    if (vector_list != NULL) {
-        free(vector_list[0]);
-        free(vector_list);
-    }
-}
-
-/*
-* 生成向量组
-*/ 
-float** generate_vector_list(int n_batch, int n_dim) {
-    // 分配连续的内存
-    float** vector_list = (float**)malloc_vector_list(n_batch, n_dim, sizeof(float));
-
-    for (int i = 0; i < n_batch; i++) {
-        for (int j = 0; j < n_dim; j++) {
-            // vector_list[i][j] = 1.0f;
-            // vector_list[i][j] = (float)i + (float)j;
-            vector_list[i][j] = (float)rand() / RAND_MAX * 20.0f - 10.0f;
-            // vector_list[i][j] = (float)(i+j + 1.0f);
-            // if(i == 1 && j == 0)
-            //     vector_list[i][j] = 1.0f;
-            // else
-            //     vector_list[i][j] = 0.0f;
-        }
-    }    
-
-    return vector_list;
-}
-
-/*
-* 生成大规模向量组
-*/ 
-float*** generate_large_scale_vectors(int n_lists, int n_batch, int n_dim) {
-    std::cout << "生成大规模数据: " << n_lists << " lists, " 
-              << n_batch << " vectors per list, " 
-              << n_dim << " dimensions" << std::endl;
-    
-    // 分配三级指针结构
-    float*** vector_lists = (float***)malloc(n_lists * sizeof(float**));
-    
-    for (int list_id = 0; list_id < n_lists; list_id++) {
-        // 为每个list分配连续内存
-        vector_lists[list_id] = (float**)malloc_vector_list(n_batch, n_dim, sizeof(float));
-        
-        // 初始化数据
-        for (int i = 0; i < n_batch; i++) {
-            for (int j = 0; j < n_dim; j++) {
-                // 生成随机数据 [-10, 10]
-                vector_lists[list_id][i][j] = (float)rand() / RAND_MAX * 20.0f - 10.0f;
-            }
-        }
-        
-        if (list_id % 100 == 0) {
-            std::cout << "已生成 " << list_id << "/" << n_lists << " lists" << std::endl;
-        }
-    }
-    
-    std::cout << "大规模数据生成完成 ✓" << std::endl;
-    return vector_lists;
-}
-
+//     return vector_list;
+// }
 
 //把原始的聚类中心topk数据转为cluster-query倒排数据
 void* generate_cluster_query_data(int* query_cluster_group, int n_query, int k, int batch_size) {
@@ -252,11 +188,8 @@ void get_cluster_vector(int cluster_id, float** cluster_vector, int* vector_num)
     int vector_dim = 128;
     *cluster_vector = (float*)malloc(*vector_num * vector_dim * sizeof(float));
     
-    // 填充随机向量数据
-    for (int i = 0; i < *vector_num; i++) {
-        for (int j = 0; j < vector_dim; j++) {
-            (*cluster_vector)[i * vector_dim + j] = (float)rand() / RAND_MAX * 2.0f - 1.0f;
-        }
-    }
+    // 使用多线程随机数生成初始化数据，范围 [-1, 1]
+    // 使用 cluster_id 作为种子的一部分，确保不同 cluster 的数据不同
+    init_array_multithreaded(*cluster_vector, *vector_num * vector_dim, 5678 + cluster_id, -1.0f, 1.0f);
 }
 

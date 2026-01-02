@@ -40,7 +40,9 @@ void batch_search_pipeline(float* d_query_batch,
                            int n_total_vectors,
                            int n_probes,
                            int k,
-                           int distance_mode
+                           int distance_mode,
+                           int* h_coarse_index,  // [n_query, n_probes] 粗筛结果索引（可选，host指针）
+                           float* h_coarse_dist  // [n_query, n_probes] 粗筛结果距离（可选，host指针）
                         ) {
 
     // fprintf(stderr, "batch_search_pipeline: 开始执行, n_query=%d, n_dim=%d, n_total_clusters=%d, n_total_vectors=%d, n_probes=%d, k=%d\n",
@@ -87,7 +89,7 @@ void batch_search_pipeline(float* d_query_batch,
 
     {
         CUDATimer timer("Step 0: Data Preparation", ENABLE_CUDA_TIMING);
-        fprintf(stderr, "batch_search_pipeline: Step 0 - 开始数据准备\n");
+        // fprintf(stderr, "batch_search_pipeline: Step 0 - 开始数据准备\n");
         
         // 先在GPU上计算probe_vector_offset（使用前缀和）
         cudaMalloc(&d_probe_vector_offset, (n_total_clusters + 1) * sizeof(int));
@@ -204,6 +206,15 @@ void batch_search_pipeline(float* d_query_batch,
             cudaDeviceSynchronize(); 
             CHECK_CUDA_ERRORS;
             
+            // 如果提供了粗筛结果输出参数，将结果复制回CPU
+            if (h_coarse_index != nullptr && h_coarse_dist != nullptr) {
+                cudaMemcpy(h_coarse_index, d_top_nprobe_index, 
+                           n_query * n_probes * sizeof(int), cudaMemcpyDeviceToHost);
+                cudaMemcpy(h_coarse_dist, d_top_nprobe_dist, 
+                           n_query * n_probes * sizeof(float), cudaMemcpyDeviceToHost);
+                CHECK_CUDA_ERRORS;
+            }
+            
             // 调试输出：检查粗筛结果
             if(false){
                 int* h_top_nprobe_index = (int*)malloc(n_query * n_probes * sizeof(int));
@@ -239,7 +250,11 @@ void batch_search_pipeline(float* d_query_batch,
             // d_cluster_centers_ptr 由调用者管理，不在这里释放
             cudaFree(d_inner_product);
             cudaFree(d_cluster_centers_norm);
-            cudaFree(d_top_nprobe_dist);
+            // 注意：如果粗筛结果需要输出，d_top_nprobe_dist 不能在这里释放
+            // 它会在 Step 2 结束后释放（如果不需要输出）
+            if (h_coarse_index == nullptr || h_coarse_dist == nullptr) {
+                cudaFree(d_top_nprobe_dist);
+            }
         }
     
         cudaDeviceSynchronize();
@@ -648,6 +663,10 @@ void batch_search_pipeline(float* d_query_batch,
     // d_probe_vector_count 是传入的 d_cluster_size，由调用者管理
     // d_queries 是传入的 d_query_batch，由调用者管理
     cudaFree(d_query_norm);
+    
+    // 如果粗筛结果需要输出，d_top_nprobe_dist 在 Step 1 中已经复制并释放
+    // 如果不需要输出，d_top_nprobe_dist 在 Step 1 中已经释放
+    // 这里不需要额外处理
     
     CHECK_CUDA_ERRORS;
 }

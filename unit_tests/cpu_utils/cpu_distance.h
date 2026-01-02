@@ -146,15 +146,13 @@ inline float cosine_similarity(const float* a, const float* b, int dim) {
  * @param stride 向量之间的步长（如果连续存储则为 n_dim）
  */
 inline void compute_squared_sums_batch(
-    const float* vectors, 
+    const float** vectors, 
     float* squared_sums, 
     int n_batch, 
-    int n_dim,
-    int stride = 0
+    int n_dim
 ) {
-    if (stride == 0) stride = n_dim;
     for (int i = 0; i < n_batch; i++) {
-        squared_sums[i] = compute_squared_sum(vectors + i * stride, n_dim);
+        squared_sums[i] = compute_squared_sum(vectors[i], n_dim);
     }
 }
 
@@ -167,15 +165,13 @@ inline void compute_squared_sums_batch(
  * @param stride 向量之间的步长（如果连续存储则为 n_dim）
  */
 inline void compute_l2_norms_batch(
-    const float* vectors, 
+    const float** vectors, 
     float* norms, 
     int n_batch, 
-    int n_dim,
-    int stride = 0
+    int n_dim
 ) {
-    if (stride == 0) stride = n_dim;
     for (int i = 0; i < n_batch; i++) {
-        norms[i] = compute_l2_norm(vectors + i * stride, n_dim);
+        norms[i] = compute_l2_norm(vectors[i], n_dim);
     }
 }
 

@@ -64,7 +64,9 @@ void batch_search_pipeline(
     int n_total_vectors,
     int n_probes,
     int k,
-    int distance_mode
+    int distance_mode,
+    int* h_coarse_index = nullptr,  // [n_query, n_probes] 粗筛结果索引（可选，host指针）
+    float* h_coarse_dist = nullptr  // [n_query, n_probes] 粗筛结果距离（可选，host指针）
 );
 
 // ---------------------------------------------------------

@@ -267,6 +267,9 @@ void cleanup_persistent_data()
  * 2. 核函数计算：粗筛、精筛等计算
  * 
  * 当向量数据总数小于6G时，整个数据集常驻GPU内存
+ * 
+ * @param coarse_index 粗筛结果索引 [n_query, n_probes]，如果为nullptr则不输出
+ * @param coarse_dist 粗筛结果距离 [n_query, n_probes]，如果为nullptr则不输出
  */
 void batch_search_pipeline(float** query_batch,
                            int* cluster_size,
@@ -283,7 +286,9 @@ void batch_search_pipeline(float** query_batch,
                            int n_total_vectors,
                            int n_probes,
                            int k,
-                           int distance_mode
+                           int distance_mode,
+                           int** coarse_index = nullptr,  // [n_query, n_probes] 粗筛结果索引（可选）
+                           float** coarse_dist = nullptr  // [n_query, n_probes] 粗筛结果距离（可选）
                         ) 
 {
 
@@ -487,20 +492,35 @@ void batch_search_pipeline(float** query_batch,
             true /* select min */,
             compute_stream  // 使用compute_stream，确保与数据准备同步
             );
-
+        }
+        
+        // 如果提供了粗筛结果输出参数，将结果复制回CPU
+        if (coarse_index != nullptr && coarse_dist != nullptr) {
             cudaStreamSynchronize(compute_stream);
             CHECK_CUDA_ERRORS;
-                
-            // 清理临时内存
-            cublasDestroy(handle);
-            // 注意：d_cluster_centers 来自常驻数据，不应释放
-            cudaFree(d_inner_product);
-            if (need_free_index && d_index != nullptr) {
-                cudaFree(d_index);
-            }
-            cudaFree(d_top_nprobe_dist);
+            cudaMemcpyAsync(coarse_index[0], d_top_nprobe_index, 
+                           n_query * n_probes * sizeof(int), 
+                           cudaMemcpyDeviceToHost, compute_stream);
+            cudaMemcpyAsync(coarse_dist[0], d_top_nprobe_dist, 
+                           n_query * n_probes * sizeof(float), 
+                           cudaMemcpyDeviceToHost, compute_stream);
+            cudaStreamSynchronize(compute_stream);
             CHECK_CUDA_ERRORS;
         }
+        
+        cudaStreamSynchronize(compute_stream);
+        CHECK_CUDA_ERRORS;
+            
+        // 清理临时内存
+        cublasDestroy(handle);
+        // 注意：d_cluster_centers 来自常驻数据，不应释放
+        cudaFree(d_inner_product);
+        if (need_free_index && d_index != nullptr) {
+            cudaFree(d_index);
+        }
+        // 注意：如果粗筛结果需要输出，d_top_nprobe_dist 和 d_top_nprobe_index 不能在这里释放
+        // 它们会在 Step 2 中使用，并在 Step 2 结束时释放
+        CHECK_CUDA_ERRORS;
     }
 
     // Step 2: 构建entry数据
@@ -622,7 +642,8 @@ void batch_search_pipeline(float** query_batch,
         cudaFree(d_entry_count_per_cluster);
         cudaFree(d_entry_offset);
         cudaFree(d_entry_query_offset);
-        cudaFree(d_top_nprobe_index);
+        // 注意：d_top_nprobe_index 和 d_top_nprobe_dist 在 Step 2 结束后释放
+        // 如果提供了粗筛结果输出参数，数据已经在粗筛完成后复制
     }
 
     // 确保数据准备完成（再次等待，确保query数据已准备好）
@@ -801,6 +822,9 @@ void batch_search_pipeline(float** query_batch,
     cudaFree(d_cluster_query_offset);
     cudaFree(d_cluster_query_data);
     cudaFree(d_cluster_query_probe_indices);
+    // 释放粗筛结果内存（如果还没有释放）
+    if (d_top_nprobe_index != nullptr) cudaFree(d_top_nprobe_index);
+    if (d_top_nprobe_dist != nullptr) cudaFree(d_top_nprobe_dist);
     if (d_entry_cluster_id != nullptr) cudaFree(d_entry_cluster_id);
     if (d_entry_query_start != nullptr) cudaFree(d_entry_query_start);
     if (d_entry_query_count != nullptr) cudaFree(d_entry_query_count);

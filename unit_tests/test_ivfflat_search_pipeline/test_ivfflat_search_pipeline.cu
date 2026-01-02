@@ -17,6 +17,7 @@
 #include "../../cuda/dataset/dataset.cuh"
 #include "../common/test_utils.cuh"
 #include "../common/cpu_search.h"
+#include "../cpu_utils/cpu_utils.h"
 
 struct BenchmarkCase {
     int n_query;
@@ -97,7 +98,8 @@ static std::vector<double> run_case(const BenchmarkCase& config,
         cpu_coarse_fine_search(config.n_query, config.vector_dim, config.n_total_clusters,
                               config.n_probes, config.k,
                               query_batch_flat, reordered_data, centroids_flat,
-                              cluster_info, (DistanceType)distance_mode,
+                              cluster_info, dataset->reordered_indices, // 重排后的索引数组
+                              (DistanceType)distance_mode,
                               cpu_idx, cpu_dist);
     );
     
@@ -191,8 +193,10 @@ static std::vector<double> run_case(const BenchmarkCase& config,
     cudaFree(d_topk_dist);
     cudaFree(d_topk_index);
     
-    bool pass = (distance_mode == L2_DISTANCE) ? compare_set_2D_relative<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-4f) :
-                       compare_set_2D<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-5f);
+    // 只比较距离数组
+    bool pass = (distance_mode == L2_DISTANCE) 
+        ? compare_set_2D_relative<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-4f)
+        : compare_set_2D<float>(cpu_dist, gpu_dist, config.n_query, config.k, 1e-5f);
     
     double pass_rate = pass ? 1.0 : 0.0;
 
@@ -227,7 +231,7 @@ int main(int argc, char** argv) {
 
     // 缓存的数据集和query
     ClusterDataset cached_dataset = {};
-    float** cached_query_batch = nullptr;
+    const float** cached_query_batch = nullptr;
     
     // 缓存的关键参数
     int cached_n_total_vectors = -1;

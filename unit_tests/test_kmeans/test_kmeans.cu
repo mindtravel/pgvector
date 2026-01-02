@@ -19,7 +19,7 @@
 #include "../../cuda/kmeans/kmeans.cuh"
 #include "../../cuda/dataset/cpu_array_utils.h"
 #include "../common/test_utils.cuh"
-#include "../common/cpu_kmeans.h"
+#include "../cpu_utils/cpu_utils.h"
 
 // ============================================================
 // Algorithm Version Enum

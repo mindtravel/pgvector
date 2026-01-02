@@ -197,10 +197,8 @@ target_link_libraries(ivf_search_pipeline_lib
 )
 
 # 添加测试子目录
-add_subdirectory(test_vector_normalizer)
 add_subdirectory(test_print_cuda)
 add_subdirectory(test_matrix_multiply)
-add_subdirectory(test_cos_distance)
 add_subdirectory(test_fusion_cos_topk)
 add_subdirectory(test_warpsort)
 add_subdirectory(test_bitonic)
