@@ -25,7 +25,6 @@
 #include <thrust/fill.h>
 
 #include "fusion_dist_topk.cuh"
-#include "../unit_tests/common/test_utils.cuh"
 #include "pch.h"
 #include "warpsortfilter/warpsort_utils.cuh"
 #include "warpsortfilter/warpsort.cuh"
@@ -124,7 +123,7 @@ __global__ void fusion_l2_topk_warpsort_kernel(
             /* 边界检查：避免无效数据 */
             /* 对于索引类型，如果为负数（有符号）或特殊标记值，视为无效 */
             bool is_valid_index = true;
-            if constexpr (std::is_signed_v<IdxT>) {
+            if (std::is_signed<IdxT>::value) {
                 is_valid_index = (index >= 0);
             }
             

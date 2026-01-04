@@ -13,7 +13,6 @@
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include "../warpsortfilter/warpsort_topk.cu"
 #include "../l2norm/l2norm.cuh"
-#include "../../unit_tests/common/test_utils.cuh"
 #include "../utils.cuh"
 #include <vector>
 #include <algorithm>

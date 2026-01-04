@@ -20,7 +20,7 @@
 #include "../../cuda/dataset/cpu_array_utils.h"
 #include "../common/test_utils.cuh"
 #include "../cpu_utils/cpu_utils.h"
-
+#include "../../cuda/utils.cuh"
 // ============================================================
 // Algorithm Version Enum
 // ============================================================
@@ -83,6 +83,35 @@ static std::vector<double> run_case(const KMeansCase& cfg, float* h_pool_data, K
         return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     }
 
+    // 分配原始索引数组和重排后的索引数组
+    int* h_original_indices = (int*)std::aligned_alloc(64, n * sizeof(int));
+    int* h_reordered_indices = (int*)std::aligned_alloc(64, n * sizeof(int));
+    if (!h_original_indices || !h_reordered_indices) {
+        fprintf(stderr, "[test] ERROR: Failed to alloc index arrays\n");
+        std::free(h_data_reordered);
+        if (h_original_indices) std::free(h_original_indices);
+        if (h_reordered_indices) std::free(h_reordered_indices);
+        cudaFree(d_centroids);
+        cudaFreeHost(h_init_centroids);
+        return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    }
+
+    // 使用GPU kernel生成原始索引数组 [0, 1, 2, ..., n-1]
+    int* d_original_indices = nullptr;
+    cudaMalloc(&d_original_indices, n * sizeof(int));
+    if (!d_original_indices) {
+        fprintf(stderr, "[test] ERROR: Failed to alloc GPU memory for original indices\n");
+        std::free(h_data_reordered);
+        std::free(h_original_indices);
+        std::free(h_reordered_indices);
+        cudaFree(d_centroids);
+        cudaFreeHost(h_init_centroids);
+        return {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    }
+    generate_sequence_indices(d_original_indices, n);
+    cudaMemcpy(h_original_indices, d_original_indices, n * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaFree(d_original_indices);
+
     // 使用 ivf_kmeans 完成整个流程：K-means聚类 + 构建permutation + 重排向量
     float gpu_obj = 0.0f;
     ClusterInfo h_cluster_info;
@@ -95,7 +124,8 @@ static std::vector<double> run_case(const KMeansCase& cfg, float* h_pool_data, K
 
     MEASURE_MS_AND_SAVE("ivf_kmeans总耗时:", gpu_ms,
         reorder_success = ivf_kmeans(cfg, h_data, h_data_reordered, d_centroids,
-                                     &h_cluster_info, use_minibatch, 0, BATCH_SIZE, &gpu_obj);
+                                     &h_cluster_info, use_minibatch, 0, BATCH_SIZE, &gpu_obj,
+                                     h_original_indices, h_reordered_indices);
         cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
     );
@@ -121,7 +151,50 @@ static std::vector<double> run_case(const KMeansCase& cfg, float* h_pool_data, K
         ok_info = false;
     }
     
-    reorder_success = reorder_success && ok_info;
+    // 验证索引映射是否为双射（bijection）
+    // 双射要求：h_reordered_indices 包含所有 0 到 n-1 的值，且每个值只出现一次
+    bool ok_bijection = true;
+    if (h_reordered_indices) {
+        // 使用标记数组检查每个值是否只出现一次
+        std::vector<bool> seen(n, false);
+        for (int i = 0; i < n; ++i) {
+            int idx = h_reordered_indices[i];
+            // 检查索引是否在有效范围内
+            if (idx < 0 || idx >= n) {
+                ok_bijection = false;
+                if (!QUIET) {
+                    fprintf(stderr, "[test] ERROR: Invalid index at position %d: %d (should be in [0, %d))\n",
+                           i, idx, n);
+                }
+                break;
+            }
+            // 检查索引是否已经出现过（重复）
+            if (seen[idx]) {
+                ok_bijection = false;
+                if (!QUIET) {
+                    fprintf(stderr, "[test] ERROR: Duplicate index %d found at position %d\n", idx, i);
+                }
+                break;
+            }
+            seen[idx] = true;
+        }
+        // 检查是否所有值都出现了（满射）
+        if (ok_bijection) {
+            for (int i = 0; i < n; ++i) {
+                if (!seen[i]) {
+                    ok_bijection = false;
+                    if (!QUIET) {
+                        fprintf(stderr, "[test] ERROR: Index %d is missing from reordered_indices\n", i);
+                    }
+                    break;
+                }
+            }
+        }
+    } else {
+        ok_bijection = false;
+    }
+    
+    reorder_success = reorder_success && ok_info && ok_bijection;
     
     if (!QUIET) {
         if (reorder_success) {
@@ -129,13 +202,17 @@ static std::vector<double> run_case(const KMeansCase& cfg, float* h_pool_data, K
                    "Sample: out[0..3] first dim0: %f %f %f %f\n",
                    h_data_reordered[0], h_data_reordered[(size_t)dim], 
                    h_data_reordered[(size_t)2 * dim], h_data_reordered[(size_t)3 * dim]);
+            fprintf(stderr, "[test] Index bijection check: PASSED (all indices 0-%d present and unique)\n", n-1);
         } else {
-            fprintf(stderr, "[test] IVF K-means FAILED!\n");
+            fprintf(stderr, "[test] IVF K-means FAILED! (cluster_info=%d, bijection=%d)\n",
+                   ok_info ? 1 : 0, ok_bijection ? 1 : 0);
         }
     }
     
     // Cleanup
     std::free(h_data_reordered);
+    std::free(h_original_indices);
+    std::free(h_reordered_indices);
     free_cluster_info(&h_cluster_info, false);
     cudaFree(d_centroids);
     cudaFreeHost(h_init_centroids);
@@ -205,7 +282,8 @@ int main(int argc, char** argv) {
         // PARAM_3D(n, (20000, 1000000, 10000000, 100000000, 500000000), 
         PARAM_3D(n, (10000, 20000, 50000, 100000), 
                 dist, (L2_DISTANCE),
-                algo, (KMEANS_MINIBATCH))
+                // algo, (KMEANS_MINIBATCH))
+                algo, (KMEANS_LLOYD))
     {
 
         // K = N^(2/3)（取整，至少 8）

@@ -9,6 +9,9 @@ set(SOURCES
 # 创建可执行文件
 add_executable(test_bitonic ${SOURCES})
 
+# 确保依赖项先构建
+add_dependencies(test_bitonic utils_lib)
+
 # 设置包含目录
 target_include_directories(test_bitonic PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../cuda
@@ -18,10 +21,12 @@ target_include_directories(test_bitonic PRIVATE
 # 设置CUDA编译选项
 set_target_properties(test_bitonic PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
 )
 
-# 链接CUDA库
+# 链接CUDA库和utils库
 target_link_libraries(test_bitonic
+    utils_lib
     ${CUDA_LIBRARIES}
 )
 

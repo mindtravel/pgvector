@@ -7,6 +7,9 @@
 #ifndef PGVECTOR_CUDA_UTILS_CUH
 #define PGVECTOR_CUDA_UTILS_CUH
 
+void _check_cuda_last_error(const char *file, int line);
+#define CHECK_CUDA_ERRORS _check_cuda_last_error(__FILE__, __LINE__);/*用于捕捉CUDA函数错误信息的宏*/
+
 /**
  * Kernel: 并行生成顺序索引
  * 为每个query生成 [0, 1, 2, ..., n_batch-1] 的索引序列
@@ -20,6 +23,27 @@ __global__ void generate_sequence_indices_kernel(
     int* d_index,
     int n_query,
     int n_batch
+);
+
+/**
+ * Kernel: 生成单个顺序索引数组 [0, 1, 2, ..., n-1]
+ * 专门用于生成单个序列，比多query版本更简单高效
+ */
+__global__ void generate_single_sequence_indices_kernel(
+    int* d_index,
+    int n
+);
+
+/**
+ * Host函数: 生成顺序索引数组
+ * 在GPU上生成 [0, 1, 2, ..., n-1] 的索引序列
+ * 
+ * @param d_index 设备端输出数组 [n]
+ * @param n 索引数量
+ */
+void generate_sequence_indices(
+    int* d_index,
+    int n
 );
 
 /**
@@ -211,5 +235,43 @@ __global__ void build_entry_data_kernel(
     int* d_entry_probe_indices,  // [total_queries_in_entries] 输出：所有entry的probe_indices
     int n_total_clusters,
     int kQueriesPerBlock);
+
+/**
+ * Kernel: 回表操作 - 将重排后的索引转换为原始索引
+ * 
+ * 线程模型：
+ * - 一维 grid，每个线程处理一个 top-k 结果位置
+ * - total = n_query * k
+ * 
+ * @param d_reordered_indices  device 指针：重排后的索引映射数组 [n_total_vectors]
+ * @param d_reordered_index_in  device 指针：输入的重排后索引 [n_query * k]
+ * @param d_original_index_out  device 指针：输出的原始索引 [n_query * k]
+ * @param n_query               查询数量
+ * @param k                     top-k 数量
+ */
+__global__ void lookup_original_indices_kernel(
+    const int* __restrict__ d_reordered_indices,
+    const int* __restrict__ d_reordered_index_in,
+    int* __restrict__ d_original_index_out,
+    int n_query,
+    int k
+);
+
+/**
+ * GPU 回表函数：将重排后的索引转换为原始索引
+ * 
+ * @param d_reordered_indices  device 指针：重排后的索引映射数组 [n_total_vectors]
+ * @param d_reordered_index_in  device 指针：输入的重排后索引 [n_query * k]
+ * @param d_original_index_out  device 指针：输出的原始索引 [n_query * k]
+ * @param n_query               查询数量
+ * @param k                     top-k 数量
+ */
+void ivf_search_lookup(
+    const int* d_reordered_indices,
+    const int* d_reordered_index_in,
+    int* d_original_index_out,
+    int n_query,
+    int k
+);
 
 #endif // PGVECTOR_CUDA_UTILS_CUH

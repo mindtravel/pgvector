@@ -8,6 +8,7 @@
 #include "pch.h"
 #include "../common/test_utils.cuh"
 #include "../cpu_utils/cpu_utils.h"
+#include "../../cuda/utils.cuh"
 
 // Forward declarations from warpsortfilter/wrapsort_topk.cu
 namespace pgvector {
@@ -201,7 +202,7 @@ int main()
     
     MetricsCollector metrics;
     metrics.set_columns("pass rate", "batch", "len", "k", "avg_gpu_ms", "avg_cpu_ms", "avg_speedup");
-    // metrics.set_num_repeats(1);
+    metrics.set_num_repeats(1);
     
     // 缓存的数据集
     const float** cached_h_input = nullptr;

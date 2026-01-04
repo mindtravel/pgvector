@@ -19,8 +19,12 @@ set(SOURCES
 # 创建可执行文件
 add_executable(test_select_k ${SOURCES})
 
+# 确保依赖项先构建
+add_dependencies(test_select_k utils_lib)
+
 # 链接库
 target_link_libraries(test_select_k
+    utils_lib
     ${CUDA_LIBRARIES}
     ${CUDA_CUDART_LIBRARY}
 )

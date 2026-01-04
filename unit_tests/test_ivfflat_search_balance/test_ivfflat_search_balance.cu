@@ -239,7 +239,7 @@ static std::vector<double> run_case(const BenchmarkCase& config, int total_vecto
 
         double gpu_ms = 0.0;
         MEASURE_MS_AND_SAVE("gpu耗时:", gpu_ms,
-            batch_search_pipeline(
+            ivf_search_pipeline(
                 query_batch,
                 cluster_sizes,
                 cluster_data,

@@ -23,6 +23,21 @@ struct KMeansCase {
 };
 
 // ============================================================
+// StreamEnv: 为每个流分配独立的中间 buffer，避免竞态条件
+// ============================================================
+struct StreamEnv {
+    float* d_xnorm2;      // [B]
+    float* d_best_dist2;  // [B]
+    int*   d_best_idx;    // [B]
+    float* d_dot;         // [B * Ktile]
+    
+    StreamEnv() : d_xnorm2(nullptr), d_best_dist2(nullptr), d_best_idx(nullptr), d_dot(nullptr) {}
+    
+    void allocate(int B, int Ktile);
+    void free();
+};
+
+// ============================================================
 // GPU Kernels Declaration
 // ============================================================
 
@@ -106,6 +121,42 @@ __global__ void kernel_reduce_sum(
 // ============================================================
 // GPU KMeans Runner
 // ============================================================
+
+/**
+ * 执行 assignment 的辅助函数（不更新质心）
+ * 用于 Final Assignment Pass，确保 d_assign 严格对应最终的 d_centroids
+ * 
+ * @param cfg KMeans 配置
+ * @param h_data 主机端向量数据 [n, dim] row-major
+ * @param d_assign 输出：设备端分配结果 [n]
+ * @param d_centroids 输入：设备端聚类中心 [k, dim]（最终位置）
+ * @param d_cnorm2 临时：centroid 范数 [k]（会被计算和更新）
+ * @param env StreamEnv：包含中间 buffer
+ * @param d_data_buffer 数据缓冲区 [B, dim]（复用外部已分配的显存，避免循环内分配/释放）
+ * @param stream CUDA 流
+ * @param handle cuBLAS handle
+ * @param B batch 大小
+ * @param Ktile centroid 分块大小
+ * @param n 向量数量
+ * @param dim 向量维度
+ * @param k 聚类数量
+ */
+void perform_assignment_only(
+    const KMeansCase& cfg,
+    const float* h_data,
+    int* d_assign,
+    const float* d_centroids,
+    float* d_cnorm2,
+    StreamEnv& env,
+    float* d_data_buffer,
+    cudaStream_t stream,
+    cublasHandle_t handle,
+    int B,
+    int Ktile,
+    int n,
+    int dim,
+    int k
+);
 
 /**
  * GPU KMeans Lloyd 算法实现（GEMM 优化版本）
@@ -259,8 +310,10 @@ void gpu_reorder_vectors_by_cluster(
  * 注意：此函数只处理assign，不处理向量数据，避免大内存分配
  * 调用者可以通过 out[p] = in[perm[p]] 来生成重排后的向量
  * 
+ * 直接接受设备端的 assign 指针，避免 H2D 数据传输
+ * 
  * @param cfg KMeans 配置
- * @param h_assign 输入：主机端分配结果 [n]
+ * @param d_assign 输入：设备端分配结果 [n]（常驻显存）
  * @param h_perm_out 输出：主机端permutation数组 [n]，可以为nullptr（如果只需要cluster_info）
  * @param h_cluster_info 输出：主机端cluster信息（offsets和counts），可以为nullptr
  * @param device_id GPU设备ID
@@ -269,7 +322,7 @@ void gpu_reorder_vectors_by_cluster(
  */
 void gpu_build_permutation_by_cluster(
     const KMeansCase& cfg,
-    const int* h_assign,             // [n] host
+    const int* d_assign,             // [n] device
     int* h_perm_out,                 // [n] host (optional, can be nullptr)
     ClusterInfo* h_cluster_info,      // optional host output
     int device_id = 0,

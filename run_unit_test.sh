@@ -22,8 +22,9 @@ cmake -S . -B build \
 echo "编译项目..."
 cd build
 make -j$(nproc)
+# make test_ivfflat_search_lookup -j$(nproc)
 # make test_kmeans -j$(nproc)
-make test_ivfflat_search -j$(nproc)
+# make test_ivfflat_search -j$(nproc)
 
 # make test_ivf_search_coarse_fine -j$(nproc)
 # make test_ivf_search_coarse_fine_pipeline -j$(nproc)
@@ -34,33 +35,25 @@ make test_ivfflat_search -j$(nproc)
 
 # 运行测试
 # echo "运行测试..."
-# echo "=================================="
 # echo "运行 print_cuda 测试..."
-# ./test_print_cuda/test_print_cuda
-# echo "=================================="
+# ./unit_tests/test_print_cuda/test_print_cuda
 # echo "运行 matrix_multiply 测试..."
-# ./test_matrix_multiply/test_matrix_multiply
-# echo "=================================="
+# ./unit_tests/test_matrix_multiply/test_matrix_multiply
 # echo "运行 fusion_cos_topk 测试..."
-# ./test_fusion_cos_topk/test_fusion_cos_topk $1
-# echo "=================================="
+# ./unit_tests/test_fusion_cos_topk/test_fusion_cos_topk $1
 # echo "运行 warp sort 测试..."
-./test_warpsort/test_warpsort
-# echo "=================================="
+# ./unit_tests/test_warpsort/test_warpsort
 # echo "运行 warp sort 测试..."
-./test_bitonic/test_bitonic
-# echo "=================================="
+# ./unit_tests/test_bitonic/test_bitonic
 # echo "运行 ivfflat_search_pipeline 测试..."
-# ./test_ivfflat_search_pipeline/test_ivfflat_search_pipeline
-# echo "=================================="
+# ./unit_tests/test_ivfflat_search_pipeline/test_ivfflat_search_pipeline
 # echo "运行 kmeans 测试..."
-./test_kmeans/test_kmeans
-# echo "=================================="
+./unit_tests/test_kmeans/test_kmeans
 # echo "运行 ivfflat_search 测试..."
-./test_ivfflat_search/test_ivfflat_search
-# echo "=================================="
+# ./unit_tests/test_ivfflat_search/test_ivfflat_search
+# ./unit_tests/test_ivfflat_search_lookup/test_ivfflat_search_lookup
+
 # echo "运行 select_k 测试..."
-# ./test_select_k/test_select_k 
-# echo "=================================="
+# ./unit_tests/test_select_k/test_select_k 
 
 echo "所有测试完成！"

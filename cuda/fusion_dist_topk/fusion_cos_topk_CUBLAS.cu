@@ -2,10 +2,7 @@
 #include <cfloat>
 
 #include "../l2norm/l2norm.cuh"
-// #include "select_topk.cuh"
-
 #include "fusion_dist_topk_warpsort.cuh"
-#include "../unit_tests/common/test_utils.cuh"
 #include "pch.h"
 
 // 定义最大k值

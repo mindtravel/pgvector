@@ -1,8 +1,4 @@
-/* 必须在任何头文件之前包含limits.h，以便Thrust可以使用CHAR_MIN等宏 */
-#ifndef _LIMITS_H_
-#define _LIMITS_H_
-#endif
-#include <limits.h>
+
 #include "../pch.h"
 #include "ivf_search.cuh"
 
@@ -11,7 +7,6 @@
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include "../warpsortfilter/warpsort_topk.cu"
 #include "../cudatimer.h"
-#include "../../unit_tests/common/test_utils.cuh"
 #include "../l2norm/l2norm.cuh"
 #include "../utils.cuh"
 #include <algorithm>
@@ -271,7 +266,7 @@ void cleanup_persistent_data()
  * @param coarse_index 粗筛结果索引 [n_query, n_probes]，如果为nullptr则不输出
  * @param coarse_dist 粗筛结果距离 [n_query, n_probes]，如果为nullptr则不输出
  */
-void batch_search_pipeline(float** query_batch,
+void ivf_search_pipeline(float** query_batch,
                            int* cluster_size,
                            float*** cluster_vectors,
                            float** cluster_center_data,
@@ -295,7 +290,7 @@ void batch_search_pipeline(float** query_batch,
     if (n_query <= 0 || n_dim <= 0 || n_total_clusters <= 0 || k <= 0) {
         printf("[ERROR] Invalid parameters: n_query=%d, n_dim=%d, n_total_clusters=%d, k=%d\n",
                n_query, n_dim, n_total_clusters, k);
-        throw std::invalid_argument("invalid batch_search_pipeline configuration");
+        throw std::invalid_argument("invalid ivf_search_pipeline configuration");
     }
     if (!cluster_size || !cluster_vectors) {
         throw std::invalid_argument("cluster metadata is null");

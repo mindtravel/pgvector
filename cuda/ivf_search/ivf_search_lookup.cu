@@ -10,6 +10,7 @@
 #include "../indexed_gemm/indexed_gemm.cuh"
 #include "../warpsortfilter/warpsort_utils.cuh"
 #include "../warpsortfilter/warpsort_topk.cu"
+#include "../dataset/dataset.cuh"
 #include "../cudatimer.h"
 #include "../l2norm/l2norm.cuh"
 #include "../utils.cuh"
@@ -20,56 +21,48 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
-
-#define ENABLE_CUDA_TIMING 0
+#define ENABLE_CUDA_TIMING 1
 
 using namespace pgvector::warpsort_utils;
 using namespace pgvector::warpsort_topk;
 
-void ivf_search(float* d_query_batch,
-                           int* d_cluster_size,
-                           float* d_cluster_vectors,
-                           float* d_cluster_centers,
-                           int* d_initial_indices,
-                           float* d_topk_dist,
-                           int* d_topk_index,
-                           int n_query,
-                           int n_dim,
-                           int n_total_clusters,
-                           int n_total_vectors,
-                           int n_probes,
-                           int k,
-                           int distance_mode,
-                           int** h_coarse_index,  // [n_query, n_probes] 粗筛结果索引（可选，host指针）
-                           float** h_coarse_dist  // [n_query, n_probes] 粗筛结果距离（可选，host指针）
+void ivf_search_lookup(
+                        float* d_query_batch,
+    int* d_cluster_size,
+    float* d_cluster_vectors,
+    float* d_cluster_centers,
+    int* d_initial_indices,
+    float* d_topk_dist,
+    int* d_topk_index,
+    int n_query,
+    int n_dim,
+    int n_total_clusters,
+    int n_total_vectors,
+    int n_probes,
+    int k,
+    DistanceType distance_mode,
+    int** h_coarse_index,  // [n_query, n_probes] 粗筛结果索引（可选，host指针）
+    float** h_coarse_dist,  // [n_query, n_probes] 粗筛结果距离（可选，host指针）
+    const int* d_reordered_indices  // [n_total_vectors] 回表映射数组（可选）
                         ) {
-
-    // fprintf(stderr, "ivf_search: 开始执行, n_query=%d, n_dim=%d, n_total_clusters=%d, n_total_vectors=%d, n_probes=%d, k=%d\n",
-    //         n_query, n_dim, n_total_clusters, n_total_vectors, n_probes, k);
-
     if (n_query <= 0 || n_dim <= 0 || n_total_clusters <= 0 || k <= 0) {
-        fprintf(stderr, "[ERROR] ivf_search: 无效参数 - n_query=%d, n_dim=%d, n_total_clusters=%d, k=%d\n",
+        fprintf(stderr, "[ERROR] ivf_search_lookup: 无效参数 - n_query=%d, n_dim=%d, n_total_clusters=%d, k=%d\n",
                n_query, n_dim, n_total_clusters, k);
-        throw std::invalid_argument("invalid ivf_search configuration");
+        throw std::invalid_argument("invalid ivf_search_lookup configuration");
     }
     if (!d_cluster_size || !d_cluster_vectors || !d_cluster_centers || !d_query_batch) {
-        fprintf(stderr, "[ERROR] ivf_search: 输入device指针为null\n");
+        fprintf(stderr, "[ERROR] ivf_search_lookup: 输入device指针为null\n");
         throw std::invalid_argument("input device pointers must not be null");
     }
     if (!d_topk_dist || !d_topk_index) {
-        fprintf(stderr, "[ERROR] ivf_search: 输出device指针为null\n");
+        fprintf(stderr, "[ERROR] ivf_search_lookup: 输出device指针为null\n");
         throw std::invalid_argument("output device pointers must not be null");
     }
     if (n_probes <= 0 || n_probes > n_total_clusters) {
-        fprintf(stderr, "[ERROR] ivf_search: 无效n_probes - n_probes=%d, n_total_clusters=%d\n",
+        fprintf(stderr, "[ERROR] ivf_search_lookup: 无效n_probes - n_probes=%d, n_total_clusters=%d\n",
                n_probes, n_total_clusters);
         throw std::invalid_argument("invalid n_probes");
     }
-
-    // 直接使用传入的 device 指针
-    float* d_queries = d_query_batch;
-    float* d_cluster_vectors_ptr = d_cluster_vectors;
-    float* d_cluster_centers_ptr = d_cluster_centers;
 
     float *d_cluster_centers_norm = nullptr;
     float *d_query_norm = nullptr;
@@ -80,6 +73,25 @@ void ivf_search(float* d_query_batch,
     float *d_inner_product = nullptr;
     int* d_probe_vector_offset = nullptr;
     int* d_probe_vector_count = nullptr;
+    
+    // 如果 d_initial_indices 为 nullptr，自动生成顺序索引
+    int* d_initial_indices_internal = nullptr;
+    bool need_free_initial_indices = false;
+    if (d_initial_indices == nullptr) {
+        cudaMalloc(&d_initial_indices_internal, n_query * n_total_clusters * sizeof(int));
+        CHECK_CUDA_ERRORS;
+        
+        // 使用 GPU kernel 生成顺序索引
+        dim3 block(256);
+        dim3 grid((n_query * n_total_clusters + block.x - 1) / block.x);
+        generate_sequential_indices_kernel<<<grid, block>>>(
+            d_initial_indices_internal, n_query, n_total_clusters);
+        cudaDeviceSynchronize();
+        CHECK_CUDA_ERRORS;
+        
+        d_initial_indices = d_initial_indices_internal;
+        need_free_initial_indices = true;
+    }
 
     dim3 queryDim(n_query);
     dim3 dataDim(n_total_clusters);
@@ -88,7 +100,7 @@ void ivf_search(float* d_query_batch,
 
     {
         CUDATimer timer("Step 0: Data Preparation", ENABLE_CUDA_TIMING);
-        // fprintf(stderr, "ivf_search: Step 0 - 开始数据准备\n");
+        // fprintf(stderr, "ivf_search_pipeline: Step 0 - 开始数据准备\n");
         
         // 先在GPU上计算probe_vector_offset（使用前缀和）
         cudaMalloc(&d_probe_vector_offset, (n_total_clusters + 1) * sizeof(int));
@@ -108,9 +120,9 @@ void ivf_search(float* d_query_batch,
         CHECK_CUDA_ERRORS;
         cudaDeviceSynchronize();
 
-        compute_l2_norm_gpu(d_cluster_vectors_ptr, d_cluster_vector_norm, n_total_vectors, n_dim);
-        compute_l2_norm_gpu(d_queries, d_query_norm, n_query, n_dim);
-        compute_l2_norm_gpu(d_cluster_centers_ptr, d_cluster_centers_norm, n_total_clusters, n_dim);
+        compute_l2_norm_gpu(d_cluster_vectors, d_cluster_vector_norm, n_total_vectors, n_dim);
+        compute_l2_norm_gpu(d_query_batch, d_query_norm, n_query, n_dim);
+        compute_l2_norm_gpu(d_cluster_centers, d_cluster_centers_norm, n_total_clusters, n_dim);
         
         cudaDeviceSynchronize();
         CHECK_CUDA_ERRORS;
@@ -172,8 +184,8 @@ void ivf_search(float* d_query_batch,
                 CUBLAS_OP_T, CUBLAS_OP_N, 
                 n_total_clusters, n_query, n_dim,                   
                 &alpha, 
-                d_cluster_centers_ptr, n_dim,            
-                d_queries, n_dim,               
+                d_cluster_centers, n_dim,            
+                d_query_batch, n_dim,               
                 &beta, 
                 d_inner_product, n_total_clusters
             );    
@@ -246,7 +258,7 @@ void ivf_search(float* d_query_batch,
         {
             CUDATimer timer("Step 1: GPU Memory Free", false, ENABLE_CUDA_TIMING);
             cublasDestroy(handle);
-            // d_cluster_centers_ptr 由调用者管理，不在这里释放
+            // d_cluster_centers 由调用者管理，不在这里释放
             cudaFree(d_inner_product);
             cudaFree(d_cluster_centers_norm);
             // 注意：如果粗筛结果需要输出，d_top_nprobe_dist 不能在这里释放
@@ -461,8 +473,8 @@ void ivf_search(float* d_query_batch,
                         launch_indexed_inner_product_with_cos_topk_kernel<64, true, kQueriesPerBlock>(
                             block,
                             n_dim,
-                            d_queries,
-                            d_cluster_vectors_ptr,
+                            d_query_batch,
+                            d_cluster_vectors,
                             d_probe_vector_offset,
                             d_probe_vector_count,
                             d_entry_cluster_id,
@@ -483,8 +495,8 @@ void ivf_search(float* d_query_batch,
                         launch_indexed_inner_product_with_cos_topk_kernel<128, true, kQueriesPerBlock>(
                             block,
                             n_dim,
-                            d_queries,
-                            d_cluster_vectors_ptr,
+                            d_query_batch,
+                            d_cluster_vectors,
                             d_probe_vector_offset,
                             d_probe_vector_count,
                             d_entry_cluster_id,
@@ -505,8 +517,8 @@ void ivf_search(float* d_query_batch,
                         launch_indexed_inner_product_with_cos_topk_kernel<256, true, kQueriesPerBlock>(
                             block,
                             n_dim,
-                            d_queries,
-                            d_cluster_vectors_ptr,
+                            d_query_batch,
+                            d_cluster_vectors,
                             d_probe_vector_offset,
                             d_probe_vector_count,
                             d_entry_cluster_id,
@@ -531,8 +543,8 @@ void ivf_search(float* d_query_batch,
                         launch_indexed_inner_product_with_l2_topk_kernel<64, true, kQueriesPerBlock>(
                             block,
                             n_dim,
-                            d_queries,
-                            d_cluster_vectors_ptr,
+                            d_query_batch,
+                            d_cluster_vectors,
                             d_probe_vector_offset,
                             d_probe_vector_count,
                             d_entry_cluster_id,
@@ -553,8 +565,8 @@ void ivf_search(float* d_query_batch,
                         launch_indexed_inner_product_with_l2_topk_kernel<128, true, kQueriesPerBlock>(
                             block,
                             n_dim,
-                            d_queries,
-                            d_cluster_vectors_ptr,
+                            d_query_batch,
+                            d_cluster_vectors,
                             d_probe_vector_offset,
                             d_probe_vector_count,
                             d_entry_cluster_id,
@@ -575,8 +587,8 @@ void ivf_search(float* d_query_batch,
                         launch_indexed_inner_product_with_l2_topk_kernel<256, true, kQueriesPerBlock>(
                             block,
                             n_dim,
-                            d_queries,
-                            d_cluster_vectors_ptr,
+                            d_query_batch,
+                            d_cluster_vectors,
                             d_probe_vector_offset,
                             d_probe_vector_count,
                             d_entry_cluster_id,
@@ -660,13 +672,45 @@ void ivf_search(float* d_query_batch,
 
     cudaFree(d_probe_vector_offset);
     // d_probe_vector_count 是传入的 d_cluster_size，由调用者管理
-    // d_queries 是传入的 d_query_batch，由调用者管理
+    // d_query_batch 是传入的 d_query_batch，由调用者管理
     cudaFree(d_query_norm);
+    
+    // 如果自动生成了 d_initial_indices，需要释放
+    if (need_free_initial_indices && d_initial_indices_internal != nullptr) {
+        cudaFree(d_initial_indices_internal);
+    }
     
     // 如果粗筛结果需要输出，d_top_nprobe_dist 在 Step 1 中已经复制并释放
     // 如果不需要输出，d_top_nprobe_dist 在 Step 1 中已经释放
     // 这里不需要额外处理
     
+    // Step 3: 回表操作 - 将重排后的索引转换为原始索引
+    if (d_reordered_indices != nullptr) {
+        CUDATimer timer("Step 3: Lookup original indices", ENABLE_CUDA_TIMING);
+        
+        // 分配临时缓冲区用于存储原始索引
+        int* d_original_index = nullptr;
+        cudaMalloc(&d_original_index, n_query * k * sizeof(int));
+    CHECK_CUDA_ERRORS;
+        
+        // 执行回表操作
+        lookup_original_indices_kernel<<<dim3((n_query * k + 255) / 256), dim3(256)>>>(
+        d_reordered_indices,
+            d_topk_index,  // 输入：重排后的索引
+            d_original_index,  // 输出：原始索引
+        n_query,
+        k
+    );
+    cudaDeviceSynchronize();
+        CHECK_CUDA_ERRORS;
+        
+        // 将回表后的索引复制回 d_topk_index（覆盖原来的重排索引）
+        cudaMemcpy(d_topk_index, d_original_index, n_query * k * sizeof(int), cudaMemcpyDeviceToDevice);
+        CHECK_CUDA_ERRORS;
+        
+        // 释放临时内存
+        cudaFree(d_original_index);
+    }
+    
     CHECK_CUDA_ERRORS;
 }
-

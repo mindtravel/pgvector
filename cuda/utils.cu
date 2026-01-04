@@ -6,6 +6,26 @@
 
 #include "utils.cuh"
 #include <cfloat>
+#include <iomanip>
+#include <algorithm>
+
+void _check_cuda_last_error(const char *file, int line)
+{
+    // 调用 cudaGetLastError() 来获取最后一个异步错误
+    // 这个函数开销极小，因为它不会同步设备，只是查询一个错误标志
+    // 重要：它会清除当前的错误状态，以便下次检查不会重复报告同一个旧错误
+    cudaError_t err = cudaGetLastError();
+
+    if (cudaSuccess != err) {
+        // 如果检测到错误，打印详细信息，包括错误描述、发生检查的文件和行号
+        fprintf(stderr, "[CUDA Last Error]: %s ---- Location: %s:%d\n",
+                cudaGetErrorString(err), file, line);
+        
+        // 在调试时，立即终止程序是一个好习惯，可以防止程序在错误状态下继续运行导致更多混乱
+        cudaDeviceReset(); // 尝试清理CUDA资源
+        exit(EXIT_FAILURE);
+    }
+}
 
 /**
  * Kernel: 并行生成顺序索引
@@ -31,6 +51,74 @@ __global__ void generate_sequence_indices_kernel(
     for (int idx = tid; idx < n_batch; idx += block_size) {
         d_index[query_id * n_batch + idx] = idx;
     }
+}
+
+/**
+ * Kernel: 生成单个顺序索引数组 [0, 1, 2, ..., n-1]
+ * 专门用于生成单个序列，比多query版本更简单高效
+ */
+__global__ void generate_single_sequence_indices_kernel(
+    int* d_index,
+    int n)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        d_index[idx] = idx;
+    }
+}
+
+/**
+ * Host函数: 生成顺序索引数组
+ * 在GPU上生成 [0, 1, 2, ..., n-1] 的索引序列
+ * 
+ * @param d_index 设备端输出数组 [n]
+ * @param n 索引数量
+ */
+void generate_sequence_indices(
+    int* d_index,
+    int n)
+{
+    if (!d_index || n <= 0) {
+        fprintf(stderr, "[ERROR] generate_sequence_indices: invalid parameters - d_index=%p, n=%d\n", 
+               (void*)d_index, n);
+        return;
+    }
+    
+    // 检查 cudaMalloc 是否成功（通过检查指针是否有效）
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[ERROR] generate_sequence_indices: previous CUDA error: %s\n", 
+               cudaGetErrorString(err));
+    }
+    
+    // 使用专门的单序列 kernel，更简单高效
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+    
+    // 检查 grid_size 是否超出 CUDA 限制（通常最大是 65535，但为了安全使用更小的值）
+    if (grid_size > 65535) {
+        fprintf(stderr, "[ERROR] generate_sequence_indices: grid_size %d too large (n=%d, block_size=%d)\n",
+               grid_size, n, block_size);
+        return;
+    }
+    
+    if (grid_size <= 0) {
+        fprintf(stderr, "[ERROR] generate_sequence_indices: invalid grid_size %d (n=%d)\n", grid_size, n);
+        return;
+    }
+    
+    generate_single_sequence_indices_kernel<<<grid_size, block_size>>>(
+        d_index, n);
+    
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[ERROR] generate_sequence_indices: kernel launch failed: %s (grid_size=%d, block_size=%d, n=%d)\n",
+               cudaGetErrorString(err), grid_size, block_size, n);
+        return;
+    }
+    
+    cudaDeviceSynchronize();
+    CHECK_CUDA_ERRORS;
 }
 
 /**
@@ -426,4 +514,76 @@ __global__ void build_entry_data_kernel(
         current_query_offset += batch_size;
         entry_idx++;
     }
+}
+
+/**
+ * Kernel: 回表操作 - 将重排后的索引转换为原始索引
+ * 
+ * 线程模型：
+ * - 一维 grid，每个线程处理一个 top-k 结果位置
+ * - total = n_query * k
+ * 
+ * @param d_reordered_indices  device 指针：重排后的索引映射数组 [n_total_vectors]
+ * @param d_reordered_index_in  device 指针：输入的重排后索引 [n_query * k]
+ * @param d_original_index_out  device 指针：输出的原始索引 [n_query * k]
+ * @param n_query               查询数量
+ * @param k                     top-k 数量
+ */
+__global__ void lookup_original_indices_kernel(
+    const int* __restrict__ d_reordered_indices,
+    const int* __restrict__ d_reordered_index_in,
+    int* __restrict__ d_original_index_out,
+    int n_query,
+    int k
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = n_query * k;
+    
+    if (idx < total) {
+        int reordered_idx = d_reordered_index_in[idx];
+        // 将重排后的索引转换为原始索引
+        d_original_index_out[idx] = d_reordered_indices[reordered_idx];
+    }
+}
+
+/**
+ * GPU 回表函数：将重排后的索引转换为原始索引
+ * 
+ * @param d_reordered_indices  device 指针：重排后的索引映射数组 [n_total_vectors]
+ * @param d_reordered_index_in  device 指针：输入的重排后索引 [n_query * k]
+ * @param d_original_index_out  device 指针：输出的原始索引 [n_query * k]
+ * @param n_query               查询数量
+ * @param k                     top-k 数量
+ */
+void ivf_search_lookup(
+    const int* d_reordered_indices,
+    const int* d_reordered_index_in,
+    int* d_original_index_out,
+    int n_query,
+    int k
+) {
+    if (!d_reordered_indices || !d_reordered_index_in || !d_original_index_out) {
+        fprintf(stderr, "[ERROR] ivf_search_lookup: 输入指针为null\n");
+        throw std::invalid_argument("input pointers must not be null");
+    }
+    
+    if (n_query <= 0 || k <= 0) {
+        fprintf(stderr, "[ERROR] ivf_search_lookup: 无效参数 - n_query=%d, k=%d\n", n_query, k);
+        throw std::invalid_argument("invalid parameters");
+    }
+    
+    // 启动 GPU kernel
+    dim3 block_size(256);
+    dim3 grid_size((n_query * k + block_size.x - 1) / block_size.x);
+    
+    lookup_original_indices_kernel<<<grid_size, block_size>>>(
+        d_reordered_indices,
+        d_reordered_index_in,
+        d_original_index_out,
+        n_query,
+        k
+    );
+    
+    cudaDeviceSynchronize();
+    CHECK_CUDA_ERRORS;
 }

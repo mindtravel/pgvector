@@ -12,38 +12,42 @@
 #include "vector_nd.cuh"
 #include "test_config.h"
 /**
- * 比较数字：浮点数采用绝对误差
+ * 比较数字：浮点数采用相对误差（C++14 兼容版本）
  */
 template<typename T>
-bool compare_numbers_relative(T a, T b, float epsilon) {
-    if constexpr (std::is_floating_point_v<T>) {
-        /* 浮点数 */
-        return std::abs(a - b) * 2.0 / (std::abs(a) + std::abs(b)) < epsilon;
-    } else {
-        /* 整数 */
-        return a == b;
-    }
+typename std::enable_if<std::is_floating_point<T>::value, bool>::type
+compare_numbers_relative(T a, T b, float epsilon) {
+    return std::abs(a - b) * 2.0 / (std::abs(a) + std::abs(b)) < epsilon;
+}
+
+template<typename T>
+typename std::enable_if<!std::is_floating_point<T>::value, bool>::type
+compare_numbers_relative(T a, T b, float epsilon) {
+    (void)epsilon;  // 未使用参数
+    return a == b;
 }
 
 /**
-* 比较数字：浮点数采用相对误差
+* 比较数字：浮点数采用绝对误差（C++14 兼容版本）
 */
 template<typename T>
-bool compare_numbers(T a, T b, float epsilon = 1e-5) {
-    if constexpr (std::is_floating_point_v<T>) {
-        /* 浮点数 */
-        return std::abs(a - b) < epsilon;
-    } else {
-        /* 整数 */
-        return a == b;
-    }
+typename std::enable_if<std::is_floating_point<T>::value, bool>::type
+compare_numbers(T a, T b, float epsilon = 1e-5f) {
+    return std::abs(a - b) < epsilon;
+}
+
+template<typename T>
+typename std::enable_if<!std::is_floating_point<T>::value, bool>::type
+compare_numbers(T a, T b, float epsilon = 1e-5f) {
+    (void)epsilon;  // 未使用参数
+    return a == b;
 }
 
 /* 
 * 比较一维数组
 */
 template<typename T>
-bool compare_1D(T* a, T* b, int n, float epsilon = 1e-5f) {
+bool compare_1D(T* a, T* b, int n, float epsilon = 1e-5f, bool use_relative = false) {
     std::atomic<int> err_happens(0);
     std::mutex debug_mutex;
     std::atomic<bool> first_error(true);
@@ -59,7 +63,10 @@ bool compare_1D(T* a, T* b, int n, float epsilon = 1e-5f) {
             int end = std::min(start + chunk_size, n);
             
             for(int i = start; i < end; ++i){
-                if (!compare_numbers(a[i], b[i], epsilon)) {
+                bool match = use_relative ? 
+                    compare_numbers_relative(a[i], b[i], epsilon) : 
+                    compare_numbers(a[i], b[i], epsilon);
+                if (!match) {
                     int err_count = err_happens.fetch_add(1) + 1;
                     
                     if(DEBUG){
@@ -89,7 +96,7 @@ bool compare_1D(T* a, T* b, int n, float epsilon = 1e-5f) {
 }
 
 template<typename T>
-bool compare_2D(T* a, T* b, int nx, int ny, float epsilon = 1e-5f) {
+bool compare_2D(T* a, T* b, int nx, int ny, float epsilon = 1e-5f, bool use_relative = false) {
     std::atomic<int> err_happens(0);
     std::mutex debug_mutex;
     
@@ -105,7 +112,10 @@ bool compare_2D(T* a, T* b, int nx, int ny, float epsilon = 1e-5f) {
             
             for(int i = start; i < end; ++i){
                 for (int j = 0; j < ny; j++) {
-                    if (!compare_numbers(a[i][j], b[i][j], epsilon)) {
+                    bool match = use_relative ? 
+                        compare_numbers_relative(a[i][j], b[i][j], epsilon) : 
+                        compare_numbers(a[i][j], b[i][j], epsilon);
+                    if (!match) {
                         int err_count = err_happens.fetch_add(1) + 1;
                         
                         if(DEBUG){
@@ -136,7 +146,17 @@ bool compare_2D(T* a, T* b, int nx, int ny, float epsilon = 1e-5f) {
 }
 
 template<typename T>
-bool compare_set_1D(T** a, T** b, int n, float epsilon = 1e-5f) {
+bool compare_1D_relative(T* a, T* b, int n, float epsilon = 1e-5f) {
+    return compare_1D(a, b, n, epsilon, true);
+}
+
+template<typename T>
+bool compare_2D_relative(T* a, T* b, int nx, int ny, float epsilon = 1e-5f) {
+    return compare_2D(a, b, nx, ny, epsilon, true);
+}
+
+template<typename T>
+bool compare_set_1D(T** a, T** b, int n, float epsilon = 1e-5f, bool use_relative = false) {
     std::atomic<int> err_happens(0);
     std::mutex debug_mutex;
     
@@ -154,7 +174,10 @@ bool compare_set_1D(T** a, T** b, int n, float epsilon = 1e-5f) {
             int end = std::min(start + chunk_size, n);
             
             for(int i = start; i < end; ++i){
-                if (!compare_numbers(a[i], b[i], epsilon)) {
+                bool match = use_relative ? 
+                    compare_numbers_relative(a[i], b[i], epsilon) : 
+                    compare_numbers(a[i], b[i], epsilon);
+                if (!match) {
                     int err_count = err_happens.fetch_add(1) + 1;
                     
                     if(DEBUG){
@@ -184,7 +207,7 @@ bool compare_set_1D(T** a, T** b, int n, float epsilon = 1e-5f) {
 }
 
 template<typename T>
-bool compare_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
+bool compare_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f, bool use_relative = false) {
     std::atomic<int> err_happens(0);
     std::mutex debug_mutex;
     
@@ -203,7 +226,10 @@ bool compare_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
                 std::sort(b[i], b[i] + ny);
 
                 for (int j = 0; j < ny; j++) {
-                    if (!compare_numbers(a[i][j], b[i][j], epsilon)) {
+                    bool match = use_relative ? 
+                        compare_numbers_relative(a[i][j], b[i][j], epsilon) : 
+                        compare_numbers(a[i][j], b[i][j], epsilon);
+                    if (!match) {
                         int err_count = err_happens.fetch_add(1) + 1;
                         
                         if(DEBUG){
@@ -234,53 +260,13 @@ bool compare_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
 }
 
 template<typename T>
-bool compare_set_2D_relative(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
-    std::atomic<int> err_happens(0);
-    std::mutex debug_mutex;
-    
-    const int num_threads = std::min(static_cast<int>(std::thread::hardware_concurrency()), nx);
-    const int chunk_size = (nx + num_threads - 1) / num_threads;
-    
-    std::vector<std::thread> threads;
-    
-    for (int t = 0; t < num_threads; ++t) {
-        threads.emplace_back([&, t]() {
-            int start = t * chunk_size;
-            int end = std::min(start + chunk_size, nx);
-            
-            for(int i = start; i < end; ++i){
-                std::sort(a[i], a[i] + ny);
-                std::sort(b[i], b[i] + ny);
+bool compare_set_1D_relative(T** a, T** b, int n, float epsilon = 1e-5f) {
+    return compare_set_1D(a, b, n, epsilon, true);
+}
 
-                for (int j = 0; j < ny; j++) {
-                    if (!compare_numbers_relative(a[i][j], b[i][j], epsilon)) {
-                        int err_count = err_happens.fetch_add(1) + 1;
-                        
-                        if(DEBUG){
-                            std::lock_guard<std::mutex> lock(debug_mutex);
-                            if(err_count == 1){
-                                COUT_ENDL("mismatch!");
-                                COUT_TABLE("i", "j", "a[i][j]", "b[i][j]", "diff");
-                            }                    
-                            COUT_TABLE(i, j, a[i][j], b[i][j], a[i][j] - b[i][j]);
-                        }
-                    }
-                }
-            }
-        });
-    }
-    
-    for (auto& thread : threads) {
-        thread.join();
-    }
-    
-    int total_errors = err_happens.load();
-    if(total_errors == 0){
-        return true;
-    }
-    if(DEBUG)
-        COUT_ENDL(total_errors);
-    return false;
+template<typename T>
+bool compare_set_2D_relative(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
+    return compare_set_2D(a, b, nx, ny, epsilon, true);
 }
 
 /**
@@ -289,13 +275,16 @@ bool compare_set_2D_relative(T** a, T** b, int nx, int ny, float epsilon = 1e-5f
 * 返回值为完全相同的元素个数
 */
 template<typename T>
-int count_equal_elements_set_1D(T** a, T** b, int n, float epsilon = 1e-5f) {
+int count_equal_elements_set_1D(T** a, T** b, int n, float epsilon = 1e-5f, bool use_relative = false) {
     std::sort(a, a + n);
     std::sort(b, b + n);
     int i = 0, j = 0;
     int count_equal = 0;
     while (i < n && j < n) {
-        if (compare_numbers(a[i], b[j], epsilon)) {
+        bool match = use_relative ? 
+            compare_numbers_relative(a[i], b[j], epsilon) : 
+            compare_numbers(a[i], b[j], epsilon);
+        if (match) {
             count_equal++;
             i++;
             j++;
@@ -318,7 +307,7 @@ int count_equal_elements_set_1D(T** a, T** b, int n, float epsilon = 1e-5f) {
 * 返回值为完全相同的元素个数
 */
 template<typename T>
-int count_equal_elements_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
+int count_equal_elements_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e-5f, bool use_relative = false) {
     std::atomic<int> count_equal(0);
     std::mutex debug_mutex;
     
@@ -339,7 +328,10 @@ int count_equal_elements_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e
 
                 int j = 0, k = 0;
                 while (j < ny && k < ny) {
-                    if (compare_numbers(a[i][j], b[i][k], epsilon)) {
+                    bool match = use_relative ? 
+                        compare_numbers_relative(a[i][j], b[i][k], epsilon) : 
+                        compare_numbers(a[i][j], b[i][k], epsilon);
+                    if (match) {
                         local_count++;
                         j++;
                         k++;
@@ -369,6 +361,16 @@ int count_equal_elements_set_2D(T** a, T** b, int nx, int ny, float epsilon = 1e
     return total_count == nx * ny;
 }
 
+template<typename T>
+int count_equal_elements_set_1D_relative(T** a, T** b, int n, float epsilon = 1e-5f) {
+    return count_equal_elements_set_1D(a, b, n, epsilon, true);
+}
+
+template<typename T>
+int count_equal_elements_set_2D_relative(T** a, T** b, int nx, int ny, float epsilon = 1e-5f) {
+    return count_equal_elements_set_2D(a, b, nx, ny, epsilon, true);
+}
+
 /**
  * 不匹配信息结构体：记录发生不匹配的距离对的位置和内容
  */
@@ -379,10 +381,9 @@ struct MismatchInfo {
     float gpu_dist;     // GPU版本的距离值
     int cpu_idx;        // CPU版本的索引（如果可用）
     int gpu_idx;        // GPU版本的索引（如果可用）
-    bool cpu_only;      // 是否只有CPU独有的
     
-    MismatchInfo(int qi, int p, float c_dist, float g_dist, int c_idx = -1, int g_idx = -1, bool c_only = false)
-        : query_idx(qi), pos(p), cpu_dist(c_dist), gpu_dist(g_dist), cpu_idx(c_idx), gpu_idx(g_idx), cpu_only(c_only) {}
+    MismatchInfo(int qi, int p, float c_dist, float g_dist, int c_idx = -1, int g_idx = -1)
+        : query_idx(qi), pos(p), cpu_dist(c_dist), gpu_dist(g_dist), cpu_idx(c_idx), gpu_idx(g_idx) {}
 };
 
 /**
@@ -422,11 +423,17 @@ std::vector<MismatchInfo> compare_set_2D_with_mismatches(
                     gpu_sorted[j] = {gpu_dist[i][j], (gpu_idx ? gpu_idx[i][j] : -1)};
                 }
                 
-                // 按距离排序
+                // 按索引排序（索引相同时按距离排序作为次要条件）
                 std::sort(cpu_sorted.begin(), cpu_sorted.end(), 
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
+                    [](const auto& a, const auto& b) { 
+                        if (a.second != b.second) return a.second < b.second;
+                        return a.first < b.first;
+                    });
                 std::sort(gpu_sorted.begin(), gpu_sorted.end(), 
-                    [](const auto& a, const auto& b) { return a.first < b.first; });
+                    [](const auto& a, const auto& b) { 
+                        if (a.second != b.second) return a.second < b.second;
+                        return a.first < b.first;
+                    });
                 
                 // 使用双指针找出只在CPU或GPU中出现的元素
                 int cpu_ptr = 0, gpu_ptr = 0;
@@ -439,11 +446,10 @@ std::vector<MismatchInfo> compare_set_2D_with_mismatches(
                             std::lock_guard<std::mutex> lock(mismatch_mutex);
                             mismatches.emplace_back(
                                 i, gpu_pos, 
-                                cpu_sorted[gpu_ptr].first,  // CPU距离设为最大值表示不存在
+                                std::numeric_limits<float>::max(),  // CPU距离不存在
                                 gpu_sorted[gpu_ptr].first,
-                                cpu_sorted[gpu_ptr].second,
-                                gpu_sorted[gpu_ptr].second,
-                                false
+                                -1,  // CPU索引不存在
+                                gpu_sorted[gpu_ptr].second
                             );
                             gpu_ptr++;
                             gpu_pos++;
@@ -458,10 +464,9 @@ std::vector<MismatchInfo> compare_set_2D_with_mismatches(
                             mismatches.emplace_back(
                                 i, cpu_pos,
                                 cpu_sorted[cpu_ptr].first,
-                                gpu_sorted[gpu_ptr].first,  // GPU距离设为最大值表示不存在
+                                std::numeric_limits<float>::max(),  // GPU距离不存在
                                 cpu_sorted[cpu_ptr].second,
-                                gpu_sorted[gpu_ptr].second,  // GPU索引不存在
-                                true
+                                -1  // GPU索引不存在
                             );
                             cpu_ptr++;
                             cpu_pos++;
@@ -469,46 +474,61 @@ std::vector<MismatchInfo> compare_set_2D_with_mismatches(
                         break;
                     }
                     
-                    // 比较当前CPU和GPU元素的距离
-                    bool dist_match = use_relative
-                        ? compare_numbers_relative(cpu_sorted[cpu_ptr].first, gpu_sorted[gpu_ptr].first, epsilon)
-                        : compare_numbers(cpu_sorted[cpu_ptr].first, gpu_sorted[gpu_ptr].first, epsilon);
+                    // 先比较索引
+                    int cpu_idx_val = cpu_sorted[cpu_ptr].second;
+                    int gpu_idx_val = gpu_sorted[gpu_ptr].second;
                     
-                    if (dist_match) {
-                        // 距离匹配，说明两个都查到了，排除（无论索引是否相同）
-                        cpu_ptr++;
-                        gpu_ptr++;
-                        cpu_pos++;
-                        gpu_pos++;
-                    } else {
-                        // 距离不匹配
-                        if (cpu_sorted[cpu_ptr].first < gpu_sorted[gpu_ptr].first) {
-                            // CPU距离更小，说明这是CPU独有的
+                    if (cpu_idx_val == gpu_idx_val) {
+                        // 索引匹配，检查距离是否在容差内
+                        bool dist_match = use_relative
+                            ? compare_numbers_relative(cpu_sorted[cpu_ptr].first, gpu_sorted[gpu_ptr].first, epsilon)
+                            : compare_numbers(cpu_sorted[cpu_ptr].first, gpu_sorted[gpu_ptr].first, epsilon);
+                        
+                        if (dist_match) {
+                            // 索引和距离都匹配，排除
+                            cpu_ptr++;
+                            gpu_ptr++;
+                            cpu_pos++;
+                            gpu_pos++;
+                        } else {
+                            // 索引匹配但距离不在容差内，记录为不匹配
                             std::lock_guard<std::mutex> lock(mismatch_mutex);
                             mismatches.emplace_back(
                                 i, cpu_pos,
                                 cpu_sorted[cpu_ptr].first,
-                                gpu_sorted[gpu_ptr].first,  // GPU距离设为最大值表示不存在
+                                gpu_sorted[gpu_ptr].first,
                                 cpu_sorted[cpu_ptr].second,
-                                gpu_sorted[gpu_ptr].second,  // GPU索引不存在
-                                true
+                                gpu_sorted[gpu_ptr].second
                             );
                             cpu_ptr++;
-                            cpu_pos++;
-                        } else {
-                            // GPU距离更小，说明这是GPU独有的
-                            std::lock_guard<std::mutex> lock(mismatch_mutex);
-                            mismatches.emplace_back(
-                                i, gpu_pos,
-                                cpu_sorted[cpu_ptr].first,  // CPU距离设为最大值表示不存在
-                                gpu_sorted[gpu_ptr].first,
-                                cpu_sorted[cpu_ptr].second,  // CPU索引不存在
-                                gpu_sorted[gpu_ptr].second,
-                                false
-                            );
                             gpu_ptr++;
+                            cpu_pos++;
                             gpu_pos++;
                         }
+                    } else if (cpu_idx_val < gpu_idx_val) {
+                        // CPU索引更小，说明这是CPU独有的
+                        std::lock_guard<std::mutex> lock(mismatch_mutex);
+                        mismatches.emplace_back(
+                            i, cpu_pos,
+                            cpu_sorted[cpu_ptr].first,
+                            std::numeric_limits<float>::max(),  // GPU距离不存在
+                            cpu_sorted[cpu_ptr].second,
+                            -1  // GPU索引不存在
+                        );
+                        cpu_ptr++;
+                        cpu_pos++;
+                    } else {
+                        // GPU索引更小，说明这是GPU独有的
+                        std::lock_guard<std::mutex> lock(mismatch_mutex);
+                        mismatches.emplace_back(
+                            i, gpu_pos,
+                            std::numeric_limits<float>::max(),  // CPU距离不存在
+                            gpu_sorted[gpu_ptr].first,
+                            -1,  // CPU索引不存在
+                            gpu_sorted[gpu_ptr].second
+                        );
+                        gpu_ptr++;
+                        gpu_pos++;
                     }
                 }
             }
@@ -526,7 +546,7 @@ std::vector<MismatchInfo> compare_set_2D_with_mismatches(
  * 智能比较函数（相对误差版本）
  */
 template<typename T>
-std::vector<MismatchInfo> compare_set_2D_relative_with_mismatches(
+std::vector<MismatchInfo> compare_set_2D_with_mismatches_relative(
     T** cpu_dist, T** gpu_dist, 
     int** cpu_idx, int** gpu_idx,
     int nx, int ny, 

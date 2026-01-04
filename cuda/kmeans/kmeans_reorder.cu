@@ -1,7 +1,7 @@
 // kmeans_reorder.cu
 #include "kmeans.cuh"
 #include "kmeans_reorder_utils.cuh"
-#include "../../unit_tests/common/test_utils.cuh"
+#include "../utils.cuh"
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
@@ -12,29 +12,17 @@
 #include <cstdint>
 
 // ============================================================
-// Public API
+// GPU版本：构建permutation数组（设备指针版本，避免H2D传输）
 // ============================================================
-//
-// Build permutation perm[0..n-1] such that points belonging to cluster 0 come first,
-// then cluster 1, etc. (order within each cluster is arbitrary, but stable enough).
-//
-// Memory:
-// - perm is allocated on device inside this function and copied back to host if requested.
-// - To avoid giant pinned output, we return perm and cluster_info.
-// - Caller can produce reordered vectors by: out[p] = in[perm[p]].
-//
-// Note: This routine streams assign in batches to reduce host->device bandwidth pressure,
-// and does NOT require input vectors at all.
-//
-// ============================================================
+
 void gpu_build_permutation_by_cluster(
     const KMeansCase& cfg,
-    const int* h_assign,             // [n] host
+    const int* d_assign,             // [n] device
     int* h_perm_out,                 // [n] host (optional, can be nullptr)
     ClusterInfo* h_cluster_info,      // optional host output
     int device_id,
     int B,                           // e.g. 1<<20
-    cudaStream_t stream              // can pass 0
+    cudaStream_t stream              // can pass 0 (default in header)
 ) {
     const int n = cfg.n;
     const int k = cfg.k;
@@ -46,7 +34,6 @@ void gpu_build_permutation_by_cluster(
     // Device buffers (O(k) + O(B) + O(n int))
     int* d_counts = nullptr;                         // [k]
     unsigned long long* d_writeptr = nullptr;        // [k]
-    int* d_assign_b[2] = {nullptr, nullptr};         // [B]
     unsigned long long* d_pos_b[2] = {nullptr, nullptr}; // [B]
     int* d_perm = nullptr;                           // [n] permutation indices
 
@@ -65,13 +52,12 @@ void gpu_build_permutation_by_cluster(
     CHECK_CUDA_ERRORS;
 
     for (int t = 0; t < 2; ++t) {
-        cudaMalloc(&d_assign_b[t], sizeof(int) * (size_t)B);
         cudaMalloc(&d_pos_b[t], sizeof(unsigned long long) * (size_t)B);
     }
     CHECK_CUDA_ERRORS;
 
     // ------------------------------------------------------------
-    // PASS 1: count clusters (streaming assign only)
+    // PASS 1: count clusters (streaming assign directly from device)
     // ------------------------------------------------------------
     cudaMemsetAsync(d_counts, 0, sizeof(int) * (size_t)k, stream);
     CHECK_CUDA_ERRORS;
@@ -81,17 +67,14 @@ void gpu_build_permutation_by_cluster(
         int curB = std::min(B, n - base);
         int buf = cur_buf;
 
-        // H2D assign batch
-        cudaMemcpyAsync(d_assign_b[buf], h_assign + base,
-                       sizeof(int) * (size_t)curB,
-                       cudaMemcpyHostToDevice, stream);
-        CHECK_CUDA_ERRORS;
+        // 直接使用设备指针，不需要 H2D 拷贝
+        const int* d_assign_batch = d_assign + base;
 
         // Count
         int threads = 256;
         int blocks = (curB + threads - 1) / threads;
         kernel_count_clusters<<<blocks, threads, 0, stream>>>(
-            d_assign_b[buf], d_counts, curB, k, d_invalid);
+            d_assign_batch, d_counts, curB, k, d_invalid);
         CHECK_CUDA_ERRORS;
 
         cur_buf = 1 - cur_buf;
@@ -147,17 +130,15 @@ void gpu_build_permutation_by_cluster(
         int curB = std::min(B, n - base);
         int buf = cur_buf;
 
-        cudaMemcpyAsync(d_assign_b[buf], h_assign + base,
-                       sizeof(int) * (size_t)curB,
-                       cudaMemcpyHostToDevice, stream);
-        CHECK_CUDA_ERRORS;
+        // 直接使用设备指针，不需要 H2D 拷贝
+        const int* d_assign_batch = d_assign + base;
 
         int threads = 256;
         int blocks = (curB + threads - 1) / threads;
 
         // Compute positions (batch-local pos)
         kernel_compute_positions_u64<<<blocks, threads, 0, stream>>>(
-            d_assign_b[buf], d_writeptr, d_pos_b[buf], curB, k, d_invalid);
+            d_assign_batch, d_writeptr, d_pos_b[buf], curB, k, d_invalid);
         CHECK_CUDA_ERRORS;
 
         // Scatter indices into perm[p]
@@ -192,7 +173,6 @@ void gpu_build_permutation_by_cluster(
 
     // Cleanup
     for (int t = 0; t < 2; ++t) {
-        cudaFree(d_assign_b[t]);
         cudaFree(d_pos_b[t]);
     }
     cudaFree(d_counts);
@@ -249,18 +229,13 @@ bool ivf_kmeans(
         *h_objective = obj;
     }
     
-    // Step 3: Copy assign back to host (needed for permutation building)
-    std::vector<int> h_assign(n);
-    cudaMemcpy(h_assign.data(), d_assign, sizeof(int) * (size_t)n,
-               cudaMemcpyDeviceToHost);
-    CHECK_CUDA_ERRORS;
-    
-    // Step 4: Build permutation on GPU
+    // Step 3: Build permutation on GPU (直接使用设备指针，避免 H2D 传输)
     std::vector<int> h_perm(n);
     ClusterInfo cluster_info;
     ClusterInfo* info_ptr = h_cluster_info ? h_cluster_info : &cluster_info;
     
-    gpu_build_permutation_by_cluster(cfg, h_assign.data(), h_perm.data(), info_ptr,
+    // 使用设备指针版本，直接传入 d_assign，避免中间的 H2D 拷贝
+    gpu_build_permutation_by_cluster(cfg, d_assign, h_perm.data(), info_ptr,
                                     device_id, batch_size, 0);
     cudaDeviceSynchronize();
     CHECK_CUDA_ERRORS;

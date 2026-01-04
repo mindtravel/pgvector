@@ -1,12 +1,134 @@
 #include "kmeans.cuh"
 #include "../utils.cuh"
+#include "../l2norm/l2norm.cuh"
 #include <cublas_v2.h>
+#include <cstdio>
+#include <cstdlib>
 #include <thrust/device_ptr.h>
 #include <thrust/sort.h>
 #include <thrust/execution_policy.h>
 #include <thrust/transform.h>
 #include <thrust/iterator/zip_iterator.h>
 #include <thrust/tuple.h>
+
+static inline void cublas_check(cublasStatus_t st, const char* msg) {
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "cublas error %d at %s\n", (int)st, msg);
+        std::abort();
+    }
+}
+
+// ============================================================
+// StreamEnv Implementation
+// ============================================================
+
+void StreamEnv::allocate(int B, int Ktile) {
+    cudaMalloc(&d_xnorm2,    sizeof(float) * (size_t)B);
+    cudaMalloc(&d_best_dist2, sizeof(float) * (size_t)B);
+    cudaMalloc(&d_best_idx,   sizeof(int)   * (size_t)B);
+    cudaMalloc(&d_dot,        sizeof(float) * (size_t)B * (size_t)Ktile);
+}
+
+void StreamEnv::free() {
+    if (d_xnorm2)    { cudaFree(d_xnorm2);    d_xnorm2 = nullptr; }
+    if (d_best_dist2) { cudaFree(d_best_dist2); d_best_dist2 = nullptr; }
+    if (d_best_idx)   { cudaFree(d_best_idx);   d_best_idx = nullptr; }
+    if (d_dot)        { cudaFree(d_dot);        d_dot = nullptr; }
+}
+
+// ============================================================
+// perform_assignment_only Implementation
+// ============================================================
+
+void perform_assignment_only(
+    const KMeansCase& cfg,
+    const float* h_data,
+    int* d_assign,
+    const float* d_centroids,
+    float* d_cnorm2,
+    StreamEnv& env,
+    float* d_data_buffer,
+    cudaStream_t stream,
+    cublasHandle_t handle,
+    int B,
+    int Ktile,
+    int n,
+    int dim,
+    int k
+) {
+    const float alpha = 1.f;
+    const float beta = 0.f;
+    
+    // 计算 centroid 范数（如果还没有计算）
+    compute_l2_squared_gpu(d_centroids, d_cnorm2, k, dim, L2NORM_AUTO, stream);
+    
+    // 分块处理数据点
+    for (int base = 0; base < n; base += B) {
+        int curB = std::min(B, n - base);
+        
+        // 使用传入的数据缓冲区（复用外部已分配的显存，避免循环内分配/释放）
+        float* d_data_cur = d_data_buffer;
+        
+        // H2D 传输当前 batch 数据
+        cudaMemcpyAsync(d_data_cur, h_data + (size_t)base * dim,
+                       sizeof(float) * (size_t)curB * dim,
+                       cudaMemcpyHostToDevice, stream);
+        
+        // xnorm2 for this batch
+        compute_l2_squared_gpu(d_data_cur, env.d_xnorm2, curB, dim, L2NORM_AUTO, stream);
+        
+        // init best_dist2 = +inf, best_idx = 0
+        {
+            int threads = 256;
+            int blocks = (curB + threads - 1) / threads;
+            kernel_init_best<<<blocks, threads, 0, stream>>>(env.d_best_dist2, env.d_best_idx, curB);
+        }
+        
+        // centroid 分块 Ktile
+        for (int cbase = 0; cbase < k; cbase += Ktile) {
+            int curK = std::min(Ktile, k - cbase);
+            
+            const float* A = d_centroids + (size_t)cbase * dim;
+            const float* Bm = d_data_cur;
+            float* Cc = env.d_dot;
+            
+            // 设置cuBLAS流
+            cublas_check(cublasSetStream(handle, stream), "cublasSetStream");
+            
+            // GEMM: dotT[curK,curB] = Ccm^T[curK,dim] * Xcm[dim,curB]
+            cublas_check(
+                cublasSgemm(
+                    handle,
+                    CUBLAS_OP_T, CUBLAS_OP_N,
+                    curK, curB, dim,
+                    &alpha,
+                    A, dim,
+                    Bm, dim,
+                    &beta,
+                    Cc, curK
+                ),
+                "cublasSgemm(Ccm^T * Xcm)"
+            );
+            
+            // 更新best
+            {
+                int threads = 256;
+                int blocks = (curB + threads - 1) / threads;
+                kernel_update_best_from_dotT<<<blocks, threads, 0, stream>>>(
+                    env.d_dot, env.d_xnorm2, d_cnorm2,
+                    curB, curK, cbase,
+                    env.d_best_idx, env.d_best_dist2
+                );
+            }
+        }
+        
+        // 写回assign
+        cudaMemcpyAsync(d_assign + base, env.d_best_idx, sizeof(int) * (size_t)curB, 
+                       cudaMemcpyDeviceToDevice, stream);
+    }
+    
+    cudaStreamSynchronize(stream);
+}
 
 // ============================================================
 // GPU Kernels Implementation

@@ -25,7 +25,6 @@
 #include <thrust/fill.h>
 
 #include "fusion_dist_topk.cuh"
-#include "../unit_tests/common/test_utils.cuh"
 #include "pch.h"
 #include "warpsortfilter/warpsort_utils.cuh"
 #include "warpsortfilter/warpsort.cuh"

@@ -5,7 +5,9 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <filesystem>
+#include <iomanip>
+#include <sys/stat.h>
+#include <cstring>
 #include "test_config.h"
 // ============================================================================
 // Metrics 收集器 (Metrics Collector)
@@ -308,29 +310,24 @@ public:
      * 导出为 CSV 格式
      */
     void export_csv(const std::string& filename) const {
-        // 首先检查 PROJECT_PATH 是否存在
-        std::filesystem::path project_path(PROJECT_PATH);
-        if (!std::filesystem::exists(project_path)) {
+        // 检查目录是否存在（C++14 兼容方式）
+        struct stat info;
+        if (stat(PROJECT_PATH, &info) != 0) {
             std::cerr << "Error: PROJECT_PATH does not exist: " << PROJECT_PATH << "\n";
             std::cerr << "Cannot export CSV file. Please ensure the project directory exists.\n";
             return;
         }
         
-        if (!std::filesystem::is_directory(project_path)) {
+        if (!(info.st_mode & S_IFDIR)) {
             std::cerr << "Error: PROJECT_PATH is not a directory: " << PROJECT_PATH << "\n";
             return;
         }
         
-        // PROJECT_PATH 存在，现在确保 CSV 输出目录存在
-        std::filesystem::path csv_dir(csv_path_);
-        if (!std::filesystem::exists(csv_dir)) {
-            try {
-                std::filesystem::create_directories(csv_dir);
-            } catch (const std::filesystem::filesystem_error& e) {
-                std::cerr << "Error: Cannot create directory " << csv_path_ 
-                          << ": " << e.what() << "\n";
-                return;
-            }
+        // 确保 CSV 输出目录存在（简化处理：只检查，不创建）
+        // 如果目录不存在，文件写入时会失败，错误信息会更清晰
+        if (stat(csv_path_.c_str(), &info) != 0) {
+            std::cerr << "Warning: CSV output directory does not exist: " << csv_path_ << "\n";
+            std::cerr << "Attempting to create file anyway...\n";
         }
         
         std::string file_path = csv_path_ + filename;

@@ -23,24 +23,6 @@ struct ClusterQueryData {
     int  tol_vector; 
 };
 
-void _check_cuda_last_error(const char *file, int line)
-{
-    // 调用 cudaGetLastError() 来获取最后一个异步错误
-    // 这个函数开销极小，因为它不会同步设备，只是查询一个错误标志
-    // 重要：它会清除当前的错误状态，以便下次检查不会重复报告同一个旧错误
-    cudaError_t err = cudaGetLastError();
-
-    if (cudaSuccess != err) {
-        // 如果检测到错误，打印详细信息，包括错误描述、发生检查的文件和行号
-        fprintf(stderr, "[CUDA Last Error]: %s ---- Location: %s:%d\n",
-                cudaGetErrorString(err), file, line);
-        
-        // 在调试时，立即终止程序是一个好习惯，可以防止程序在错误状态下继续运行导致更多混乱
-        cudaDeviceReset(); // 尝试清理CUDA资源
-        exit(EXIT_FAILURE);
-    }
-}
-
 // /**
 //  * 分配向量组的空间
 //  */

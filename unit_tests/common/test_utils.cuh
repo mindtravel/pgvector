@@ -52,9 +52,6 @@ inline bool check_pass(std::string test_names, bool pass){
     return pass;
 }
 
-void _check_cuda_last_error(const char *file, int line);
-#define CHECK_CUDA_ERRORS _check_cuda_last_error(__FILE__, __LINE__);/*用于捕捉CUDA函数错误信息的宏*/
-
 bool compare_float(float a, float b, float epsilon = 1e-5f);
 bool compare_float_relative(float a, float b, float epsilon = 1e-5f);
 

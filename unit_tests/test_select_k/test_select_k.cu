@@ -1,7 +1,8 @@
 #include "../../cuda/pch.h"
-#include "../common/test_utils.cuh"
 #include "../../cuda/warpsortfilter/warpsort_topk.cu"
+#include "../../cuda/utils.cuh"
 #include "../cpu_utils/cpu_utils.h"
+#include "../common/test_utils.cuh"
 #include <cstdio>
 #include <cstdlib>
 #include <cassert>

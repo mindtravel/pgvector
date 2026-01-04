@@ -10,7 +10,6 @@
 #include <cstring>
 #include <random>
 #include <vector>
-#include <../unit_tests/common/test_utils.cuh>
 
 #define ENABLE_CUDA_TIMING 0 /*是否启用CUDATimer计时*/
 
@@ -43,27 +42,23 @@ void gpu_kmeans_minibatch(
     // ====== buffer ======
     float* d_cnorm2 = nullptr;     // [k]
 
-    // Minibatch缓冲区：xnorm2[M], best_dist2[M], best_idx[M], dot[M*Ktile]
-    const int M = MINIBATCH_SIZE;
-    float* d_xnorm2 = nullptr;
-    float* d_best_dist2 = nullptr;
-    int*   d_best_idx = nullptr;
-    float* d_dot = nullptr;        // [M, Ktile] 但实际存的是col-major [curK, curM]
-    
     // 双缓冲：两个minibatch数据缓冲区交替使用
+    const int M = MINIBATCH_SIZE;
     float* d_minibatch_data[2] = {nullptr, nullptr};  // [M, dim]
     cudaStream_t stream[2];                           // 两个CUDA流用于异步传输
     // 修复：使用两个事件数组，明确语义
     cudaEvent_t evt_h2d_done[2];   // H2D传输完成事件
     cudaEvent_t evt_compute_done[2];  // 计算完成事件
+    
+    // StreamEnv：为每个流分配独立的中间 buffer，避免竞态条件
+    StreamEnv stream_env[2];
 
     // d_centroids 是输入参数，不需要在这里分配
     cudaMalloc(&d_cnorm2,    sizeof(float) * (size_t)k);
 
-    cudaMalloc(&d_xnorm2,    sizeof(float) * (size_t)M);
-    cudaMalloc(&d_best_dist2,sizeof(float) * (size_t)M);
-    cudaMalloc(&d_best_idx,  sizeof(int)   * (size_t)M);
-    cudaMalloc(&d_dot,       sizeof(float) * (size_t)M * (size_t)Ktile);
+    // 为两个流分别分配独立的中间 buffer
+    stream_env[0].allocate(M, Ktile);
+    stream_env[1].allocate(M, Ktile);
     
     // 分配双缓冲minibatch数据缓冲区
     cudaMalloc(&d_minibatch_data[0], sizeof(float) * (size_t)M * dim);
@@ -168,14 +163,17 @@ void gpu_kmeans_minibatch(
         
         {
             CUDATimer timer_minibatch("  Iter " + std::to_string(it) + ": Process Minibatch", ENABLE_CUDA_TIMING);
+            // 使用当前流对应的 StreamEnv buffer，避免竞态条件
+            StreamEnv& cur_env = stream_env[cur_buf];
+            
             // 计算minibatch的xnorm2（在当前流上）
-            compute_l2_squared_gpu(d_data_cur, d_xnorm2, actual_minibatch_size, dim, L2NORM_AUTO, stream[cur_buf]);
+            compute_l2_squared_gpu(d_data_cur, cur_env.d_xnorm2, actual_minibatch_size, dim, L2NORM_AUTO, stream[cur_buf]);
             
             // 初始化best_dist2和best_idx（在当前流上）
             {
                 int threads = 256;
                 int blocks = (actual_minibatch_size + threads - 1) / threads;
-                kernel_init_best<<<blocks, threads, 0, stream[cur_buf]>>>(d_best_dist2, d_best_idx, actual_minibatch_size);
+                kernel_init_best<<<blocks, threads, 0, stream[cur_buf]>>>(cur_env.d_best_dist2, cur_env.d_best_idx, actual_minibatch_size);
             }
             
             // ====== centroid分块处理 ======
@@ -184,7 +182,7 @@ void gpu_kmeans_minibatch(
                 
                 const float* A = d_centroids + (size_t)cbase * dim;
                 const float* Bm = d_data_cur;
-                float* Cc = d_dot;
+                float* Cc = cur_env.d_dot;
                 
                 // 设置cuBLAS流
                 cublas_check(cublasSetStream(handle, stream[cur_buf]), "cublasSetStream");
@@ -209,9 +207,9 @@ void gpu_kmeans_minibatch(
                     int threads = 256;
                     int blocks = (actual_minibatch_size + threads - 1) / threads;
                     kernel_update_best_from_dotT<<<blocks, threads, 0, stream[cur_buf]>>>(
-                        d_dot, d_xnorm2, d_cnorm2,
+                        cur_env.d_dot, cur_env.d_xnorm2, d_cnorm2,
                         actual_minibatch_size, curK, cbase,
-                        d_best_idx, d_best_dist2
+                        cur_env.d_best_idx, cur_env.d_best_dist2
                     );
                 }
             }
@@ -224,7 +222,7 @@ void gpu_kmeans_minibatch(
                 blocks = std::min(blocks, 65535);
                 kernel_accum_from_assign<<<blocks, threads, 0, stream[cur_buf]>>>(
                     d_data_cur, actual_minibatch_size, dim,
-                    d_best_idx, d_minibatch_accum, d_minibatch_counts
+                    cur_env.d_best_idx, d_minibatch_accum, d_minibatch_counts
                 );
             }
         }
@@ -252,7 +250,8 @@ void gpu_kmeans_minibatch(
             cur_buf = next_buf;
         }
     }
-    
+    cudaDeviceSynchronize(); 
+
     // // 迭代结束后，计算所有数据点的objective（用于与CPU结果对比）
     // if (h_objective && d_objective_sum) {
     //     CUDATimer timer_objective("gpu_kmeans_minibatch: Compute Objective (All Data)", ENABLE_CUDA_TIMING);
@@ -341,73 +340,12 @@ void gpu_kmeans_minibatch(
     if (d_assign) {
         CUDATimer timer_final_assign("gpu_kmeans_minibatch: Final Assignment (All Points)", ENABLE_CUDA_TIMING);
         
-        // 计算centroid范数（用于距离计算）
-        compute_l2_squared_gpu(d_centroids, d_cnorm2, k, dim, L2NORM_AUTO, stream[0]);
-        cudaStreamSynchronize(stream[0]);
-        
-        // 分块处理所有数据点，计算最终分配
-        const int B = MINIBATCH_SIZE;  // 使用相同的batch大小
-        for (int base = 0; base < n; base += B) {
-            int curB = std::min(B, n - base);
-            
-            // 传输当前batch数据
-            cudaMemcpyAsync(d_minibatch_data[0], h_data + (size_t)base * dim,
-                           sizeof(float) * (size_t)curB * dim,
-                           cudaMemcpyHostToDevice, stream[0]);
-            
-            // 计算xnorm2
-            compute_l2_squared_gpu(d_minibatch_data[0], d_xnorm2, curB, dim, L2NORM_AUTO, stream[0]);
-            
-            // 初始化best
-            {
-                int threads = 256;
-                int blocks = (curB + threads - 1) / threads;
-                kernel_init_best<<<blocks, threads, 0, stream[0]>>>(d_best_dist2, d_best_idx, curB);
-            }
-            
-            // 计算到所有centroid的距离（分块处理centroids）
-            for (int cbase = 0; cbase < k; cbase += Ktile) {
-                int curK = std::min(Ktile, k - cbase);
-                
-                const float* A = d_centroids + (size_t)cbase * dim;
-                const float* Bm = d_minibatch_data[0];
-                float* Cc = d_dot;
-                
-                cublas_check(cublasSetStream(handle, stream[0]), "cublasSetStream");
-                
-                cublas_check(
-                    cublasSgemm(
-                        handle,
-                        CUBLAS_OP_T, CUBLAS_OP_N,
-                        curK, curB, dim,
-                        &alpha,
-                        A, dim,
-                        Bm, dim,
-                        &beta,
-                        Cc, curK
-                    ),
-                    "cublasSgemm"
-                );
-                
-                // 更新best
-                {
-                    int threads = 256;
-                    int blocks = (curB + threads - 1) / threads;
-                    kernel_update_best_from_dotT<<<blocks, threads, 0, stream[0]>>>(
-                        d_dot, d_xnorm2, d_cnorm2,
-                        curB, curK, cbase,
-                        d_best_idx, d_best_dist2
-                    );
-                }
-            }
-            
-            // 写回assign（所有点的最终分配）
-            cudaMemcpyAsync(d_assign + base, d_best_idx, sizeof(int) * (size_t)curB, 
-                           cudaMemcpyDeviceToDevice, stream[0]);
-        }
-        
-        // 等待所有分配计算完成
-        cudaStreamSynchronize(stream[0]);
+        // 使用 stream_env[0] 执行最终的 assignment
+        // 复用 d_minibatch_data[0] 作为数据缓冲区，避免循环内分配/释放显存
+        perform_assignment_only(
+            cfg, h_data, d_assign, d_centroids, d_cnorm2,
+            stream_env[0], d_minibatch_data[0], stream[0], handle, MINIBATCH_SIZE, Ktile, n, dim, k
+        );
     }
 
     cublasDestroy(handle);
@@ -426,15 +364,15 @@ void gpu_kmeans_minibatch(
         cudaFree(d_objective_sum);
     }
 
+    // 释放 StreamEnv buffer
+    stream_env[0].free();
+    stream_env[1].free();
+    
     // d_centroids 是输入参数，不需要在这里释放
     cudaFree(d_cnorm2);
     cudaFree(d_minibatch_accum);
     cudaFree(d_minibatch_counts);
     cudaFree(d_total_counts);
-    cudaFree(d_xnorm2);
-    cudaFree(d_best_dist2);
-    cudaFree(d_best_idx);
-    cudaFree(d_dot);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

@@ -4,7 +4,7 @@
 #include "../fusion_dist_topk/fusion_dist_topk.cuh"
 #include "../fine_screen_top_n/fine_screen_top_n.cuh"
 #include "../cudatimer.h"
-#include "../../unit_tests/common/test_utils.cuh"
+#include "../utils.cuh"
 
 #include <algorithm>
 #include <cstring>
@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
-void batch_search_pipeline(float** query_batch,
+void ivf_search_pipeline(float** query_batch,
                            int* cluster_size,
                            float*** cluster_data,
                            float** cluster_center_data,
@@ -40,7 +40,7 @@ void batch_search_pipeline(float** query_batch,
                            int n_blocks) {
 
     if (n_query <= 0 || n_dim <= 0 || n_total_cluster <= 0 || k <= 0) {
-        throw std::invalid_argument("invalid batch_search_pipeline configuration");
+        throw std::invalid_argument("invalid ivf_search_pipeline configuration");
     }
     if (!cluster_size || !cluster_data) {
         throw std::invalid_argument("cluster metadata is null");

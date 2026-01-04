@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <vector>
 #include "../../cuda/warpsortfilter/bitonic.cuh"
+#include "../../cuda/utils.cuh"
 // #include "../../cuda/warpsort_utils.cuh"
 #define EPSILON 1e-5f
 
