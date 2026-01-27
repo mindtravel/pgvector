@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /home/diy/lzx/pgvector
+cd /home/diy/lzx/ivftensor
 source /home/diy/miniconda3/etc/profile.d/conda.sh
 conda activate ann-benchmarks
 # rm -rf build python/build

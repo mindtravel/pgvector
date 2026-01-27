@@ -14,7 +14,7 @@ Python 绑定用于将 CUDA 实现的 IVF-Flat 搜索功能暴露给 Python。
 ### 构建步骤
 
 ```bash
-cd /home/diy/lzx/pgvector
+cd /home/diy/lzx/ivftensor
 mkdir -p build
 cd build
 cmake ..
@@ -32,7 +32,7 @@ make ivf_search_shared  # 构建共享库（供 ctypes 使用）
 
 ```python
 import sys
-sys.path.insert(0, '/home/diy/lzx/pgvector/python/build')
+sys.path.insert(0, '/home/diy/lzx/ivftensor/python/build')
 import IVFTensor
 import numpy as np
 
@@ -77,7 +77,7 @@ import ctypes
 import numpy as np
 
 # 加载共享库
-lib = ctypes.CDLL('/home/diy/lzx/pgvector/build/libivf_search.so')
+lib = ctypes.CDLL('/home/diy/lzx/ivftensor/build/libivf_search.so')
 
 # 定义函数签名
 lib.batch_search_pipeline_wrapper.argtypes = [
@@ -106,8 +106,8 @@ lib.batch_search_pipeline_wrapper.argtypes = [
 Python 模块会自动被 `ann-benchmarks/ann_benchmarks/algorithms/ivf_tensor/module.py` 加载。
 
 确保构建的 `.so` 文件在以下路径之一：
-- `/home/diy/lzx/pgvector/python/build/IVFTensor.so`
-- `/home/diy/lzx/pgvector/build/libivf_search.so`
+- `/home/diy/lzx/ivftensor/python/build/IVFTensor.so`
+- `/home/diy/lzx/ivftensor/build/libivf_search.so`
 - 当前工作目录
 
 ## 文件说明
