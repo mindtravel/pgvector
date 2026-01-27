@@ -4,7 +4,7 @@ set(CMAKE_C_COMPILER "/usr/bin/gcc-10")
 set(CMAKE_CXX_COMPILER "/usr/bin/g++-10")
 set(CMAKE_CUDA_HOST_COMPILER "/usr/bin/g++-10")
 
-project(ivftensor_unit_tests LANGUAGES CXX CUDA)
+project(pgvector_unit_tests LANGUAGES CXX CUDA)
 add_definitions(-D_GLIBCXX_USE_CXX11_ABI=1)
 
 # 设置CUDA标准
@@ -175,9 +175,9 @@ target_link_libraries(fusion_dist_topk_warpsort_lib
     cublas
 )
 
-# 创建共享的ivf_search库（供ivftensor主项目和测试使用）
+# 创建共享的ivf_search库（供pgvector主项目和测试使用）
 # 被以下使用：
-#   - ivftensor主项目（ivfscanbatch.c 调用 batch_search_pipeline）
+#   - pgvector主项目（ivfscanbatch.c 调用 batch_search_pipeline）
 #   - test_ivfflat_search (测试ivf_search.cu，基础测试，数据集常驻显存)
 # 
 # 包含的文件：

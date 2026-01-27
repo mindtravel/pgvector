@@ -1,0 +1,113 @@
+# ==========================================
+# 优化版 Makefile (直接链接 Object，跳过静态库)
+# ==========================================
+
+EXTENSION = vector
+EXTVERSION = 0.8.0
+MODULE_big = vector
+
+# ------------------------------------------
+# 1. 源文件定义
+# ------------------------------------------
+
+# [Postgres C] 核心逻辑
+SRCS_C = $(wildcard src/*.c)
+OBJS = $(SRCS_C:.c=.o)
+
+# [CUDA] 源文件列表
+OBJS_CUDA_LIST = \
+	cuda/cuda_wrapper.o \
+	cuda/indexed_gemm/indexed_gemm_cos.o \
+	cuda/indexed_gemm/indexed_gemm_l2.o \
+	cuda/fusion_dist_topk/fusion_cos_topk_warpsort.o \
+	cuda/fusion_dist_topk/fusion_l2_topk_warpsort.o \
+	cuda/l2norm/l2norm.o \
+	cuda/utils.o \
+	unit_tests/common/test_utils.o \
+	cuda/ivf_search/ivf_search_separated.o \
+	cuda/ivf_search/ivf_search.o \
+	cuda/ivf_search/ivf_search_wrapper.o
+
+# ------------------------------------------
+# 2. CUDA 环境配置
+# ------------------------------------------
+CUDA_PATH ?= /usr/local/cuda
+NVCC := $(CUDA_PATH)/bin/nvcc
+CUDA_INC = -I$(CUDA_PATH)/include
+CUDA_LIB = -L$(CUDA_PATH)/lib64 -lcudart -lcublas
+
+# NVCC 编译参数
+NVCC_FLAGS = -c -arch=sm_70 -std=c++17 -O3 \
+             --threads 0 \
+             --use_fast_math --expt-relaxed-constexpr \
+             -Xcompiler -fPIC \
+             -DUSE_CUDA \
+             $(CUDA_INC) \
+             -I./cuda -I./unit_tests/common
+
+# ------------------------------------------
+# 3. Postgres 编译标志
+# ------------------------------------------
+
+# 【关键修改 1】: 直接将 .o 文件加入链接列表，而不是链接 .a 库
+SHLIB_LINK += $(OBJS_CUDA_LIST) $(CUDA_LIB) -lstdc++
+
+OPTFLAGS = -march=native
+ifeq ($(shell uname -s), Darwin)
+	ifeq ($(shell uname -p), arm)
+		OPTFLAGS =
+	endif
+endif
+ifneq ($(filter ppc64%, $(shell uname -m)), )
+	OPTFLAGS =
+endif
+
+PG_CFLAGS += $(OPTFLAGS) -ftree-vectorize -fassociative-math -fno-signed-zeros -fno-trapping-math -DUSE_CUDA
+PG_CPPFLAGS += -DUSE_CUDA
+
+# ------------------------------------------
+# 4. 加载 PGXS
+# ------------------------------------------
+PG_CONFIG ?= pg_config
+PGXS := $(shell $(PG_CONFIG) --pgxs)
+include $(PGXS)
+
+# ==========================================
+# 5. 关键依赖顺序
+# ==========================================
+
+# 【关键修改 2】: 告诉 Make，在链接 .so 之前，必须先确保所有的 CUDA .o 都已生成
+# 只要 .o 文件存在且比源文件新，Make 就不会重新编译它们，也不会执行多余的打包操作
+$(EXTENSION).so: $(OBJS_CUDA_LIST)
+
+# ------------------------------------------
+# 6. CUDA 构建规则
+# ------------------------------------------
+
+# 删除了 .a 的打包规则，只保留 .o 的生成规则
+
+# .cu 编译规则
+cuda/%.o: cuda/%.cu
+	@mkdir -p $(dir $@)
+	@echo "  [NVCC]  $<"
+	$(NVCC) $(NVCC_FLAGS) $< -o $@
+
+unit_tests/common/%.o: unit_tests/common/%.cu
+	@mkdir -p $(dir $@)
+	@echo "  [NVCC]  $<"
+	$(NVCC) $(NVCC_FLAGS) $< -o $@
+
+# C++ Wrapper 编译规则
+cuda/%.o: cuda/%.cpp
+	@mkdir -p $(dir $@)
+	@echo "  [CXX]   $<"
+	$(CXX) -c $< -o $@ $(CUDA_INC) -DUSE_CUDA -I./cuda -std=c++17 -fPIC
+
+# ------------------------------------------
+# 7. 清理规则
+# ------------------------------------------
+clean: clean_cuda
+
+clean_cuda:
+	rm -f $(OBJS_CUDA_LIST)
+    # 不再需要删除 .a 文件

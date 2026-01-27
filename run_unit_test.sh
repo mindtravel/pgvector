@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== ivftensor 单元测试构建脚本 ==="
+echo "=== PGVector 单元测试构建脚本 ==="
 
 if [ ! -f "CMakeLists.txt" ]; then
   echo "错误: 请在unit_tests目录下运行此脚本"
@@ -9,7 +9,7 @@ if [ ! -f "CMakeLists.txt" ]; then
 fi
 
 echo "清理并创建构建目录..."
-rm -rf build
+# rm -rf build
 mkdir -p build
 
 echo "配置CMake..."
